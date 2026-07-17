@@ -470,7 +470,7 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ onUpdateComplete }) => {
               color: '#34C759',
               marginBottom: '8px',
             }}>
-              Please close and reopen PSLoader to apply the update
+              Please close and reopen Kairos to apply the update
             </div>
             {updateInfo?.version && (
               <div style={{
@@ -512,7 +512,7 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ onUpdateComplete }) => {
               color: '#FF9500',
               marginBottom: '8px',
             }}>
-              Please close and reopen PSLoader to apply the update
+              Please close and reopen Kairos to apply the update
             </div>
             {updateInfo?.version && (
               <div style={{

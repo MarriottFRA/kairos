@@ -1,4 +1,14 @@
 import React from "react";
+// Bundled fonts for the welcome scene (offline — no Google Fonts dependency):
+// Inter 400–800 and IBM Plex Mono 400–600, matching the original design.
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/inter/800.css";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
+import "@fontsource/ibm-plex-mono/600.css";
 // Import specific functions and components
 import { LicenseInfo } from "@mui/x-license";
 import { StrictMode } from "react";
@@ -13,29 +23,11 @@ import SessionGate from "./routes/sessionGate";
 import Register from "./routes/register";
 import Login from "./routes/login";
 import DeviceVerify from "./routes/device-verify";
-import DataTable from "./routes/nestedPages/dataTable";
-import StagingDataReview from "./routes/nestedPages/stagingDataReview";
 import SignedInLanding from "./routes/signedinLanding";
-import Report from "./routes/nestedPages/report";
-import CreateNew from "./routes/nestedPages/createNew";
-import COA from "./routes/nestedPages/coa";
-import DataImport from "./routes/nestedPages/dataImport";
-import Validations from "./routes/nestedPages/validations";
-import MappingReview from "./routes/nestedPages/mappingReview";
 import Profile from "./routes/nestedPages/profile";
 import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
-import SignOffUpload from "./routes/nestedPages/signOffUpload";
-import BstImport from "./routes/nestedPages/bstImport";
-import SummaryPL from "./routes/nestedPages/summaryPL";
-import F90PL from "./routes/nestedPages/f90PL";
-import RoomSegmentReview from "./routes/nestedPages/roomSegmentReview";
-import ExcelExport from "./routes/nestedPages/excelExport";
-import ProteaReportPack from "./routes/nestedPages/proteaReportPack";
-import ProteaBudgetPack from "./routes/nestedPages/proteaBudgetPack";
-import BSTExtract from "./routes/nestedPages/bstExtract";
-import ProteaF90PL from "./routes/nestedPages/proteaF90PL";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // define the route
@@ -69,96 +61,6 @@ const router = createHashRouter([
         path: "home",
         element: <Home />,
         handle: { title: "Home" },
-      },
-      {
-        path: "data-import",
-        element: <DataImport />,
-        handle: { title: "Data Import" },
-      },
-      {
-        path: "validations",
-        element: <Validations />,
-        handle: { title: "Validations" },
-      },
-      {
-        path: "staging-review",
-        element: <StagingDataReview />,
-        handle: { title: "Staging Data Review" },
-      },
-      {
-        path: "room-segment-review",
-        element: <RoomSegmentReview />,
-        handle: { title: "Room Seg. Review" },
-      },
-      {
-        path: "sign-off-upload",
-        element: <SignOffUpload />,
-        handle: { title: "Sign-Off & Upload" },
-      },
-      {
-        path: "bst-import",
-        element: <BstImport />,
-        handle: { title: "BST Import" },
-      },
-      {
-        path: "report",
-        element: <Report />,
-        handle: { title: "Report" },
-      },
-      {
-        path: "data-table",
-        element: <DataTable />,
-        handle: { title: "Upload Review" },
-      },
-      {
-        path: "summary-pl",
-        element: <SummaryPL />,
-        handle: { title: "Summary P&L" },
-      },
-      {
-        path: "f90-pl",
-        element: <F90PL />,
-        handle: { title: "F90 P&L" },
-      },
-      {
-        path: "excel-export",
-        element: <ExcelExport />,
-        handle: { title: "Marriott Excel Report Pack" },
-      },
-      {
-        path: "protea-f90-pl",
-        element: <ProteaF90PL />,
-        handle: { title: "Protea F90 P&L" },
-      },
-      {
-        path: "protea-report-pack",
-        element: <ProteaReportPack />,
-        handle: { title: "Protea Report Pack" },
-      },
-      {
-        path: "protea-budget-pack",
-        element: <ProteaBudgetPack />,
-        handle: { title: "Protea Budget Pack" },
-      },
-      {
-        path: "protea-bst-extract",
-        element: <BSTExtract />,
-        handle: { title: "BST Extract" },
-      },
-      {
-        path: "coa",
-        element: <COA />,
-        handle: { title: "COA" },
-      },
-      {
-        path: "mapping-review",
-        element: <MappingReview />,
-        handle: { title: "Mapping Review" },
-      },
-      {
-        path: "create-new",
-        element: <CreateNew />,
-        handle: { title: "Create New" },
       },
       {
         path: "profile",

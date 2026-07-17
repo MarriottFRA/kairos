@@ -16,7 +16,6 @@ import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ArrowDropDownIcon from "@mui/icons-material/ArrowDropDown";
 import CheckIcon from "@mui/icons-material/Check";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import ListItem from "@mui/material/ListItem";
 import ListItemButton from "@mui/material/ListItemButton";
@@ -24,10 +23,8 @@ import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import Toolbar from "@mui/material/Toolbar";
 import Box from "@mui/material/Box";
-import GridOnIcon from "@mui/icons-material/GridOn";
 import HomeIcon from "@mui/icons-material/Home";
 import ApartmentIcon from "@mui/icons-material/Apartment";
-import AccountCircle from "@mui/icons-material/AccountCircle";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import LogoutIcon from "@mui/icons-material/Logout";
@@ -37,24 +34,11 @@ import PersonIcon from "@mui/icons-material/Person";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import Tooltip from "@mui/material/Tooltip";
 import { alpha } from "@mui/material/styles";
-import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Chip from "@mui/material/Chip";
-import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
-import FileUploadIcon from "@mui/icons-material/FileUpload";
-import TableRowsIcon from "@mui/icons-material/TableRows";
-import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
-import AssessmentIcon from "@mui/icons-material/Assessment";
-import DescriptionIcon from "@mui/icons-material/Description";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-import MeetingRoomIcon from "@mui/icons-material/MeetingRoom";
-import FileDownloadIcon from "@mui/icons-material/FileDownload";
-import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
 import ThemeToggle from "./customComponents/themeToggle";
 import { useSettingsStore } from "../store/settings";
 import authService, { Hotel } from "../services/auth";
-import mappingTablesService from "../services/mappingTablesService";
-import dailyFinancialSyncService from "../services/dailyFinancialSyncService";
 
 // window.ipcApi / window.authApi are typed globally (src/renderer.ts,
 // src/services/auth.ts) — no local augmentation needed here.
@@ -198,7 +182,7 @@ export default function SignedInLanding() {
   const matches = useMatches();
   const pageTitle = React.useMemo(() => {
     const withTitles = [...matches].reverse().find((m: any) => m.handle && (m.handle as any).title);
-    return (withTitles?.handle as any)?.title ?? "Planning Tool";
+    return (withTitles?.handle as any)?.title ?? "Kairos";
   }, [matches]);
 
 
@@ -282,118 +266,35 @@ const handleSignOut = useCallback(async () => {
     fetchCurrentUser();
   }, []);
 
-  // Load hotels and find current hotel name
+  // Load hotels (live read) and resolve the current hotel name
   useEffect(() => {
     const loadHotels = async () => {
       try {
-        // First, try to get hotels from cache
-        if (window.ipcApi) {
-          const cachedHotelsResponse = await window.ipcApi.sendIpcRequest("db:get-cached-hotels");
-          let hotelList: Hotel[] = [];
+        const hotelList = await authService.getHotels();
+        setHotels(hotelList);
 
-          if (cachedHotelsResponse?.data) {
-            const cachedHotels = JSON.parse(cachedHotelsResponse.data);
-
-            if (cachedHotels && cachedHotels.length > 0) {
-              // Use cached data
-              hotelList = cachedHotels;
-            } else {
-              // Cache is empty, fetch from API
-              hotelList = await authService.getHotels();
-
-              // Cache the fetched data
-              await window.ipcApi.sendIpcRequest("db:cache-hotels", hotelList);
-            }
-          } else {
-            // No IPC or cache failed, fetch from API
-            hotelList = await authService.getHotels();
-          }
-
-          setHotels(hotelList);
-
-          // Find the current hotel name based on selected OU
-          if (selectedHotelOu) {
-            const currentHotel = hotelList.find(h => h.ou === selectedHotelOu);
-            if (currentHotel) {
-              setCurrentHotelName(currentHotel.hotel_name);
-            } else if (hotelList.length > 0) {
-              // If saved hotel not found but we have hotels, select the first one
-              const firstHotel = hotelList[0];
-              await setSelectedHotelOu(firstHotel.ou);
-              setCurrentHotelName(firstHotel.hotel_name);
-            }
+        if (selectedHotelOu) {
+          const currentHotel = hotelList.find(h => h.ou === selectedHotelOu);
+          if (currentHotel) {
+            setCurrentHotelName(currentHotel.hotel_name);
           } else if (hotelList.length > 0) {
-            // No hotel selected yet, auto-select the first one
+            // Saved hotel not found — fall back to the first available one
             const firstHotel = hotelList[0];
             await setSelectedHotelOu(firstHotel.ou);
             setCurrentHotelName(firstHotel.hotel_name);
           }
-        } else {
-          // Fallback to direct API call if IPC is not available
-          const hotelList = await authService.getHotels();
-          setHotels(hotelList);
-
-          if (selectedHotelOu) {
-            const currentHotel = hotelList.find(h => h.ou === selectedHotelOu);
-            if (currentHotel) {
-              setCurrentHotelName(currentHotel.hotel_name);
-            } else if (hotelList.length > 0) {
-              // If saved hotel not found but we have hotels, select the first one
-              const firstHotel = hotelList[0];
-              await setSelectedHotelOu(firstHotel.ou);
-              setCurrentHotelName(firstHotel.hotel_name);
-            }
-          } else if (hotelList.length > 0) {
-            // No hotel selected yet, auto-select the first one
-            const firstHotel = hotelList[0];
-            await setSelectedHotelOu(firstHotel.ou);
-            setCurrentHotelName(firstHotel.hotel_name);
-          }
+        } else if (hotelList.length > 0) {
+          // No hotel selected yet — auto-select the first one
+          const firstHotel = hotelList[0];
+          await setSelectedHotelOu(firstHotel.ou);
+          setCurrentHotelName(firstHotel.hotel_name);
         }
       } catch (error) {
         console.error("Failed to load hotels:", error);
-        // On error, try to fall back to API
-        try {
-          const hotelList = await authService.getHotels();
-          setHotels(hotelList);
-        } catch (apiError) {
-          console.error("Failed to load hotels from API:", apiError);
-        }
       }
     };
 
     loadHotels();
-  }, [selectedHotelOu]);
-
-  // Sync mapping tables on login (run once after component mounts)
-  useEffect(() => {
-    const syncMappingTablesOnStartup = async () => {
-      try {
-        await mappingTablesService.syncMappingTables();
-      } catch (error) {
-        // Log error but don't block the app
-        // console.warn("Failed to sync mapping tables on startup:", error);
-        // User can manually sync from settings if needed
-      }
-    };
-
-    syncMappingTablesOnStartup();
-  }, []); // Run only once on mount
-
-  // Sync financial data on login (fire-and-forget, once per OU per day)
-  useEffect(() => {
-    if (!selectedHotelOu) return;
-
-    const syncFinancialDataOnStartup = async () => {
-      try {
-        await dailyFinancialSyncService.performDailyCheck(selectedHotelOu);
-      } catch (error) {
-        // Silent fail - don't block the app
-        console.warn("Failed to sync financial data on startup:", error);
-      }
-    };
-
-    syncFinancialDataOnStartup();
   }, [selectedHotelOu]);
 
   const userEmail = user?.email || '';
@@ -728,246 +629,6 @@ const handleSignOut = useCallback(async () => {
               <ListItemText primary="Home" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
-
-          {/* Actuals Import Section */}
-          <Divider sx={{ my: 1 }} />
-          {open && (
-            <ListItem disablePadding sx={{ display: "block" }}>
-              <ListItemText
-                primary="ACTUALS IMPORT"
-                sx={{
-                  px: 2.5,
-                  py: 1,
-                  color: 'text.secondary',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                }}
-              />
-            </ListItem>
-          )}
-
-          <ListItem key="DataImport" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/data-import")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <FileUploadIcon />
-              </ListItemIcon>
-              <ListItemText primary="Data Import" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="Validations" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/validations")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <CheckCircleIcon />
-              </ListItemIcon>
-              <ListItemText primary="Validations" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="SignOffUpload" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/sign-off-upload")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <CloudUploadIcon />
-              </ListItemIcon>
-              <ListItemText primary="Sign-Off & Upload" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          {/* Planning Upload Section */}
-          <Divider sx={{ my: 1 }} />
-          {open && (
-            <ListItem disablePadding sx={{ display: "block" }}>
-              <ListItemText
-                primary="PLANNING UPLOAD"
-                sx={{
-                  px: 2.5,
-                  py: 1,
-                  color: 'text.secondary',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                }}
-              />
-            </ListItem>
-          )}
-
-          <ListItem key="BstImport" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/bst-import")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <CalendarMonthIcon />
-              </ListItemIcon>
-              <ListItemText primary="BST Import" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          {/* Reports Section */}
-          <Divider sx={{ my: 1 }} />
-          {open && (
-            <ListItem disablePadding sx={{ display: "block" }}>
-              <ListItemText
-                primary="REPORTS"
-                sx={{
-                  px: 2.5,
-                  py: 1,
-                  color: 'text.secondary',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                }}
-              />
-            </ListItem>
-          )}
-
-          <ListItem key="staging_review" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/staging-review")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <TableRowsIcon />
-              </ListItemIcon>
-              <ListItemText primary="Staging Review" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="RoomSegReview" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/room-segment-review")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <MeetingRoomIcon />
-              </ListItemIcon>
-              <ListItemText primary="Room Seg. Review" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="navigate" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/report")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <AssessmentIcon />
-              </ListItemIcon>
-              <ListItemText primary="Report" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="data_table" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/data-table")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <GridOnIcon />
-              </ListItemIcon>
-              <ListItemText primary="Upload Review" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="summary-pl" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/summary-pl")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <AssessmentIcon />
-              </ListItemIcon>
-              <ListItemText primary="Summary P&L" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="f90-pl" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/f90-pl")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <DescriptionIcon />
-              </ListItemIcon>
-              <ListItemText primary="F90 P&L" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="excel-export" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/excel-export")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <FileDownloadIcon />
-              </ListItemIcon>
-              <ListItemText primary="Marriott Report Pack" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="protea-bst-extract" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/protea-bst-extract")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <FileDownloadIcon />
-              </ListItemIcon>
-              <ListItemText primary="BST Extract" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          {/* Protea sub-section */}
-          {open && (
-            <ListItem disablePadding sx={{ display: "block" }}>
-              <ListItemText
-                primary="PROTEA"
-                sx={{
-                  px: 2.5,
-                  pt: 1,
-                  pb: 0,
-                  color: 'text.disabled',
-                  fontSize: '0.65rem',
-                  fontWeight: 600,
-                  letterSpacing: '0.08em',
-                }}
-              />
-            </ListItem>
-          )}
-
-          <ListItem key="protea-f90-pl" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={{ ...listItemButtonStyle, pl: open ? 4 : listItemButtonStyle.pl }} onClick={() => navigate("/signed-in-landing/protea-f90-pl")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <DescriptionIcon sx={{ fontSize: '1.1rem', opacity: 0.7 }} />
-              </ListItemIcon>
-              <ListItemText primary="F90 P&L" primaryTypographyProps={{ fontSize: '0.8rem', color: 'text.secondary' }} sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="protea-report-pack" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={{ ...listItemButtonStyle, pl: open ? 4 : listItemButtonStyle.pl }} onClick={() => navigate("/signed-in-landing/protea-report-pack")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <DescriptionIcon sx={{ fontSize: '1.1rem', opacity: 0.7 }} />
-              </ListItemIcon>
-              <ListItemText primary="Report Pack" primaryTypographyProps={{ fontSize: '0.8rem', color: 'text.secondary' }} sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="protea-budget-pack" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={{ ...listItemButtonStyle, pl: open ? 4 : listItemButtonStyle.pl }} onClick={() => navigate("/signed-in-landing/protea-budget-pack")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <DescriptionIcon sx={{ fontSize: '1.1rem', opacity: 0.7 }} />
-              </ListItemIcon>
-              <ListItemText primary="Budget Pack" primaryTypographyProps={{ fontSize: '0.8rem', color: 'text.secondary' }} sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          {/* Tools Section */}
-          <Divider sx={{ my: 1 }} />
-          {open && (
-            <ListItem disablePadding sx={{ display: "block" }}>
-              <ListItemText
-                primary="TOOLS"
-                sx={{
-                  px: 2.5,
-                  py: 1,
-                  color: 'text.secondary',
-                  fontSize: '0.75rem',
-                  fontWeight: 600,
-                }}
-              />
-            </ListItem>
-          )}
-
-          <ListItem key="COA" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/coa")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <AccountBalanceIcon />
-              </ListItemIcon>
-              <ListItemText primary="COA" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
-          <ListItem key="MappingReview" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/mapping-review")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <TableRowsIcon />
-              </ListItemIcon>
-              <ListItemText primary="Mapping Review" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-
         </List>
       </Drawer>
       <Box component="main" sx={{ flexGrow: 1, p: 2 }}>

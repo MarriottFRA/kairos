@@ -306,12 +306,14 @@ export class AuthController {
     };
 
     const deviceInfo = {
-      device_name: `${userEmail} | ${hostname} | ${username} | ${osVersion}`,
+      // Prefix with the app name so admins can tell Kairos device registrations
+      // apart from other tools that authenticate against the same backend.
+      device_name: `Kairos | ${userEmail} | ${hostname} | ${username} | ${osVersion}`,
       os_version: osVersion,
       hostname,
-      user_agent: `PSLoader/${app.getVersion()} Electron/${process.versions.electron}`,
+      user_agent: `Kairos/${app.getVersion()} Electron/${process.versions.electron}`,
       username,
-      details: `${userEmail}, ${hostname}, ${username}, Salt:${permanentSalt.substring(0, 8)}...`,
+      details: `Kairos, ${userEmail}, ${hostname}, ${username}, Salt:${permanentSalt.substring(0, 8)}...`,
     };
 
     const response = await this.deps.apiClient.fetchOnce("/devices/register", {

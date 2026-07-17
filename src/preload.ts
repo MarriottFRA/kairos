@@ -10,32 +10,14 @@ import { contextBridge, ipcRenderer } from "electron";
 // ────────────────────────────────────────────────────────────
 const ALLOWED_CHANNEL_PREFIXES = [
   "data:fetch",
-  "db:",
   "settings-",
   "settings:",
-  "hardware:",
-  "validation:",
-  "dataImport:",
-  "imports:",
-  "excel:",
-  "template:",
-  "protea:",
   "app:",
   "window:",
 ] as const;
 
 // Legacy channel names still used by some renderer call sites → canonical names.
-const LEGACY_CHANNEL_MAP: Record<string, string> = {
-  Get12periods: "db:get-periods",
-  Update12periods: "db:update-periods",
-  "db-get-all-accounts": "db:get-accounts",
-  "db-create-account": "db:create-account",
-  "db-get-all-departments": "db:get-departments",
-  "db-create-department": "db:create-department",
-  "db-get-all-combo-metadata": "db:get-combo-metadata",
-  "db-create-combo": "db:create-combo",
-  GenerateDummyData: "db:generate-dummy-data",
-};
+const LEGACY_CHANNEL_MAP: Record<string, string> = {};
 
 function resolveChannel(request: string): string {
   const channel = LEGACY_CHANNEL_MAP[request] || request;

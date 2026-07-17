@@ -1,8 +1,8 @@
 {
-  "name": "ps_loader",
-  "productName": "PS Loader 2.0",
-  "version": "2.1.0",
-  "description": "PS Loader - A comprehensive planning and scheduling application",
+  "name": "kairos",
+  "productName": "Kairos",
+  "version": "0.0.1",
+  "description": "Kairos - Marriott EMEA FRA desktop application",
   "main": ".vite/build/main.js",
   "scripts": {
     "postinstall": "node ./scripts/fix-winstaller-7z.js",
@@ -40,12 +40,14 @@
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rporins/PSLoader2.0"
+    "url": "https://github.com/MarriottFRA/kairos"
   },
   "dependencies": {
     "@emotion/react": "^11.13.3",
     "@emotion/styled": "^11.13.0",
     "@faker-js/faker": "^9.0.2",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/inter": "^5.2.8",
     "@fontsource/roboto": "^5.0.15",
     "@libsql/client": "^0.14.0",
     "@mui/icons-material": "^6.1.3",

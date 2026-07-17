@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createDataHandlers, createDatabaseHandlers, createHardwareHandlers, createDataImportHandlers, createSettingsHandlers, createImportsHandlers, createValidationHandlers, createAppHandlers, createExcelExportHandlers, createTemplateExportHandlers, createProteaReportPackHandlers, createProteaBudgetPackHandlers, createBSTExtractHandlers, createWindowHandlers } from "./handlers";
+import { createAuthHandlers, createDataHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -53,75 +53,15 @@ export function initializeIpc(deps: {
     ipcRegistry.register(channel, handler);
   });
 
-  // Register database handlers
-  const dbHandlers = createDatabaseHandlers();
-  Object.entries(dbHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register hardware handlers
-  const hardwareHandlers = createHardwareHandlers();
-  Object.entries(hardwareHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Data Import handlers
-  const dataImportHandlers = createDataImportHandlers();
-  Object.entries(dataImportHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
   // Register Settings handlers
   const settingsHandlers = createSettingsHandlers();
   Object.entries(settingsHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
   });
 
-  // Register Imports handlers
-  const importsHandlers = createImportsHandlers();
-  Object.entries(importsHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Validation handlers
-  const validationHandlers = createValidationHandlers();
-  Object.entries(validationHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
   // Register App handlers
   const appHandlers = createAppHandlers();
   Object.entries(appHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Excel Export handlers
-  const excelExportHandlers = createExcelExportHandlers();
-  Object.entries(excelExportHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Template Export handlers
-  const templateExportHandlers = createTemplateExportHandlers();
-  Object.entries(templateExportHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Protea Report Pack handlers
-  const proteaReportPackHandlers = createProteaReportPackHandlers();
-  Object.entries(proteaReportPackHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register Protea Budget Pack handlers
-  const proteaBudgetPackHandlers = createProteaBudgetPackHandlers();
-  Object.entries(proteaBudgetPackHandlers).forEach(([channel, handler]) => {
-    ipcRegistry.register(channel, handler);
-  });
-
-  // Register BST Extract handlers
-  const bstExtractHandlers = createBSTExtractHandlers();
-  Object.entries(bstExtractHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
   });
 

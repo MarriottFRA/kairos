@@ -38,31 +38,8 @@ interface DataFetchResponse {
  * renderer services under src/services/.
  */
 const ALLOWLIST: ReadonlyArray<{ method: string; pattern: RegExp }> = [
-  // Hotels + import groups
+  // Hotels (hotel switcher in the signed-in shell)
   { method: "GET", pattern: /^\/hotels\/$/ },
-  { method: "GET", pattern: /^\/hotels\/[^/]+\/import_groups$/ },
-  // Financial (actuals/budget/forecast) data
-  { method: "GET", pattern: /^\/act-bud-fcst-data\/$/ },
-  { method: "GET", pattern: /^\/act-bud-fcst-data\/versions\/$/ },
-  { method: "POST", pattern: /^\/act-bud-fcst-data\/owner-budget$/ },
-  // Submitted data
-  { method: "POST", pattern: /^\/submitted-data\/bulk$/ },
-  // Mapping configs + mappings
-  { method: "GET", pattern: /^\/mappings\/configs\/[^/]+$/ },
-  { method: "PATCH", pattern: /^\/mappings\/configs\/[^/]+$/ },
-  { method: "GET", pattern: /^\/mappings\/configs\/[^/]+\/mappings$/ },
-  { method: "POST", pattern: /^\/mappings\/configs\/[^/]+\/mappings$/ },
-  { method: "GET", pattern: /^\/mappings\/mappings\/pending$/ },
-  { method: "POST", pattern: /^\/mappings\/mappings\/[^/]+\/approve$/ },
-  // Mapping tables (account/department maps + combos)
-  { method: "GET", pattern: /^\/mapping-tables\/(version|data|combos)$/ },
-  // Validations + overrides
-  { method: "GET", pattern: /^\/validations\/ou\/[^/]+$/ },
-  { method: "POST", pattern: /^\/validation-override\/request$/ },
-  { method: "GET", pattern: /^\/validation-override\/status\/.+$/ },
-  // Upload periods + submission windows
-  { method: "GET", pattern: /^\/upload-periods\/$/ },
-  { method: "GET", pattern: /^\/submission-windows\/$/ },
   // User context
   { method: "GET", pattern: /^\/users\/ou-access\/my-access$/ },
   { method: "GET", pattern: /^\/auth\/me$/ },

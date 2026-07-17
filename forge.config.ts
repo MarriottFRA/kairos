@@ -103,9 +103,9 @@ const config: ForgeConfig = {
 
         // Create app-update.yml for electron-updater
         const updateYml = `provider: github
-owner: rporins
-repo: PSLoader2.0
-updaterCacheDirName: ps_loader-updater`;
+owner: MarriottFRA
+repo: kairos
+updaterCacheDirName: kairos-updater`;
 
         // Write to resources/ (for Squirrel installer)
         const resourcesPath = options.outputPaths[0] + '/resources';
@@ -172,7 +172,7 @@ updaterCacheDirName: ps_loader-updater`;
   makers: [
     new MakerSquirrel({
       // Per-user install - no admin rights required
-      // Installs to: %LocalAppData%\ps-loader
+      // Installs to: %LocalAppData%\kairos
       setupIcon: './src/images/marriott_logo.ico',
       loadingGif: undefined, // Optional: add a loading animation path
     }),
@@ -185,8 +185,8 @@ updaterCacheDirName: ps_loader-updater`;
       name: '@electron-forge/publisher-github',
       config: {
         repository: {
-          owner: 'rporins',
-          name: 'PSLoader2.0'
+          owner: 'MarriottFRA',
+          name: 'kairos'
         },
         prerelease: false,
         draft: true

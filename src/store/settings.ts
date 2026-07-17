@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { ThemeMode } from "../theme/settings";
 import { settingsService, SETTINGS_KEYS, AppSettings, UiScaleMode } from "../services/settingsService";
-import backgroundSyncService from "../services/backgroundSync";
 
 type SettingsState = {
   // Settings values
@@ -214,11 +213,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
     try {
       await settingsService.setSetting(SETTINGS_KEYS.SELECTED_HOTEL_OU, ou);
-
-      // Notify background sync service of OU change
-      if (ou) {
-        backgroundSyncService.setOU(ou);
-      }
     } catch (error) {
       console.error("Failed to save selected hotel:", error);
       // Revert on error

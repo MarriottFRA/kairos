@@ -135,8 +135,8 @@ const DeviceVerify: React.FC = () => {
                       className={progress === 100 ? 'check-mark' : ''} />
                 <defs>
                   <linearGradient id="deviceGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#007AFF" />
-                    <stop offset="100%" stopColor="#5856D6" />
+                    <stop offset="0%" stopColor="var(--primary-blue)" />
+                    <stop offset="100%" stopColor="var(--primary-purple)" />
                   </linearGradient>
                 </defs>
               </svg>
@@ -215,7 +215,7 @@ const DeviceVerify: React.FC = () => {
                     }}
                     style={{
                       padding: '6px 12px',
-                      background: '#007AFF',
+                      background: 'var(--primary-blue)',
                       color: 'white',
                       border: 'none',
                       borderRadius: '6px',

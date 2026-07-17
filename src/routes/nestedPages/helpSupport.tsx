@@ -123,7 +123,7 @@ export default function HelpSupport() {
           <Divider sx={{ mb: 3 }} />
 
           <Typography variant="body1" sx={{ mb: 2 }}>
-            New to PS Loader? Here are some quick tips to get you started:
+            New to Kairos? Here are some quick tips to get you started:
           </Typography>
 
           <List>

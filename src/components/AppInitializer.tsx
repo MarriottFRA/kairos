@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { CircularProgress, Box, Typography } from "@mui/material";
 import { useSettingsStore } from "../store/settings";
 import UpdateChecker from "./UpdateChecker";
-import backgroundSyncService from "../services/backgroundSync";
 import authService from "../services/auth";
 
 interface AppInitializerProps {
@@ -43,19 +42,6 @@ const AppInitializer: React.FC<AppInitializerProps> = ({ children }) => {
         // Load settings from database
         await loadSettingsFromDb();
 
-        // Start background sync service
-        backgroundSyncService.start();
-
-        // One-shot staging housekeeping: drop rows already mirrored in
-        // financial_data. Fire-and-forget — never block app boot.
-        if (window.ipcApi) {
-          window.ipcApi
-            .sendIpcRequest("db:auto-clean-staging", {})
-            .catch((err: unknown) => {
-              console.warn("[AutoClean] startup trigger failed:", err);
-            });
-        }
-
         setIsInitialized(true);
       } catch (err) {
         console.error("Failed to initialize app:", err);
@@ -70,14 +56,7 @@ const AppInitializer: React.FC<AppInitializerProps> = ({ children }) => {
       initializeApp();
     } else if (storeInitialized) {
       setIsInitialized(true);
-      // Still start background sync if already initialized
-      backgroundSyncService.start();
     }
-
-    // Cleanup: stop background sync on unmount
-    return () => {
-      backgroundSyncService.stop();
-    };
   }, [updateCheckComplete, loadSettingsFromDb, storeInitialized, isInitialized]);
 
   // Show update checker first (blocks app until update complete)

@@ -118,12 +118,12 @@ export const errorHandlingMiddleware = (logger?: any): IpcMiddleware => {
       if (logger) {
         logger.error(`IPC Error in ${channel}:`, error);
       }
-      
-      // Standardize error format
-      const errorMessage = error.message || 'An unexpected error occurred';
-      const errorCode = error.code || 'INTERNAL_ERROR';
-      
-      throw new Error(`${errorCode}: ${errorMessage}`);
+
+      // Rethrow the ORIGINAL error unchanged. The renderer routes on exact
+      // sentinel messages (e.g. DEVICE_NOT_REGISTERED, DEVICE_SECRET_INVALID),
+      // so we must not prefix/rewrite the message here — doing so silently
+      // breaks the auth device (re-)registration flow.
+      throw error;
     }
   };
 };

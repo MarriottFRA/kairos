@@ -17,17 +17,23 @@
 
 import React, { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
-import { Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
 import authService from "../services/auth";
 import { useAuthStatus } from "../hooks/useAuthStatus";
+import { useThemeMode } from "../store/settings";
 import Landing from "./landing";
+import "../styles/auth.css";
 
 /** Reveal the "Sign in instead" escape hatch after this long (ms). */
 const ESCAPE_HATCH_DELAY_MS = 2500;
 
+/**
+ * Restoring-session splash. Uses the same clean auth-card layout as the
+ * device-verification screen so the pre-app surfaces feel like one product.
+ */
 const RestoringSplash: React.FC<{ onSignInInstead: () => void }> = ({
   onSignInInstead,
 }) => {
+  const isDark = useThemeMode() === "dark";
   const [showEscape, setShowEscape] = useState(false);
 
   useEffect(() => {
@@ -36,33 +42,68 @@ const RestoringSplash: React.FC<{ onSignInInstead: () => void }> = ({
   }, []);
 
   return (
-    <Box
+    <div
+      className={`auth-container${isDark ? " theme-dark" : ""}`}
       role="status"
       aria-live="polite"
-      sx={{
-        height: "100vh",
-        display: "grid",
-        placeItems: "center",
-        bgcolor: "background.default",
-      }}
     >
-      <Stack alignItems="center" spacing={3}>
-        <CircularProgress size={48} thickness={2} sx={{ color: "#8b5cf6" }} />
-        <Typography variant="body1" color="text.secondary">
-          Welcome back — restoring your session…
-        </Typography>
+      <div className="auth-card device-verify">
+        <div className="device-icon verifying">
+          <div className="device-animation">
+            <svg
+              width="80"
+              height="80"
+              viewBox="0 0 80 80"
+              fill="none"
+              className="device-shield"
+            >
+              <path
+                d="M40 10L15 22v20c0 13.255 10.745 28 25 28s25-14.745 25-28V22L40 10z"
+                stroke="url(#restoreGradient)"
+                strokeWidth="2"
+                fill="none"
+                opacity="0.35"
+              />
+              <path
+                d="M30 40l8 8 16-16"
+                stroke="url(#restoreGradient)"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <defs>
+                <linearGradient id="restoreGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="var(--primary-blue)" />
+                  <stop offset="100%" stopColor="var(--primary-purple)" />
+                </linearGradient>
+              </defs>
+            </svg>
+            <div className="pulse-ring" />
+          </div>
+        </div>
+
+        <h2 className="auth-title">Welcome back</h2>
+        <p className="auth-subtitle">Restoring your session…</p>
+
         {showEscape && (
-          <Button
-            variant="text"
-            size="small"
+          <button
+            type="button"
             onClick={onSignInInstead}
-            sx={{ textTransform: "none" }}
+            style={{
+              marginTop: 20,
+              background: "transparent",
+              border: "none",
+              color: "var(--primary-blue)",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
           >
             Sign in instead
-          </Button>
+          </button>
         )}
-      </Stack>
-    </Box>
+      </div>
+    </div>
   );
 };
 

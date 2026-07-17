@@ -33,7 +33,7 @@ export function brokerErrorCode(err: unknown): string | null {
 export function describeBrokerError(code: string): string {
   switch (code) {
     case "domain_not_allowed":
-      return "This Microsoft account isn't authorized for PS Loader. Please sign in with your company account.";
+      return "This Microsoft account isn't authorized for Kairos. Please sign in with your company account.";
     case "no_principal":
       return "Microsoft sign-in didn't complete. Please try again.";
     case "cancelled":
@@ -352,27 +352,11 @@ class AuthClient {
       const error = await response.json().catch(() => ({}));
       throw new Error(error.detail || "Failed to get hotels");
     }
-    const hotels = await response.json();
-
-    // Cache locally (fetch + cache remain a single logical read for the UI).
-    if (typeof window !== "undefined" && window.ipcApi) {
-      try {
-        await window.ipcApi.sendIpcRequest("db:cache-hotels", hotels);
-      } catch {
-        // Non-fatal cache failure.
-      }
-    }
-    return hotels;
+    return response.json();
   }
 
   async refreshHotelsCache(): Promise<Hotel[]> {
-    if (typeof window !== "undefined" && window.ipcApi) {
-      try {
-        await window.ipcApi.sendIpcRequest("db:clear-hotels-cache");
-      } catch {
-        // Non-fatal.
-      }
-    }
+    // No local hotel cache in the skeleton — just re-read live.
     return this.getHotels();
   }
 

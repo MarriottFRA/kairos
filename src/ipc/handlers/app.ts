@@ -24,10 +24,10 @@ async function fetchLatestRelease(): Promise<{ version: string; releaseNotes: st
     // certificate store / proxy — same reasoning as the auth transport. Node's
     // https module would reject a corporate SSL-inspection cert.
     const response = await net.fetch(
-      'https://api.github.com/repos/rporins/PSLoader2.0/releases/latest',
+      'https://api.github.com/repos/MarriottFRA/kairos/releases/latest',
       {
         method: 'GET',
-        headers: { 'User-Agent': 'PSLoader-Update-Checker' },
+        headers: { 'User-Agent': 'Kairos-Update-Checker' },
         signal: AbortSignal.timeout(5000),
       }
     );
