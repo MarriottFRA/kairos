@@ -80,5 +80,4 @@ export function initializeIpc(deps: {
   }
 }
 
-// Export the registry instance for advanced usage
-export { ipcRegistry };
+// `ipcRegistry` is already re-exported by `export * from "./registry"` above.

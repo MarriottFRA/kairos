@@ -297,11 +297,15 @@ const Login: React.FC = () => {
       <BackButton onClick={() => navigate('/')} aria-label="Go back">
         <ArrowBackIcon />
       </BackButton>
-
       <Box sx={{ position: 'relative', zIndex: 1, width: '100%', maxWidth: 480, px: 2 }}>
         <HolographicCard elevation={0}>
           <CardContent sx={{ p: 5 }}>
-            <Stack spacing={2} alignItems="center" sx={{ mb: 4 }}>
+            <Stack
+              spacing={2}
+              sx={{
+                alignItems: "center",
+                mb: 4
+              }}>
               <Box
                 sx={{
                   width: 56,
@@ -408,7 +412,9 @@ const Login: React.FC = () => {
             {pendingMsg ? (
               // Terminal state: account requested / pending admin approval. The
               // approval is out-of-band, so this is a clear "wait" screen — no spinner.
-              <Stack spacing={3} alignItems="center">
+              (<Stack spacing={3} sx={{
+                alignItems: "center"
+              }}>
                 <Box
                   sx={{
                     width: 64,
@@ -435,11 +441,11 @@ const Login: React.FC = () => {
                 <PremiumButton fullWidth size="large" onClick={() => navigate('/')}>
                   Back to Welcome
                 </PremiumButton>
-              </Stack>
+              </Stack>)
             ) : !msVerified ? (
               // Fallback entrance: reached /login without a verified email (deep
               // link / back). Verify the company Microsoft account in place first.
-              <Stack spacing={3}>
+              (<Stack spacing={3}>
                 <Typography
                   variant="body2"
                   sx={{ textAlign: 'center', color: theme.palette.text.secondary }}
@@ -470,7 +476,7 @@ const Login: React.FC = () => {
                 >
                   Request New Account
                 </SecondaryButton>
-              </Stack>
+              </Stack>)
             ) : (
               <form onSubmit={handleSubmit}>
                 <Stack spacing={3}>
@@ -479,16 +485,18 @@ const Login: React.FC = () => {
                     label="Email"
                     type="email"
                     value={email}
-                    InputProps={{
-                      readOnly: true,
-                      endAdornment: (
-                        <InputAdornment position="end">
-                          <CheckCircleRoundedIcon
-                            fontSize="small"
-                            sx={{ color: '#10b981' }}
-                          />
-                        </InputAdornment>
-                      ),
+                    slotProps={{
+                      input: {
+                        readOnly: true,
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <CheckCircleRoundedIcon
+                              fontSize="small"
+                              sx={{ color: '#10b981' }}
+                            />
+                          </InputAdornment>
+                        ),
+                      },
                     }}
                     helperText="Verified via Marriott SSO"
                     autoComplete="email"
@@ -539,10 +547,11 @@ const Login: React.FC = () => {
               <Stack
                 direction="row"
                 spacing={1}
-                alignItems="center"
-                justifyContent="center"
-                sx={{ opacity: 0.8 }}
-              >
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: 0.8
+                }}>
                 <LockRoundedIcon fontSize="small" sx={{ color: theme.palette.text.secondary }} />
                 <Typography
                   variant="caption"

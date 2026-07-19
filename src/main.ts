@@ -10,6 +10,7 @@ import log from "electron-log";
 import path from "path";
 import dotenv from "dotenv";
 import { initializeDatabase } from "./local_db";
+import { closeSecureDatabase } from "./secure_db";
 import { initializeIpc } from "./ipc";
 import { setupAutoUpdaterEvents } from "./ipc/handlers/app";
 import { attachUiScale } from "./ipc/handlers/window";
@@ -66,7 +67,7 @@ if (!hasInstanceLock) {
 
 // Squirrel (Windows) install/uninstall shortcut handler — exit early.
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   if (require("electron-squirrel-startup")) {
     app.quit();
   }
@@ -329,6 +330,12 @@ app.on("ready", async () => {
     logger.error("Startup error:", err);
     // In a real prod app, consider user-facing error UI here.
   }
+});
+
+// Close the encrypted database on the way out so WAL is checkpointed into the
+// main file rather than left for the next launch to recover.
+app.on("will-quit", () => {
+  closeSecureDatabase();
 });
 
 // Cross-platform window behavior

@@ -5,10 +5,12 @@
 
 import { IpcMainInvokeEvent } from "electron";
 
-// Base handler function type
+// Base handler function type. The registry forwards every argument the renderer
+// sent, so this is a rest signature — handlers that only need the first one can
+// still be written as `(event, request) => ...`.
 export type IpcHandler<TRequest = any, TResponse = any> = (
   event: IpcMainInvokeEvent,
-  request: TRequest
+  ...args: TRequest[]
 ) => Promise<TResponse> | TResponse;
 
 // Middleware function type
@@ -32,47 +34,6 @@ export interface IpcResult<T = any> {
   data?: T;
   error?: string;
   timestamp?: number;
-}
-
-// Request/Response types for different domains
-export namespace AuthTypes {
-  export interface LoginRequest {
-    // Add any login parameters if needed
-  }
-  
-  export interface LoginResponse extends IpcResult {
-    data?: { success: boolean };
-  }
-  
-  export interface CheckResponse extends IpcResult {
-    data?: {
-      isAuthenticated: boolean;
-      user: any;
-    };
-  }
-}
-
-export namespace DatabaseTypes {
-  export interface GetPeriodsRequest {
-    // Add parameters as needed
-  }
-  
-  export interface UpdatePeriodsRequest {
-    periods: any; // Define proper period type
-  }
-  
-  export interface CreateAccountRequest {
-    name: string;
-    type: string;
-    // Add other account fields
-  }
-  
-  export interface Account {
-    id: string;
-    name: string;
-    type: string;
-    // Add other fields
-  }
 }
 
 // Channel constants to avoid magic strings

@@ -3,15 +3,7 @@ import { Box, Typography, Avatar, Card, CardContent, Divider, Stack, Button, Chi
 import { alpha, useTheme } from "@mui/material/styles";
 import authService, { UserInfo, OUAccess } from "../../services/auth";
 
-interface IpcApi {
-  sendIpcRequest: (channel: string, ...args: any[]) => Promise<any>;
-}
-
-declare global {
-  interface Window {
-    ipcApi?: IpcApi;
-  }
-}
+// `window.ipcApi` is declared once, globally, in src/global.d.ts.
 
 function decodeJWT(token: string): any {
   try {
@@ -93,7 +85,9 @@ export default function Profile() {
     <Box sx={{ maxWidth: 900, mx: "auto" }}>
       <Card variant="outlined" sx={{ mb: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ xs: "flex-start", sm: "center" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{
+            alignItems: { xs: "flex-start", sm: "center" }
+          }}>
             <Avatar sx={{ width: 64, height: 64, bgcolor: theme.palette.primary.main, fontWeight: 700 }}>
               {initials}
             </Avatar>
@@ -116,7 +110,6 @@ export default function Profile() {
           </Stack>
         </CardContent>
       </Card>
-
       <Card variant="outlined" sx={{ mb: 2, borderRadius: 2 }}>
         <CardContent>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
@@ -139,7 +132,6 @@ export default function Profile() {
           </Stack>
         </CardContent>
       </Card>
-
       <Card variant="outlined" sx={{ borderRadius: 2 }}>
         <CardContent>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
@@ -156,7 +148,9 @@ export default function Profile() {
                 <ListItem key={access.id} sx={{ px: 0 }}>
                   <ListItemText
                     primary={
-                      <Stack direction="row" spacing={1} alignItems="center">
+                      <Stack direction="row" spacing={1} sx={{
+                        alignItems: "center"
+                      }}>
                         <Typography variant="body1">{access.ou}</Typography>
                         <Chip
                           size="small"

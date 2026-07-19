@@ -15,7 +15,7 @@ import {
 } from "@mui/material";
 import EmailIcon from "@mui/icons-material/Email";
 import DescriptionIcon from "@mui/icons-material/Description";
-import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutlined";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 
 export default function HelpSupport() {
@@ -26,11 +26,16 @@ export default function HelpSupport() {
       <Typography variant="h4" sx={{ mb: 3, fontWeight: 600 }}>
         Help & Support
       </Typography>
-
       {/* Contact Support */}
       <Card variant="outlined" sx={{ mb: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              mb: 2
+            }}>
             <EmailIcon color="primary" />
             <Typography variant="h6" sx={{ fontWeight: 600 }}>
               Contact Support
@@ -54,16 +59,26 @@ export default function HelpSupport() {
             Email Support
           </Button>
 
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mt: 2
+            }}>
             Email: <Link href={`mailto:${supportEmail}`}>{supportEmail}</Link>
           </Typography>
         </CardContent>
       </Card>
-
       {/* Required Import Files */}
       <Card variant="outlined" sx={{ mb: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              mb: 2
+            }}>
             <DescriptionIcon color="primary" />
             <Typography variant="h6" sx={{ fontWeight: 600 }}>
               Required Import Files
@@ -105,16 +120,27 @@ export default function HelpSupport() {
             </ListItem>
           </List>
 
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2, fontStyle: "italic" }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mt: 2,
+              fontStyle: "italic"
+            }}>
             This section will be updated with detailed file specifications and instructions.
           </Typography>
         </CardContent>
       </Card>
-
       {/* FAQ / Getting Started */}
       <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{
+              alignItems: "center",
+              mb: 2
+            }}>
             <HelpOutlineIcon color="primary" />
             <Typography variant="h6" sx={{ fontWeight: 600 }}>
               Getting Started

@@ -80,7 +80,9 @@ const AppInitializer: React.FC<AppInitializerProps> = ({ children }) => {
         }}
       >
         <CircularProgress size={40} />
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>
           Loading…
         </Typography>
       </Box>

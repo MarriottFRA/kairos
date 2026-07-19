@@ -852,10 +852,8 @@ export default function Landing() {
     >
       {/* background animated scene */}
       <BudgetScene mode={mode} paused={authBusy} onPeriods={() => {}} />
-
       {/* center scrim (viewport-fixed) */}
       <Box sx={{ position: "absolute", inset: 0, zIndex: 3, pointerEvents: "none", background: "radial-gradient(ellipse 34% 42% at 50% 50%, var(--scrim) 0%, var(--scrim) 46%, transparent 78%)" }} />
-
       {/* top bar */}
       <Box sx={{ position: "absolute", top: 26, left: 34, right: 34, display: "flex", alignItems: "center", justifyContent: "flex-end", zIndex: 6, animation: "kFade .7s ease both" }}>
         <Button
@@ -870,7 +868,6 @@ export default function Landing() {
           {themeMode === "light" ? <DarkModeIcon sx={{ fontSize: 16 }} /> : <LightModeIcon sx={{ fontSize: 16 }} />}
         </Button>
       </Box>
-
       {/* center brand + auth */}
       <Box sx={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", px: 3, pointerEvents: "none" }}>
         {/* ring logo */}
@@ -954,7 +951,6 @@ export default function Landing() {
           </Box>
         </Box>
       </Box>
-
       {/* footer */}
       <Box sx={{ position: "absolute", bottom: 22, left: 34, right: 34, display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10.5, color: "var(--muted)", fontFamily: "'IBM Plex Mono',monospace", zIndex: 5, animation: "kFade .9s ease both", animationDelay: ".6s" }}>
         <span>Kairos PBT · v{__APP_VERSION__}</span>
@@ -964,11 +960,12 @@ export default function Landing() {
           <span>Local-first · Secure by design</span>
         </Box>
       </Box>
-
       {/* initial connection overlay (kept minimal; scene is paused meanwhile) */}
       {!initialized && (
         <Box role="status" aria-live="polite" sx={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: alpha(mode === "dark" ? "#000000" : "#ffffff", 0.4), backdropFilter: "blur(8px)", zIndex: 9999 }}>
-          <Stack alignItems="center" spacing={2}>
+          <Stack spacing={2} sx={{
+            alignItems: "center"
+          }}>
             <CircularProgress size={40} thickness={3} sx={{ color: "var(--accent)" }} />
             <Typography variant="body2" sx={{ color: "var(--text)" }}>Initializing secure connection…</Typography>
           </Stack>

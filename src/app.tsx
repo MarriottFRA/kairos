@@ -10,7 +10,6 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/ibm-plex-mono/600.css";
 // Import specific functions and components
-import { LicenseInfo } from "@mui/x-license";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
@@ -80,9 +79,6 @@ const router = createHashRouter([
     ],
   },
 ]);
-
-// Set the license key
-LicenseInfo.setLicenseKey("0170f20369e51857b2536db7dfa0f38eTz0xMTkzODcsRT0xNzkxOTM1OTk5MDAwLFM9cHJlbWl1bSxMTT1zdWJzY3JpcHRpb24sUFY9aW5pdGlhbCxLVj0y");
 
 //root document
 createRoot(document.getElementById("root")).render(

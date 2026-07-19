@@ -1,20 +1,19 @@
 import { app, safeStorage } from "electron";
 import path from "path";
-import { createClient, Client } from "@libsql/client";
-import dotenv from "dotenv";
+import Database from "better-sqlite3-multiple-ciphers";
 import fs from "fs";
 
-dotenv.config();
-
-// Kairos local store. This is the minimal, unencrypted libsql database that the
-// auth stack and app settings depend on (refresh token, device salt, and
-// user_settings). Encryption-at-rest and any feature tables are intentionally
-// deferred — see TODO below.
+// Kairos local store. This is the unencrypted database that the auth stack and
+// app settings depend on (refresh token, device salt, and user_settings).
 //
-// TODO: enable encryption-at-rest. libsql supports whole-file encryption via
-// `encryptionKey` on createClient(); the key would come from process.env
-// (currently TEMP_DB_KEY) or a server-provisioned secret. A future second,
-// encrypted DB may hold feature data separately from these local settings.
+// Driver note: this uses `better-sqlite3-multiple-ciphers` — the standard
+// better-sqlite3 API with SQLite3MultipleCiphers compiled in. No `PRAGMA key`
+// is issued here, so this file stays plain, readable SQLite. The same package
+// backs the encrypted feature database (see secure_db.ts), which opens with a
+// key; one native module serves both.
+//
+// The exported functions stay `async` even though better-sqlite3 is
+// synchronous, so every existing caller is unaffected.
 
 const documentsPath = app.getPath("documents");
 const kairosFolderPath = path.join(documentsPath, "Kairos");
@@ -24,11 +23,12 @@ if (!fs.existsSync(kairosFolderPath)) {
 }
 const dbPath = path.join(kairosFolderPath, "kairos.db");
 
-// Create the SQLite (libsql) client
-const client: Client = createClient({
-  url: "file:" + dbPath,
-  // encryptionKey: process.env.TEMP_DB_KEY,   // deferred — see TODO above
-});
+// Open the SQLite database. Files previously created by the libsql client are
+// ordinary SQLite databases and open here unchanged.
+const db = new Database(dbPath);
+db.pragma("journal_mode = WAL");
+db.pragma("synchronous = NORMAL");
+db.pragma("foreign_keys = ON");
 
 // Baseline schema version. Kairos is a fresh start, so there is no migration
 // history to replay — initializeDatabase() just creates the tables and stamps
@@ -42,38 +42,40 @@ interface UserSettings {
   [key: string]: any;
 }
 
+/** Shared upsert for the key/value settings table. */
+const UPSERT_SETTING_SQL = `
+  INSERT INTO user_settings (key, value, updated_at)
+  VALUES (?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(key) DO UPDATE SET
+    value = excluded.value,
+    updated_at = CURRENT_TIMESTAMP
+`;
+
 //------------------------------------------------------------------------------
 //--- INITIALIZE DATABASE ------------------------------------------------------
 export async function initializeDatabase(): Promise<void> {
   try {
-    await client.batch([
-      `
-        CREATE TABLE IF NOT EXISTS schema_info (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        `,
-      `
-        CREATE TABLE IF NOT EXISTS user_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        `,
-    ]);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_info (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS user_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
 
     // Stamp the baseline schema version.
-    await client.execute({
-      sql: `
-        INSERT INTO schema_info (key, value, updated_at)
-        VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(key) DO UPDATE SET
-          value = excluded.value,
-          updated_at = CURRENT_TIMESTAMP
-      `,
-      args: [String(CURRENT_SCHEMA_VERSION)],
-    });
+    db.prepare(`
+      INSERT INTO schema_info (key, value, updated_at)
+      VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(String(CURRENT_SCHEMA_VERSION));
   } catch (error) {
     console.error("Error initializing database:", error);
     throw error;
@@ -114,29 +116,28 @@ function normalizeSalt(raw: string): string {
 }
 
 /** Read a raw user_settings value (plain string), or null if the key is absent. */
-async function readSaltSetting(key: string): Promise<string | null> {
-  const result = await client.execute({
-    sql: "SELECT value FROM user_settings WHERE key = ?",
-    args: [key],
-  });
-  if (result.rows.length > 0) {
-    return (result.rows[0].value as string) ?? null;
-  }
-  return null;
+function readSaltSetting(key: string): string | null {
+  const row = db
+    .prepare("SELECT value FROM user_settings WHERE key = ?")
+    .get(key) as { value?: string } | undefined;
+  return row ? row.value ?? null : null;
 }
 
 /** Upsert a user_settings value as a plain string (no JSON wrapping). */
-async function writeSaltSetting(key: string, value: string): Promise<void> {
-  await client.execute({
-    sql: `
-      INSERT INTO user_settings (key, value, updated_at)
-      VALUES (?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(key) DO UPDATE SET
-        value = excluded.value,
-        updated_at = CURRENT_TIMESTAMP
-    `,
-    args: [key, value],
-  });
+function writeSaltSetting(key: string, value: string): void {
+  db.prepare(UPSERT_SETTING_SQL).run(key, value);
+}
+
+// Raw (non-JSON-wrapped) accessors on user_settings. These exist for values that
+// are already opaque strings — currently the DPAPI-wrapped key for the encrypted
+// database (see secure_db.ts) — where the JSON round-trip in getUserSettings()
+// would only get in the way.
+export function readRawSetting(key: string): string | null {
+  return readSaltSetting(key);
+}
+
+export function writeRawSetting(key: string, value: string): void {
+  writeSaltSetting(key, value);
 }
 
 // Get or create the permanent device salt.
@@ -154,7 +155,7 @@ export async function getPermanentSalt(): Promise<string> {
     const dpapi = saltEncryptionAvailable();
 
     // 1) Preferred path: an encrypted blob already exists.
-    const encRaw = await readSaltSetting(PERMANENT_SALT_ENC_KEY);
+    const encRaw = readSaltSetting(PERMANENT_SALT_ENC_KEY);
     const encExists = !!encRaw;
     if (encRaw && dpapi) {
       try {
@@ -169,7 +170,7 @@ export async function getPermanentSalt(): Promise<string> {
     }
 
     // 2) Legacy / fallback path: plaintext salt.
-    const plainRaw = await readSaltSetting(PERMANENT_SALT_KEY);
+    const plainRaw = readSaltSetting(PERMANENT_SALT_KEY);
     if (plainRaw) {
       const salt = normalizeSalt(plainRaw);
       // Opportunistically migrate to encrypted-at-rest when possible. The value
@@ -177,8 +178,8 @@ export async function getPermanentSalt(): Promise<string> {
       if (dpapi) {
         try {
           const blob = safeStorage.encryptString(salt).toString("base64");
-          await writeSaltSetting(PERMANENT_SALT_ENC_KEY, blob);
-          await writeSaltSetting(PERMANENT_SALT_KEY, ""); // blank the plaintext
+          writeSaltSetting(PERMANENT_SALT_ENC_KEY, blob);
+          writeSaltSetting(PERMANENT_SALT_KEY, ""); // blank the plaintext
         } catch (error) {
           // Migration failed — keep serving the plaintext salt as-is.
           console.warn("[salt] Salt encryption migration failed:", error);
@@ -204,15 +205,15 @@ export async function getPermanentSalt(): Promise<string> {
     if (dpapi) {
       try {
         const blob = safeStorage.encryptString(newSalt).toString("base64");
-        await writeSaltSetting(PERMANENT_SALT_ENC_KEY, blob);
+        writeSaltSetting(PERMANENT_SALT_ENC_KEY, blob);
       } catch (error) {
         // Encryption failed at mint time — persist plaintext so the value is
         // durable; a later launch can migrate it once encryption works.
         console.warn("[salt] Failed to encrypt new salt, storing plaintext:", error);
-        await writeSaltSetting(PERMANENT_SALT_KEY, newSalt);
+        writeSaltSetting(PERMANENT_SALT_KEY, newSalt);
       }
     } else {
-      await writeSaltSetting(PERMANENT_SALT_KEY, newSalt);
+      writeSaltSetting(PERMANENT_SALT_KEY, newSalt);
     }
 
     return newSalt;
@@ -229,13 +230,12 @@ export async function getUserSettings(key?: string): Promise<string> {
   try {
     if (key) {
       // Get specific setting
-      const result = await client.execute({
-        sql: "SELECT value FROM user_settings WHERE key = ?",
-        args: [key],
-      });
+      const row = db
+        .prepare("SELECT value FROM user_settings WHERE key = ?")
+        .get(key) as { value?: string } | undefined;
 
-      if (result.rows.length > 0) {
-        const value = result.rows[0].value as string;
+      if (row) {
+        const value = row.value as string;
         try {
           return JSON.parse(value);
         } catch {
@@ -245,19 +245,16 @@ export async function getUserSettings(key?: string): Promise<string> {
       return JSON.stringify(null);
     } else {
       // Get all settings
-      const result = await client.execute({
-        sql: "SELECT key, value FROM user_settings",
-        args: [],
-      });
+      const rows = db
+        .prepare("SELECT key, value FROM user_settings")
+        .all() as Array<{ key: string; value: string }>;
 
       const settings: UserSettings = {};
-      for (const row of result.rows) {
-        const rowKey = row.key as string;
-        const value = row.value as string;
+      for (const row of rows) {
         try {
-          settings[rowKey] = JSON.parse(value);
+          settings[row.key] = JSON.parse(row.value);
         } catch {
-          settings[rowKey] = value;
+          settings[row.key] = row.value;
         }
       }
       return JSON.stringify(settings);
@@ -271,18 +268,14 @@ export async function getUserSettings(key?: string): Promise<string> {
 // Set a specific setting or multiple settings
 export async function setUserSettings(settings: UserSettings): Promise<string> {
   try {
-    const queries = Object.entries(settings).map(([key, value]) => ({
-      sql: `
-        INSERT INTO user_settings (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(key) DO UPDATE SET
-          value = excluded.value,
-          updated_at = CURRENT_TIMESTAMP
-      `,
-      args: [key, JSON.stringify(value)],
-    }));
+    const stmt = db.prepare(UPSERT_SETTING_SQL);
+    // One transaction keeps a multi-key write atomic, matching the old batch().
+    db.transaction((entries: Array<[string, any]>) => {
+      for (const [key, value] of entries) {
+        stmt.run(key, JSON.stringify(value));
+      }
+    })(Object.entries(settings));
 
-    await client.batch(queries);
     return JSON.stringify({ success: true, message: "Settings saved successfully" });
   } catch (error) {
     console.error("Error saving user settings:", error);
@@ -293,10 +286,7 @@ export async function setUserSettings(settings: UserSettings): Promise<string> {
 // Delete a specific setting
 export async function deleteUserSetting(key: string): Promise<string> {
   try {
-    await client.execute({
-      sql: "DELETE FROM user_settings WHERE key = ?",
-      args: [key],
-    });
+    db.prepare("DELETE FROM user_settings WHERE key = ?").run(key);
     return JSON.stringify({ success: true, message: "Setting deleted successfully" });
   } catch (error) {
     console.error("Error deleting user setting:", error);

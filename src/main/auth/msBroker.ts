@@ -144,7 +144,7 @@ export class MsBroker {
           if (MS_BROKER_DEBUG) {
             console.log("[msBroker] injected domain_hint:", url.toString());
           }
-          callback({ redirectUrl: url.toString() });
+          callback({ redirectURL: url.toString() });
         }
       );
   }

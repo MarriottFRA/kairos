@@ -28,7 +28,7 @@ const config: ForgeConfig = {
       /^\/vite.*\.config\.ts$/,
       /^\/tsconfig\.json$/,
       /^\/forge\.config\.ts$/,
-      /^\/\.eslintrc/,
+      /^\/eslint\.config\./,
       /\.md$/,
       /^\/\.env/,
     ],
@@ -50,18 +50,13 @@ const config: ForgeConfig = {
 
       // List of external native dependencies that need to be copied
       const externalDeps = [
-        '@libsql/client',
-        '@libsql/core',
-        '@libsql/hrana-client',
-        '@libsql/isomorphic-fetch',
-        '@libsql/isomorphic-ws',
-        '@libsql/win32-x64-msvc',
-        'libsql',
-        'js-base64',
-        'promise-limit',
-        '@neon-rs/load',
+        // SQLite driver for both the settings DB and the encrypted feature DB.
+        // `bindings` (and its own dep file-uri-to-path) is what locates the
+        // compiled better_sqlite3.node at runtime, so all three must be copied.
+        'better-sqlite3-multiple-ciphers',
+        'bindings',
+        'file-uri-to-path',
         'detect-libc',
-        'nodejs-polars',
         'node-machine-id',
         'systeminformation',
         'electron-squirrel-startup',
@@ -71,20 +66,6 @@ const config: ForgeConfig = {
         // TPM support while dev keeps working.
         'koffi',
         '@koromix/koffi-win32-x64',
-
-        // exceljs and all transitive dependencies
-        'exceljs', 'jszip', 'archiver', 'dayjs', 'fast-csv', 'readable-stream', 'saxes', 'tmp', 'unzipper',
-        '@fast-csv/format', '@fast-csv/parse', 'archiver-utils', 'async', 'balanced-match', 'base64-js',
-        'big-integer', 'binary', 'bl', 'bluebird', 'brace-expansion', 'buffer', 'buffer-crc32',
-        'buffer-indexof-polyfill', 'buffers', 'chainsaw', 'compress-commons', 'concat-map', 'crc-32',
-        'crc32-stream', 'duplexer2', 'end-of-stream', 'fs-constants', 'fs.realpath', 'fstream', 'glob',
-        'graceful-fs', 'ieee754', 'immediate', 'inflight', 'inherits', 'lazystream', 'lie',
-        'listenercount', 'lodash.defaults', 'lodash.difference', 'lodash.escaperegexp', 'lodash.flatten',
-        'lodash.groupby', 'lodash.isboolean', 'lodash.isequal', 'lodash.isfunction', 'lodash.isnil',
-        'lodash.isplainobject', 'lodash.isundefined', 'lodash.union', 'lodash.uniq', 'minimatch', 'mkdirp',
-        'normalize-path', 'once', 'pako', 'path-is-absolute', 'readdir-glob', 'rimraf', 'safe-buffer',
-        'setimmediate', 'string_decoder', 'tar-stream', 'traverse', 'util-deprecate', 'wrappy',
-        'xmlchars', 'zip-stream', 'process-nextick-args', 'core-util-is', 'isarray',
       ];
 
       console.log('Copying dependencies from:', sourceNodeModules);

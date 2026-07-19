@@ -234,7 +234,10 @@ class SettingsService {
 
     const settings = {} as AppSettings;
     for (const key of Object.values(SETTINGS_KEYS)) {
-      settings[key] = await this.getSetting(key as SettingsKey);
+      // Writing through a union-typed key narrows the target to `never`; the
+      // value is correct by construction since `key` indexes AppSettings.
+      (settings as Record<SettingsKey, unknown>)[key as SettingsKey] =
+        await this.getSetting(key as SettingsKey);
     }
     return settings;
   }
@@ -372,7 +375,8 @@ class SettingsService {
 
     for (const key of pending) {
       if (this.cache.has(key)) {
-        settings[key] = this.cache.get(key);
+        // See getAllSettings: union-keyed writes need the widened target.
+        (settings as Record<SettingsKey, unknown>)[key] = this.cache.get(key);
       }
     }
 

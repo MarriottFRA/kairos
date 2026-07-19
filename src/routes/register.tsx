@@ -246,14 +246,18 @@ export default function Register() {
       <BackButton onClick={() => navigate("/")} aria-label="Go back">
         <ArrowBackIcon />
       </BackButton>
-
       {/* Main content */}
       <Box sx={{ position: "relative", zIndex: 1, width: "100%", maxWidth: 480, px: 2 }}>
         <StyledCard elevation={0}>
           <CardContent sx={{ p: 5 }}>
             {success ? (
               // Success state
-              <Stack alignItems="center" spacing={3} sx={{ py: 4 }}>
+              (<Stack
+                spacing={3}
+                sx={{
+                  alignItems: "center",
+                  py: 4
+                }}>
                 <Box
                   sx={{
                     width: 80,
@@ -282,8 +286,10 @@ export default function Register() {
                 </Typography>
                 <Typography
                   variant="body1"
-                  color="text.secondary"
                   align="center"
+                  sx={{
+                    color: "text.secondary"
+                  }}
                 >
                   An administrator must approve your account before you can sign
                   in. You'll also approve this device on your first sign-in.
@@ -296,10 +302,10 @@ export default function Register() {
                 >
                   Back to sign in
                 </PremiumButton>
-              </Stack>
+              </Stack>)
             ) : (
               // Registration form
-              <>
+              (<>
                 {/* Header */}
                 <Box sx={{ textAlign: "center", mb: 4 }}>
                   <Box
@@ -345,7 +351,6 @@ export default function Register() {
                     Create your account to get started
                   </Typography>
                 </Box>
-
                 {/* Error alert */}
                 {error && (
                   <Alert
@@ -362,7 +367,6 @@ export default function Register() {
                     {error}
                   </Alert>
                 )}
-
                 {/* Microsoft-gated: verify company identity to request an account */}
                 {!msVerified ? (
                   <Stack spacing={3}>
@@ -396,18 +400,20 @@ export default function Register() {
                       type="email"
                       value={formData.email}
                       helperText="Verified via Marriott SSO"
-                      InputProps={{
-                        readOnly: true,
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <EmailIcon sx={{ color: "text.secondary" }} />
-                          </InputAdornment>
-                        ),
-                        endAdornment: (
-                          <InputAdornment position="end">
-                            <CheckCircleIcon fontSize="small" sx={{ color: "#10b981" }} />
-                          </InputAdornment>
-                        ),
+                      slotProps={{
+                        input: {
+                          readOnly: true,
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <EmailIcon sx={{ color: "text.secondary" }} />
+                            </InputAdornment>
+                          ),
+                          endAdornment: (
+                            <InputAdornment position="end">
+                              <CheckCircleIcon fontSize="small" sx={{ color: "#10b981" }} />
+                            </InputAdornment>
+                          ),
+                        },
                       }}
                     />
 
@@ -436,10 +442,11 @@ export default function Register() {
                   </Stack>
                 </form>
                 )}
-
                 {/* Sign in link */}
                 <Box sx={{ textAlign: "center", mt: 3 }}>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{
+                    color: "text.secondary"
+                  }}>
                     Already have an account?{" "}
                     <Button
                       onClick={() => navigate("/login")}
@@ -459,7 +466,7 @@ export default function Register() {
                     </Button>
                   </Typography>
                 </Box>
-              </>
+              </>)
             )}
           </CardContent>
         </StyledCard>

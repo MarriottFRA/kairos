@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { ThemeMode } from "../theme/settings";
-import { settingsService, SETTINGS_KEYS, AppSettings, UiScaleMode } from "../services/settingsService";
+import { settingsService, SETTINGS_KEYS, AppSettings, PartialSettings, UiScaleMode } from "../services/settingsService";
 
 type SettingsState = {
   // Settings values
@@ -685,7 +685,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   saveSettingsToDb: async () => {
     try {
       const state = get();
-      const settings: AppSettings = {
+      // Deliberately partial: the Excel-export and Protea-pack keys are written
+      // by their own setters, so this bulk save only covers the general prefs.
+      const settings: PartialSettings = {
         [SETTINGS_KEYS.THEME_MODE]: state.themeMode,
         [SETTINGS_KEYS.UI_SCALE_MODE]: state.uiScaleMode,
         [SETTINGS_KEYS.UI_SCALE]: state.uiScale,

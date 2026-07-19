@@ -31,7 +31,7 @@ import LogoutIcon from "@mui/icons-material/Logout";
 import Avatar from "@mui/material/Avatar";
 import SettingsIcon from "@mui/icons-material/Settings";
 import PersonIcon from "@mui/icons-material/Person";
-import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutlined";
 import Tooltip from "@mui/material/Tooltip";
 import { alpha } from "@mui/material/styles";
 import Stack from "@mui/material/Stack";
@@ -327,7 +327,9 @@ const handleSignOut = useCallback(async () => {
           </Typography>
           
           {/* Modern User menu section */}
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} sx={{
+            alignItems: "center"
+          }}>
             {/* Hotel selector button */}
             {currentHotelName && (
               <Tooltip title="Switch hotel">
@@ -597,9 +599,10 @@ const handleSignOut = useCallback(async () => {
                     <ListItemText
                       primary={hotel.hotel_name}
                       secondary={hotel.ou}
-                      secondaryTypographyProps={{
-                        fontSize: '0.75rem',
-                        color: 'text.secondary',
+                      slotProps={{
+                        secondary: {
+                          sx: { fontSize: '0.75rem', color: 'text.secondary' },
+                        },
                       }}
                     />
                     {hotel.ou === selectedHotelOu && (

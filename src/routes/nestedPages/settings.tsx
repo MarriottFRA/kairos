@@ -80,7 +80,6 @@ export default function Settings() {
       <Typography variant="h4" sx={{ mb: 3, fontWeight: 600 }}>
         Settings
       </Typography>
-
       <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
@@ -99,7 +98,9 @@ export default function Settings() {
                 label={
                   <Box>
                     <Typography variant="body1">Light</Typography>
-                    <Typography variant="body2" color="text.secondary">
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       Clean and bright interface
                     </Typography>
                   </Box>
@@ -112,7 +113,9 @@ export default function Settings() {
                 label={
                   <Box>
                     <Typography variant="body1">Dark</Typography>
-                    <Typography variant="body2" color="text.secondary">
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       Easy on the eyes in low light
                     </Typography>
                   </Box>
@@ -129,10 +132,11 @@ export default function Settings() {
             </FormLabel>
             <Stack
               direction="row"
-              alignItems="center"
-              justifyContent="space-between"
-              sx={{ mb: 1 }}
-            >
+              sx={{
+                alignItems: "center",
+                justifyContent: "space-between",
+                mb: 1
+              }}>
               <FormControlLabel
                 control={
                   <Switch
@@ -171,11 +175,14 @@ export default function Settings() {
               />
               <Stack
                 direction="row"
-                alignItems="center"
-                justifyContent="space-between"
                 spacing={1}
-              >
-                <Typography variant="caption" color="text.secondary">
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "space-between"
+                }}>
+                <Typography variant="caption" sx={{
+                  color: "text.secondary"
+                }}>
                   {uiScaleMode === "auto"
                     ? "Automatically sized to the app window — larger windows show the UI at full size, smaller windows scale it down."
                     : `Manual scale: ${Math.round((uiScale || 1) * 100)}%`}
@@ -193,10 +200,15 @@ export default function Settings() {
           </FormControl>
         </CardContent>
       </Card>
-
       <Card variant="outlined" sx={{ mt: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+          <Stack
+            direction="row"
+            sx={{
+              justifyContent: "space-between",
+              alignItems: "center",
+              mb: 2
+            }}>
             <Typography variant="h6" sx={{ fontWeight: 600 }}>
               Hotel Settings
             </Typography>
@@ -243,7 +255,9 @@ export default function Settings() {
                     <Typography variant="body1">
                       {hotel.hotel_name} ({hotel.ou})
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">
+                    <Typography variant="caption" sx={{
+                      color: "text.secondary"
+                    }}>
                       {hotel.room_count} rooms
                       {hotel.city && hotel.country && ` • ${hotel.city}, ${hotel.country}`}
                       {hotel.currency && ` • ${hotel.currency}`}
@@ -266,30 +280,30 @@ export default function Settings() {
                 Hotel Details
               </Typography>
               <Grid container spacing={2}>
-                <Grid item xs={12} sm={6}>
+                <Grid size={{ xs: 12, sm: 6 }}>
                   <TextField
                     fullWidth
                     label="Currency"
                     value={hotels.find((h) => h.ou === selectedHotelOu)?.currency || ""}
-                    InputProps={{ readOnly: true }}
+                    slotProps={{ input: { readOnly: true } }}
                     variant="outlined"
                   />
                 </Grid>
-                <Grid item xs={12} sm={6}>
+                <Grid size={{ xs: 12, sm: 6 }}>
                   <TextField
                     fullWidth
                     label="Country"
                     value={hotels.find((h) => h.ou === selectedHotelOu)?.country || ""}
-                    InputProps={{ readOnly: true }}
+                    slotProps={{ input: { readOnly: true } }}
                     variant="outlined"
                   />
                 </Grid>
-                <Grid item xs={12} sm={6}>
+                <Grid size={{ xs: 12, sm: 6 }}>
                   <TextField
                     fullWidth
                     label="City"
                     value={hotels.find((h) => h.ou === selectedHotelOu)?.city || ""}
-                    InputProps={{ readOnly: true }}
+                    slotProps={{ input: { readOnly: true } }}
                     variant="outlined"
                   />
                 </Grid>
@@ -298,9 +312,10 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
-
       <Box sx={{ mt: 4, textAlign: "center", pb: 2 }}>
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" sx={{
+          color: "text.secondary"
+        }}>
           Kairos Version {__APP_VERSION__}
         </Typography>
       </Box>

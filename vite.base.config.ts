@@ -37,21 +37,13 @@ const bundledModules = [
 // Native modules that MUST be externalized (cannot be bundled)
 const nativeModules = [
   'electron-squirrel-startup',
-  '@libsql/client',
-  '@libsql/core',
-  '@libsql/hrana-client',
-  '@libsql/isomorphic-fetch',
-  '@libsql/isomorphic-ws',
-  '@libsql/win32-x64-msvc',
-  'libsql',
-  'js-base64',
-  'promise-limit',
-  '@neon-rs/load',
+  'better-sqlite3-multiple-ciphers',
+  'bindings',
+  'file-uri-to-path',
   'detect-libc',
   'node-machine-id',
   'systeminformation',
   'nodejs-polars',
-  'better-sqlite3',
   // exceljs and all transitive dependencies
   'exceljs', 'jszip', 'archiver', 'dayjs', 'fast-csv', 'readable-stream', 'saxes', 'tmp', 'unzipper',
   '@fast-csv/format', '@fast-csv/parse', 'archiver-utils', 'async', 'balanced-match', 'base64-js',
@@ -71,7 +63,6 @@ export const external = [
   ...builtins,
   // Externalize all native modules and their sub-dependencies
   ...nativeModules,
-  /^@libsql\//,  // All @libsql sub-packages
   /^nodejs-polars/,  // All polars sub-packages
   // Externalize all dependencies EXCEPT those explicitly bundled
   ...Object.keys('dependencies' in pkg ? (pkg.dependencies as Record<string, unknown>) : {})

@@ -107,7 +107,7 @@ function loadBindings(): NCryptBindings {
       throw new Error(`CNG is Windows-only (platform: ${process.platform})`);
     }
     // Required lazily so a missing/broken koffi never breaks main-process boot.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const koffi = require("koffi");
     const lib = koffi.load("ncrypt.dll");
 
@@ -221,7 +221,7 @@ function withKey<T>(
  */
 export function isAvailable(): boolean {
   try {
-    withProvider(() => undefined);
+    withProvider<void>(() => undefined);
     return true;
   } catch {
     return false;
@@ -231,7 +231,7 @@ export function isAvailable(): boolean {
 /** True when a sealed key already exists for this device. Never throws. */
 export function hasKey(deviceId: string): boolean {
   try {
-    withKey(deviceId, false, () => undefined);
+    withKey<void>(deviceId, false, () => undefined);
     return true;
   } catch {
     return false;
@@ -243,7 +243,7 @@ export function hasKey(deviceId: string): boolean {
  * any machine that cannot do this.
  */
 export function createKey(deviceId: string): void {
-  withKey(deviceId, true, () => undefined);
+  withKey<void>(deviceId, true, () => undefined);
 }
 
 /**
