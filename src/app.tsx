@@ -10,6 +10,7 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/ibm-plex-mono/600.css";
 // Import specific functions and components
+import { LicenseInfo } from "@mui/x-license";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
@@ -79,6 +80,12 @@ const router = createHashRouter([
     ],
   },
 ]);
+
+// MUI X Premium licence. This key is designed to be public — it is validated
+// offline and is expected to appear in the JS bundle. Order 119387, annual
+// subscription: any MUI X version released before 2026-10-13 works in
+// production indefinitely; renew before then to keep upgrading in development.
+LicenseInfo.setLicenseKey("0170f20369e51857b2536db7dfa0f38eTz0xMTkzODcsRT0xNzkxOTM1OTk5MDAwLFM9cHJlbWl1bSxMTT1zdWJzY3JpcHRpb24sUFY9aW5pdGlhbCxLVj0y");
 
 //root document
 createRoot(document.getElementById("root")).render(
