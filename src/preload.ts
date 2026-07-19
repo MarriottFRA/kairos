@@ -54,6 +54,19 @@ export interface PublicAuthStatus {
   devicePending: boolean;
   encryptionAvailable: boolean;
   lastUserEmail: string | null;
+  tpmBound: boolean;
+}
+
+/**
+ * Real per-step progress for the device security screen, pushed by main as each
+ * step of the verify/register flow starts and finishes. `skipped` is a normal
+ * outcome, not an error — machines with no TPM legitimately skip those steps.
+ */
+export interface DeviceProgressEvent {
+  phase: "verify" | "register";
+  step: string;
+  state: "active" | "done" | "skipped" | "failed";
+  detail?: string;
 }
 
 export interface IpcApi {
@@ -77,7 +90,10 @@ export interface AuthApi {
   register: (p: { email: string }) => Promise<unknown>;
   login: (p: { email: string }) => Promise<{ settings: unknown }>;
   registerDevice: () => Promise<{ status: string; deviceId: string }>;
-  verifyDevice: () => Promise<{ deviceId: string; securityLevel: number }>;
+  verifyDevice: (p?: { phase?: "verify" | "register" }) => Promise<{
+    deviceId: string;
+    securityLevel: number;
+  }>;
   logout: () => Promise<{ success: true }>;
   getStatus: () => Promise<PublicAuthStatus>;
   resume: () => Promise<PublicAuthStatus>;
@@ -86,6 +102,8 @@ export interface AuthApi {
   offAuthStatusChanged: (cb: (status: PublicAuthStatus) => void) => void;
   onSessionExpired: (cb: () => void) => void;
   offSessionExpired: (cb: () => void) => void;
+  onDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => void;
+  offDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => void;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -97,6 +115,10 @@ const statusListeners = new WeakMap<
   (event: any, status: PublicAuthStatus) => void
 >();
 const expiredListeners = new WeakMap<() => void, (event: any) => void>();
+const progressListeners = new WeakMap<
+  (event: DeviceProgressEvent) => void,
+  (event: any, payload: DeviceProgressEvent) => void
+>();
 
 // ────────────────────────────────────────────────────────────
 // Expose the generic domain dispatch (business/data/db/settings/...).
@@ -147,7 +169,8 @@ contextBridge.exposeInMainWorld("authApi", {
   register: (p: { email: string }) => invokeUnwrapped("auth:register", p),
   login: (p: { email: string }) => invokeUnwrapped("auth:login", p),
   registerDevice: () => invokeUnwrapped("auth:registerDevice"),
-  verifyDevice: () => invokeUnwrapped("auth:verifyDevice"),
+  verifyDevice: (p?: { phase?: "verify" | "register" }) =>
+    invokeUnwrapped("auth:verifyDevice", p),
   logout: () => invokeUnwrapped("auth:logout"),
   getStatus: () => invokeUnwrapped("auth:getStatus"),
   resume: () => invokeUnwrapped("auth:resume"),
@@ -175,6 +198,18 @@ contextBridge.exposeInMainWorld("authApi", {
     if (wrapped) {
       ipcRenderer.off("auth:session-expired", wrapped);
       expiredListeners.delete(cb);
+    }
+  },
+  onDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => {
+    const wrapped = (_event: any, payload: DeviceProgressEvent) => cb(payload);
+    progressListeners.set(cb, wrapped);
+    ipcRenderer.on("auth:device-progress", wrapped);
+  },
+  offDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => {
+    const wrapped = progressListeners.get(cb);
+    if (wrapped) {
+      ipcRenderer.off("auth:device-progress", wrapped);
+      progressListeners.delete(cb);
     }
   },
 });

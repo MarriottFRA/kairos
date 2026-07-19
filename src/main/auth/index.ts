@@ -15,6 +15,8 @@ import { SessionManager } from "./sessionManager";
 import { ApiClient } from "./apiClient";
 import { AuthController } from "./authController";
 import { MsBroker } from "./msBroker";
+import { TpmBinding } from "./tpmBinding";
+import { createProgressEmitter } from "./deviceProgress";
 
 export interface AuthStack {
   authController: AuthController;
@@ -29,11 +31,24 @@ export async function createAuthStack(options: {
 }): Promise<AuthStack> {
   const secureStore = new SecureStore();
   const deviceIdentity = new DeviceIdentity();
+
+  // TpmBinding must exist BEFORE SessionManager (which signs every refresh with
+  // it), yet it needs SessionManager's access token for /devices/tpm/register.
+  // The token is only ever read at call time, so a boxed reference resolves the
+  // cycle without a partially-initialised object.
+  const session: { current: SessionManager | null } = { current: null };
+  const tpmBinding = new TpmBinding({
+    baseUrl: options.baseUrl,
+    getAccessToken: () => session.current?.getAccessToken() ?? null,
+  });
+
   const sessionManager = new SessionManager({
     secureStore,
     deviceIdentity,
+    tpmBinding,
     baseUrl: options.baseUrl,
   });
+  session.current = sessionManager;
   const apiClient = new ApiClient({ sessionManager, baseUrl: options.baseUrl });
   const msBroker = new MsBroker({
     swaOrigin: options.swaOrigin,
@@ -45,6 +60,8 @@ export async function createAuthStack(options: {
     secureStore,
     apiClient,
     msBroker,
+    tpmBinding,
+    emitProgress: createProgressEmitter(options.sendToRenderer),
     sendToRenderer: options.sendToRenderer,
   });
 

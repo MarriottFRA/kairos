@@ -65,6 +65,13 @@ const config: ForgeConfig = {
         'node-machine-id',
         'systeminformation',
         'electron-squirrel-startup',
+        // FFI into ncrypt.dll for TPM device binding. `koffi` itself is only a
+        // JS shim — the actual koffi.node binary lives in the platform sibling
+        // package, so BOTH must be copied or the packaged app silently loses
+        // TPM support while dev keeps working.
+        'koffi',
+        '@koromix/koffi-win32-x64',
+
         // exceljs and all transitive dependencies
         'exceljs', 'jszip', 'archiver', 'dayjs', 'fast-csv', 'readable-stream', 'saxes', 'tmp', 'unzipper',
         '@fast-csv/format', '@fast-csv/parse', 'archiver-utils', 'async', 'balanced-match', 'base64-js',

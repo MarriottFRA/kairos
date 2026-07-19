@@ -24,6 +24,7 @@
 import { net } from "electron";
 import { SecureStore } from "./secureStore";
 import { DeviceIdentity } from "./deviceIdentity";
+import { TpmBinding } from "./tpmBinding";
 
 /** Access token TTL (server-defined). Used only to schedule proactive refresh. */
 const ACCESS_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -51,6 +52,7 @@ interface RefreshResponse {
 export interface SessionManagerDeps {
   secureStore: SecureStore;
   deviceIdentity: DeviceIdentity;
+  tpmBinding: TpmBinding;
   baseUrl: string;
 }
 
@@ -165,15 +167,38 @@ export class SessionManager {
     const { deviceId, deviceSecret } =
       await this.deps.deviceIdentity.getCredentials();
 
-    const response = await net.fetch(`${this.deps.baseUrl}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" }, // NO Authorization header
-      body: JSON.stringify({
-        refresh_token: storedRefreshToken,
-        device_id: deviceId,
-        device_secret: deviceSecret,
-      }),
-    });
+    // TPM-bound devices must prove liveness on every rotation. `undefined` on a
+    // device that never enrolled — the field is simply omitted.
+    const signature = await this.deps.tpmBinding.signNonce(deviceId, "refresh");
+
+    const post = (sig: string | undefined) =>
+      net.fetch(`${this.deps.baseUrl}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }, // NO Authorization header
+        body: JSON.stringify({
+          refresh_token: storedRefreshToken,
+          device_id: deviceId,
+          device_secret: deviceSecret,
+          ...(sig ? { signature: sig } : {}),
+        }),
+      });
+
+    let response = await post(signature);
+
+    // A 401 on a SIGNED refresh is ambiguous: it may just be a stale or already
+    // burned nonce. Nonces burn on failed attempts too, so recovery needs a new
+    // one. Retry exactly once with a fresh challenge BEFORE concluding the
+    // session is dead — otherwise a transient nonce problem logs the user out.
+    if (response.status === 401 && signature) {
+      const retrySignature = await this.deps.tpmBinding.signNonce(
+        deviceId,
+        "refresh",
+        { force: true }
+      );
+      if (retrySignature) {
+        response = await post(retrySignature);
+      }
+    }
 
     if (response.status === 401) {
       // Any 401 here = session is dead (idle/absolute cap/revoked/reuse/device).

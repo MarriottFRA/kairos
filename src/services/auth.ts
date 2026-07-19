@@ -56,6 +56,7 @@ export interface PublicAuthStatus {
   devicePending: boolean;
   encryptionAvailable: boolean;
   lastUserEmail: string | null;
+  tpmBound: boolean; // the server holds a hardware-sealed key for this device
 }
 
 // ── Domain types re-exported for consumers (unchanged shapes) ──
@@ -104,7 +105,8 @@ export interface DeviceRegisterResponse {
 }
 
 // ── Window augmentation for the typed auth bridge ──
-import type { AuthApi } from "../preload";
+import type { AuthApi, DeviceProgressEvent } from "../preload";
+export type { DeviceProgressEvent };
 declare global {
   interface Window {
     authApi?: AuthApi;
@@ -118,6 +120,7 @@ const EMPTY_STATUS: PublicAuthStatus = {
   devicePending: false,
   encryptionAvailable: false,
   lastUserEmail: null,
+  tpmBound: false,
 };
 
 class AuthClient {
@@ -247,6 +250,20 @@ class AuthClient {
     window.authApi?.offSessionExpired(cb);
   }
 
+  /** True when the server holds a hardware-sealed key for this device. */
+  isTpmBound(): boolean {
+    return this.status.tpmBound;
+  }
+
+  /** Per-step progress from the main-process device verify/register flows. */
+  onDeviceProgress(cb: (event: DeviceProgressEvent) => void): void {
+    window.authApi?.onDeviceProgress(cb);
+  }
+
+  offDeviceProgress(cb: (event: DeviceProgressEvent) => void): void {
+    window.authApi?.offDeviceProgress(cb);
+  }
+
   private setLevel(securityLevel: number): void {
     this.status = {
       ...this.status,
@@ -278,8 +295,14 @@ class AuthClient {
     return { settings: (result as any)?.settings ?? null };
   }
 
-  async verifyDevice(): Promise<DeviceVerifyResponse> {
-    const result = await this.requireAuthApi().verifyDevice();
+  /**
+   * `phase: "register"` marks the follow-up approval check that runs straight
+   * after a registration, so main reports it on the register progress bar.
+   */
+  async verifyDevice(
+    options: { phase?: "verify" | "register" } = {}
+  ): Promise<DeviceVerifyResponse> {
+    const result = await this.requireAuthApi().verifyDevice(options);
     this.setLevel(result.securityLevel);
     this.status = { ...this.status, deviceId: result.deviceId, devicePending: false };
     this.notify();
@@ -313,6 +336,8 @@ class AuthClient {
         encryptionAvailable: this.status.encryptionAvailable,
         lastUserEmail: this.status.lastUserEmail,
         deviceId: this.status.deviceId,
+        // Hardware binding is a property of the machine, not the session.
+        tpmBound: this.status.tpmBound,
       };
       // Signing out removes the on-disk token, so there's nothing to resume.
       this.resumable = false;

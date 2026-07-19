@@ -43,7 +43,13 @@ export function createAuthHandlers(
 
   const registerDevice: IpcHandler = () => controller.registerDevice();
 
-  const verifyDevice: IpcHandler = () => controller.verifyDevice();
+  // `phase: "register"` marks the follow-up approval check after a registration,
+  // so it reports into the register progress bar instead of restarting the
+  // verify one.
+  const verifyDevice: IpcHandler<{ phase?: "verify" | "register" } | undefined> = (
+    _event,
+    p
+  ) => controller.verifyDevice({ phase: p?.phase });
 
   const logout: IpcHandler = () => controller.logout();
 
