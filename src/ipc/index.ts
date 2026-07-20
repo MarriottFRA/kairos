@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createDataHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -56,6 +56,12 @@ export function initializeIpc(deps: {
   // Register Settings handlers
   const settingsHandlers = createSettingsHandlers();
   Object.entries(settingsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
+  // Register Calendar handlers (budget/forecast calendar in the local store)
+  const calendarHandlers = createCalendarHandlers();
+  Object.entries(calendarHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
   });
 

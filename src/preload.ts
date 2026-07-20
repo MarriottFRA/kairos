@@ -9,6 +9,7 @@ import { contextBridge, ipcRenderer } from "electron";
 // Business API calls go through the single allowlisted `data:fetch` channel.
 // ────────────────────────────────────────────────────────────
 const ALLOWED_CHANNEL_PREFIXES = [
+  "calendar:",
   "data:fetch",
   "settings-",
   "settings:",

@@ -2,6 +2,11 @@ import { app, safeStorage } from "electron";
 import path from "path";
 import Database from "better-sqlite3-multiple-ciphers";
 import fs from "fs";
+import {
+  CalendarYear,
+  DEFAULT_WEEKEND_MASK,
+  normalizeCalendar,
+} from "./shared/calendar";
 
 // Kairos local store. This is the unencrypted database that the auth stack and
 // app settings depend on (refresh token, device salt, and user_settings).
@@ -33,7 +38,9 @@ db.pragma("foreign_keys = ON");
 // Baseline schema version. Kairos is a fresh start, so there is no migration
 // history to replay — initializeDatabase() just creates the tables and stamps
 // this version.
-const CURRENT_SCHEMA_VERSION = 1;
+//   1 - schema_info, user_settings
+//   2 - budget/forecast calendar (calendar_years, calendar_months)
+const CURRENT_SCHEMA_VERSION = 2;
 
 interface UserSettings {
   themeMode?: "light" | "dark";
@@ -65,6 +72,26 @@ export async function initializeDatabase(): Promise<void> {
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      -- Budget/forecast calendar, one row per (hotel OU, year). weekend_mask is
+      -- the weekday pattern used to seed the Weekends row; the per-month counts
+      -- in calendar_months stay authoritative once the user edits them.
+      CREATE TABLE IF NOT EXISTS calendar_years (
+          ou TEXT NOT NULL,
+          year INTEGER NOT NULL,
+          weekend_mask INTEGER NOT NULL,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (ou, year)
+      );
+      CREATE TABLE IF NOT EXISTS calendar_months (
+          ou TEXT NOT NULL,
+          year INTEGER NOT NULL,
+          month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+          calendar_days INTEGER NOT NULL,
+          public_holidays INTEGER NOT NULL DEFAULT 0,
+          weekend_days INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (ou, year, month),
+          FOREIGN KEY (ou, year) REFERENCES calendar_years (ou, year) ON DELETE CASCADE
       );
     `);
 
@@ -283,6 +310,112 @@ export async function setUserSettings(settings: UserSettings): Promise<string> {
   }
 }
 
+//------------------------------------------------------------------------------
+//--- BUDGET / FORECAST CALENDAR -----------------------------------------------
+// Plain planning data (day counts per month), so it lives here in the
+// unencrypted store alongside settings rather than in secure_db.ts.
+
+/** Read one hotel-year calendar, or null if it has never been saved. */
+export async function getCalendarYear(
+  ou: string,
+  year: number
+): Promise<CalendarYear | null> {
+  const head = db
+    .prepare("SELECT weekend_mask, updated_at FROM calendar_years WHERE ou = ? AND year = ?")
+    .get(ou, year) as { weekend_mask: number; updated_at: string } | undefined;
+
+  if (!head) return null;
+
+  const rows = db
+    .prepare(
+      `SELECT month, calendar_days, public_holidays, weekend_days
+         FROM calendar_months
+        WHERE ou = ? AND year = ?
+        ORDER BY month`
+    )
+    .all(ou, year) as Array<{
+      month: number;
+      calendar_days: number;
+      public_holidays: number;
+      weekend_days: number;
+    }>;
+
+  const calendar = normalizeCalendar(
+    ou,
+    year,
+    head.weekend_mask,
+    rows.map((row) => ({
+      month: row.month,
+      calendarDays: row.calendar_days,
+      publicHolidays: row.public_holidays,
+      weekendDays: row.weekend_days,
+    }))
+  );
+
+  return { ...calendar, updatedAt: head.updated_at ?? null };
+}
+
+/** Upsert a whole hotel-year calendar in one transaction. */
+export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
+  const { ou, year } = calendar;
+  const normalized = normalizeCalendar(
+    ou,
+    year,
+    calendar.weekendMask ?? DEFAULT_WEEKEND_MASK,
+    calendar.months ?? []
+  );
+
+  const upsertHead = db.prepare(`
+    INSERT INTO calendar_years (ou, year, weekend_mask, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(ou, year) DO UPDATE SET
+      weekend_mask = excluded.weekend_mask,
+      updated_at = CURRENT_TIMESTAMP
+  `);
+  const upsertMonth = db.prepare(`
+    INSERT INTO calendar_months
+      (ou, year, month, calendar_days, public_holidays, weekend_days)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ou, year, month) DO UPDATE SET
+      calendar_days = excluded.calendar_days,
+      public_holidays = excluded.public_holidays,
+      weekend_days = excluded.weekend_days
+  `);
+
+  try {
+    db.transaction(() => {
+      upsertHead.run(ou, year, normalized.weekendMask);
+      for (const row of normalized.months) {
+        upsertMonth.run(
+          ou,
+          year,
+          row.month,
+          row.calendarDays,
+          row.publicHolidays,
+          row.weekendDays
+        );
+      }
+    })();
+  } catch (error) {
+    console.error("Error saving calendar year:", error);
+    throw error;
+  }
+}
+
+/** Years that already have a saved calendar for this OU, newest first. */
+export async function listCalendarYears(ou: string): Promise<number[]> {
+  const rows = db
+    .prepare("SELECT year FROM calendar_years WHERE ou = ? ORDER BY year DESC")
+    .all(ou) as Array<{ year: number }>;
+  return rows.map((row) => row.year);
+}
+
+/** Drop a saved calendar (months cascade). */
+export async function deleteCalendarYear(ou: string, year: number): Promise<void> {
+  db.prepare("DELETE FROM calendar_years WHERE ou = ? AND year = ?").run(ou, year);
+}
+
+//------------------------------------------------------------------------------
 // Delete a specific setting
 export async function deleteUserSetting(key: string): Promise<string> {
   try {

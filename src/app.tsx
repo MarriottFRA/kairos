@@ -85,7 +85,7 @@ const router = createHashRouter([
 // offline and is expected to appear in the JS bundle. Order 119387, annual
 // subscription: any MUI X version released before 2026-10-13 works in
 // production indefinitely; renew before then to keep upgrading in development.
-LicenseInfo.setLicenseKey("0170f20369e51857b2536db7dfa0f38eTz0xMTkzODcsRT0xNzkxOTM1OTk5MDAwLFM9cHJlbWl1bSxMTT1zdWJzY3JpcHRpb24sUFY9aW5pdGlhbCxLVj0y");
+LicenseInfo.setLicenseKey("4e66d921d752befefa9384a027675566Tz0xMTkzODcsRT0xNzkyMDIyMzk5MDAwLFM9cHJlbWl1bSxMTT1hbm51YWwsUFY9UTEtMjAyNixRPTEsQVQ9bXVsdGksS1Y9Mg==");
 
 //root document
 createRoot(document.getElementById("root")).render(
