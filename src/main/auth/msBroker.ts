@@ -173,9 +173,14 @@ export class MsBroker {
       } catch (error) {
         // '/' was reachable but the principal wasn't established (public root, not
         // yet signed in). For an interactive attempt, trigger Entra login explicitly.
+        //
+        // `network`/`mint_failed` are included: right after a sign-out the mint can
+        // be aborted mid-flight (page redirecting away as we resolve on the
+        // committed URL), which surfaces as HTTP 0 rather than a clean 401. That's
+        // still "no session" — retry interactively instead of hard-failing.
         if (
           error instanceof BrokerError &&
-          error.code === "no_principal" &&
+          ["no_principal", "network", "mint_failed"].includes(error.code) &&
           !silent
         ) {
           await this.waitForSwaOrigin(
@@ -490,7 +495,13 @@ export class MsBroker {
     const result = (await win.webContents.executeJavaScript(
       `(async () => {
         try {
-          const r = await fetch('/api/mint-ms-token', { method: 'POST', credentials: 'include' });
+          const r = await fetch('/api/mint-ms-token', { method: 'POST', credentials: 'include', redirect: 'manual' });
+          // A redirect (to the IdP) means the SWA cookie is missing/expired, i.e.
+          // "not signed in". With redirect:'manual' it surfaces as an opaque
+          // response instead of a cross-origin fetch that throws with status 0.
+          if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) {
+            return { status: 401, body: { error: 'no_principal' } };
+          }
           const text = await r.text();
           let body = null;
           try { body = JSON.parse(text); } catch (_e) { body = { raw: text }; }
