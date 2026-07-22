@@ -24,6 +24,7 @@ import ListItemText from "@mui/material/ListItemText";
 import Toolbar from "@mui/material/Toolbar";
 import Box from "@mui/material/Box";
 import HomeIcon from "@mui/icons-material/Home";
+import BadgeIcon from "@mui/icons-material/Badge";
 import ApartmentIcon from "@mui/icons-material/Apartment";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
@@ -38,7 +39,10 @@ import Stack from "@mui/material/Stack";
 import Chip from "@mui/material/Chip";
 import ThemeToggle from "./customComponents/themeToggle";
 import { useSettingsStore } from "../store/settings";
+import PlanningContextPicker from "../components/positions/PlanningContextPicker";
+import { contextChipSx } from "../components/ContextChip";
 import authService, { Hotel } from "../services/auth";
+import { syncMappingTables } from "../services/mappingTablesService";
 
 // window.ipcApi / window.authApi are typed globally (src/renderer.ts,
 // src/services/auth.ts) — no local augmentation needed here.
@@ -266,6 +270,17 @@ const handleSignOut = useCallback(async () => {
     fetchCurrentUser();
   }, []);
 
+  // Version-gated sync of the cached mapping reference tables, once per signed-in
+  // session. These change extremely infrequently, so this is a cheap /version
+  // probe that only pulls the bulk payloads when the server version has moved.
+  // Fire-and-forget: a failure here never blocks the shell (the settings screen
+  // has a manual rebuild button as a fallback).
+  useEffect(() => {
+    syncMappingTables().catch((error) => {
+      console.warn("Mapping tables sync skipped:", error);
+    });
+  }, []);
+
   // Load hotels (live read) and resolve the current hotel name
   useEffect(() => {
     const loadHotels = async () => {
@@ -330,6 +345,9 @@ const handleSignOut = useCallback(async () => {
           <Stack direction="row" spacing={1} sx={{
             alignItems: "center"
           }}>
+            {/* Scope selectors, outermost first: hotel > year > scenario. All
+                three are the same outlined chip + dropdown menu, so the row
+                reads as one control family rather than three widgets. */}
             {/* Hotel selector button */}
             {currentHotelName && (
               <Tooltip title="Switch hotel">
@@ -342,24 +360,18 @@ const handleSignOut = useCallback(async () => {
                   onClick={handleHotelMenuOpen}
                   deleteIcon={<ArrowDropDownIcon />}
                   onDelete={handleHotelMenuOpen}
-                  sx={{
-                    mr: 1,
-                    borderColor: theme.palette.divider,
-                    color: theme.palette.text.secondary,
-                    '&:hover': {
-                      backgroundColor: alpha(theme.palette.primary.main, 0.08),
-                      borderColor: theme.palette.primary.main,
-                    },
-                    '& .MuiChip-deleteIcon': {
-                      color: theme.palette.text.secondary,
-                      '&:hover': {
-                        color: theme.palette.primary.main,
-                      },
-                    },
-                  }}
+                  // Shared with the year/scenario chips so the three stay
+                  // pixel-identical as the styling evolves.
+                  sx={contextChipSx}
                 />
               </Tooltip>
             )}
+
+            {/* Budget year + scenario. Persisted settings, so the selection
+                holds as you step across screens — the Positions grid and the
+                report packs all read the same pair. */}
+            <PlanningContextPicker />
+
             {/* Theme toggle (global) */}
             <ThemeToggle />
 
@@ -630,6 +642,14 @@ const handleSignOut = useCallback(async () => {
                 <HomeIcon />
               </ListItemIcon>
               <ListItemText primary="Home" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          <ListItem key="positions" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/positions")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <BadgeIcon />
+              </ListItemIcon>
+              <ListItemText primary="Positions" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
         </List>

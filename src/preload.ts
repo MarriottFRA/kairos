@@ -10,11 +10,14 @@ import { contextBridge, ipcRenderer } from "electron";
 // ────────────────────────────────────────────────────────────
 const ALLOWED_CHANNEL_PREFIXES = [
   "calendar:",
+  "position-defaults:",
   "data:fetch",
+  "mapping-tables:",
   "settings-",
   "settings:",
   "app:",
   "window:",
+  "positions:",
 ] as const;
 
 // Legacy channel names still used by some renderer call sites → canonical names.

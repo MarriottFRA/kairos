@@ -45,6 +45,14 @@ export const MONTH_LABELS = [
 /** Sunday-first weekday labels, aligned with the bit order of `weekendMask`. */
 export const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
+/**
+ * Display order for the weekend picker: Monday-first, ending on Sunday, which is
+ * how most of the world reads a week. Values are `getDay()` indices into
+ * `WEEKDAY_LABELS`, so this reorders the buttons visually without touching the
+ * Sunday-first bit order of `weekendMask`.
+ */
+export const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const;
+
 /** Sat + Sun — the most common pattern, and what a fresh year starts from. */
 export const DEFAULT_WEEKEND_MASK = (1 << 0) | (1 << 6); // 65
 

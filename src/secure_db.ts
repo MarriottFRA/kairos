@@ -1,9 +1,12 @@
-import { app, safeStorage } from "electron";
-import path from "path";
-import crypto from "crypto";
+import { app } from "electron";
 import fs from "fs";
 import Database from "better-sqlite3-multiple-ciphers";
-import { readRawSetting, writeRawSetting } from "./local_db";
+import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
+import {
+  applyValueStoreV3,
+  POSITIONS_VALUE_TABLES_SQL,
+} from "./main/positions/schema";
+import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 // Kairos secure store: the encrypted-at-rest database for feature data.
 //
@@ -12,80 +15,47 @@ import { readRawSetting, writeRawSetting } from "./local_db";
 // level encryption uses ChaCha20-Poly1305, which is authenticated (tampering
 // with the file is detected, not silently decrypted into garbage).
 //
-// Key handling is the part that actually matters. The key is 32 random bytes
-// minted on first run, never derived from anything guessable and never present
-// in the source, the bundle, or .env. At rest it lives as a DPAPI blob (Electron
-// safeStorage) in the *unencrypted* settings DB, which binds it to this Windows
-// user on this machine: copying kairos_secure.db to another box yields nothing.
+// Key handling lives in main/security/dbKeyMaterial.ts. In short: the database
+// key is 32 random bytes wrapped under a KEK derived from two halves — one held
+// locally as a DPAPI blob, one released by the server per device. Both are
+// required, so the database file is inert without an authenticated session.
 //
-// Threat model, stated plainly: this defends against the database file being
-// lifted off the machine — backup, stolen laptop, someone browsing the Documents
-// folder. It does NOT defend against an attacker already running code as this
-// Windows user, who can simply ask DPAPI to unwrap the key exactly as we do.
+// LIFECYCLE. This database is session-scoped, unlike the settings DB which is
+// open for the whole run. It cannot be opened until sign-in has produced the
+// server key half, so:
+//
+//     sign in  -> unlockSecureDatabase(serverHalf)  -> secureDb() works
+//     sign out -> lockSecureDatabase()              -> secureDb() throws
+//
+// secureDb() deliberately does NOT open on demand. An implicit open is
+// impossible here anyway (there is no key to open with), and throwing makes a
+// "read the DB before login" bug obvious instead of intermittent.
 //
 // NOTE: the two databases are separate files with separate connections, so you
 // cannot ATTACH or JOIN across the settings DB and this one. Keep the boundary
 // clean: settings and auth state on one side, feature data on the other.
 
-/** user_settings key holding the base64 DPAPI-wrapped database key. */
-const SECURE_DB_KEY_ENC = "secureDbKeyEnc";
+const securePath = SECURE_DB_PATH;
 
-const documentsPath = app.getPath("documents");
-const kairosFolderPath = path.join(documentsPath, "Kairos");
-const securePath = path.join(kairosFolderPath, "kairos_secure.db");
-
-// Baseline schema version for the encrypted database, tracked independently of
-// the settings DB.
-const CURRENT_SCHEMA_VERSION = 1;
+// Schema versions for the encrypted database, tracked independently of the
+// settings DB:
+//   1 - schema_info
+//   2 - positions value store (positions, position_pii, component_values,
+//       buyout_rows)
+//   3 - positions.lineage_id + positions.active (cross-year identity and the
+//       retained-but-not-budgeted toggle)
+//
+// Migrations for this store can only ever run inside createSchema() — that is
+// the one moment the file is decryptable (post-unlock). Each step runs in its
+// own transaction and stamps its version as it lands.
+const CURRENT_SCHEMA_VERSION = 3;
 
 type SecureDb = InstanceType<typeof Database>;
 
 let db: SecureDb | null = null;
 
-//------------------------------------------------------------------------------
-//--- KEY PROVISIONING ---------------------------------------------------------
-
-/**
- * Fetch the database key, minting and persisting one on first run.
- *
- * Returns the key as a hex string; it is handed to SQLite3MultipleCiphers as a
- * passphrase, so the cipher's KDF runs over it once per connection open.
- */
-function getOrCreateDbKey(): string {
-  if (!safeStorage.isEncryptionAvailable()) {
-    // Without DPAPI we have nowhere safe to put the key. Storing it in plaintext
-    // beside the database would make the encryption decorative, so refuse
-    // instead of pretending. In practice this only trips on a broken Windows
-    // profile or an unsupported platform.
-    throw new Error(
-      "OS encryption (safeStorage/DPAPI) unavailable — refusing to open the secure database with an unprotectable key"
-    );
-  }
-
-  const stored = readRawSetting(SECURE_DB_KEY_ENC);
-  if (stored) {
-    try {
-      return safeStorage.decryptString(Buffer.from(stored, "base64"));
-    } catch (error) {
-      // The wrapped key is unreadable — almost always a lost Windows profile or
-      // credential reset. The encrypted data is now permanently unrecoverable;
-      // no key exists anywhere else by design.
-      //
-      // Unlike the device salt (whose value must never change), this database
-      // holds re-syncable feature data, so the recoverable move is to discard it
-      // and start clean rather than block the launch forever.
-      console.error(
-        "[secure_db] Wrapped database key is undecryptable — discarding the encrypted database and re-keying:",
-        error
-      );
-      destroySecureDatabaseFiles();
-    }
-  }
-
-  const newKey = crypto.randomBytes(32).toString("hex");
-  writeRawSetting(SECURE_DB_KEY_ENC, safeStorage.encryptString(newKey).toString("base64"));
-  return newKey;
-}
+// Retained ONLY to power the dev-mode key reveal below; dropped on lock.
+let unlockedKeyHex: string | null = null;
 
 /** Remove the encrypted database and its WAL sidecars from disk. */
 function destroySecureDatabaseFiles(): void {
@@ -105,16 +75,17 @@ function destroySecureDatabaseFiles(): void {
 /**
  * Open the encrypted database, creating it on first use.
  *
- * Idempotent — later calls return the existing connection.
+ * Call once sign-in has yielded the device's server key half. Idempotent — later
+ * calls return the existing connection without re-deriving the key.
+ *
+ * @param serverHalf 32 bytes released by the API for this device.
  */
-export function initializeSecureDatabase(): SecureDb {
+export function unlockSecureDatabase(serverHalf: Buffer): SecureDb {
   if (db) return db;
 
-  if (!fs.existsSync(kairosFolderPath)) {
-    fs.mkdirSync(kairosFolderPath, { recursive: true });
-  }
+  ensureDataDir();
 
-  const key = getOrCreateDbKey();
+  const key = resolveDbKey(serverHalf);
   const handle = new Database(securePath);
 
   // Cipher must be selected BEFORE the key: `key` runs the KDF for whichever
@@ -147,25 +118,78 @@ export function initializeSecureDatabase(): SecureDb {
   handle.pragma("temp_store = MEMORY");
 
   db = handle;
+  unlockedKeyHex = key;
   createSchema(handle);
   return handle;
 }
 
-/** Accessor for the open connection; opens it on first use. */
-export function secureDb(): SecureDb {
-  return db ?? initializeSecureDatabase();
+/**
+ * TEMP / DEV ONLY: reveal the derived database key so the developer can open
+ * kairos_secure.db in an external SQLite tool for review. Hard-blocked in
+ * packaged builds (same gate as the dev server key half) — this must never
+ * ship as a way to extract a production key.
+ */
+export function revealSecureDbKeyForDev(): { keyHex: string; cipher: string } {
+  if (app.isPackaged) {
+    throw new Error("Key reveal is not available in packaged builds");
+  }
+  if (!db || !unlockedKeyHex) {
+    throw new Error("Secure database is locked — sign in first");
+  }
+  return { keyHex: unlockedKeyHex, cipher: "chacha20" };
 }
 
-/** Close the connection — call on app quit so WAL is checkpointed cleanly. */
-export function closeSecureDatabase(): void {
+/**
+ * Accessor for the open connection.
+ *
+ * Throws when the database is locked — see the lifecycle note at the top of this
+ * file. There is no on-demand open because there is no key available outside a
+ * signed-in session.
+ */
+export function secureDb(): SecureDb {
+  if (!db) {
+    throw new Error(
+      "Secure database is locked — unlockSecureDatabase() must run after sign-in before feature data is available"
+    );
+  }
+  return db;
+}
+
+/** Whether the secure database is currently unlocked. */
+export function isSecureDatabaseUnlocked(): boolean {
+  return db !== null;
+}
+
+/**
+ * Close the connection, dropping the key from memory. Call on sign-out.
+ *
+ * The database file stays on disk and is readable again after the next
+ * successful sign-in; only the in-memory key is discarded.
+ */
+export function lockSecureDatabase(): void {
   if (db) {
     db.close();
     db = null;
   }
+  unlockedKeyHex = null;
+}
+
+/** Close the connection — call on app quit so WAL is checkpointed cleanly. */
+export function closeSecureDatabase(): void {
+  lockSecureDatabase();
 }
 
 //------------------------------------------------------------------------------
 //--- SCHEMA -------------------------------------------------------------------
+
+const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
+  2: (handle) => {
+    handle.exec(POSITIONS_VALUE_TABLES_SQL);
+  },
+  3: (handle) => {
+    applyValueStoreV3(handle);
+  },
+};
 
 function createSchema(handle: SecureDb): void {
   handle.exec(`
@@ -176,31 +200,63 @@ function createSchema(handle: SecureDb): void {
     );
   `);
 
+  // Stamp the baseline (1) without downgrading; the runner owns the rest.
   handle
     .prepare(`
       INSERT INTO schema_info (key, value, updated_at)
-      VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+      VALUES ('schema_version', '1', CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
+      WHERE CAST(schema_info.value AS INTEGER) < 1
     `)
-    .run(String(CURRENT_SCHEMA_VERSION));
+    .run();
 
-  // Feature tables go here as they land.
+  runMigrations(handle);
+}
+
+/** Apply stepwise migrations above the stored schema version. */
+function runMigrations(handle: SecureDb): void {
+  const row = handle
+    .prepare("SELECT value FROM schema_info WHERE key = 'schema_version'")
+    .get() as { value?: string } | undefined;
+  const stored = Number(row?.value ?? 0) || 0;
+
+  for (let version = stored + 1; version <= CURRENT_SCHEMA_VERSION; version++) {
+    const migrate = MIGRATIONS[version];
+    if (!migrate) continue; // version 1 is the baseline above
+    handle.transaction(() => {
+      migrate(handle);
+      handle
+        .prepare(`
+          INSERT INTO schema_info (key, value, updated_at)
+          VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        `)
+        .run(String(version));
+    })();
+  }
 }
 
 //------------------------------------------------------------------------------
 //--- MAINTENANCE --------------------------------------------------------------
 
 /**
- * Drop the encrypted database and its key, then rebuild both from scratch.
+ * DESTRUCTIVE: drop the encrypted database and its wrapped key, then rebuild both
+ * from scratch under the supplied server half.
  *
- * For sign-out / "forget this device" style flows, and the recovery path when
- * the data is known to be unusable.
+ * This is the *only* path that deletes encrypted data. Key-resolution failures
+ * deliberately throw rather than reset (see resolveDbKey), because a wrong server
+ * half is indistinguishable from corruption and auto-resetting would turn a
+ * recoverable server-side mistake into permanent data loss. Call this only on an
+ * explicit user action — "forget this device", or a prompt after a fault has been
+ * surfaced.
  */
-export function resetSecureDatabase(): void {
-  closeSecureDatabase();
+export function resetSecureDatabase(serverHalf: Buffer): SecureDb {
+  lockSecureDatabase();
   destroySecureDatabaseFiles();
-  writeRawSetting(SECURE_DB_KEY_ENC, "");
-  initializeSecureDatabase();
+  clearWrappedDbKey();
+  return unlockSecureDatabase(serverHalf);
 }

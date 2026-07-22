@@ -1,12 +1,23 @@
-import { app, safeStorage } from "electron";
-import path from "path";
+import { safeStorage } from "electron";
 import Database from "better-sqlite3-multiple-ciphers";
-import fs from "fs";
 import {
   CalendarYear,
   DEFAULT_WEEKEND_MASK,
   normalizeCalendar,
 } from "./shared/calendar";
+import {
+  DefaultField,
+  DefaultKey,
+  PositionDefaults,
+  normalizePositionDefaults,
+} from "./shared/positionDefaults";
+import { POSITIONS_STRUCTURE_TABLES_SQL } from "./main/positions/schema";
+import { MAPPING_TABLES_SQL } from "./main/mappingTables/schema";
+import {
+  LOCAL_DB_PATH,
+  ensureDataDir,
+  migrateLegacyDataDir,
+} from "./main/paths";
 
 // Kairos local store. This is the unencrypted database that the auth stack and
 // app settings depend on (refresh token, device salt, and user_settings).
@@ -20,27 +31,90 @@ import {
 // The exported functions stay `async` even though better-sqlite3 is
 // synchronous, so every existing caller is unaffected.
 
-const documentsPath = app.getPath("documents");
-const kairosFolderPath = path.join(documentsPath, "Kairos");
-// Ensure the "Kairos" folder exists, create it if it doesn't
-if (!fs.existsSync(kairosFolderPath)) {
-  fs.mkdirSync(kairosFolderPath, { recursive: true });
-}
-const dbPath = path.join(kairosFolderPath, "kairos.db");
+// Both of these must run before the connection below: SQLite files can only be
+// relocated while no process holds them open, and this module opens at import.
+ensureDataDir();
+migrateLegacyDataDir();
 
 // Open the SQLite database. Files previously created by the libsql client are
 // ordinary SQLite databases and open here unchanged.
-const db = new Database(dbPath);
+const db = new Database(LOCAL_DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 db.pragma("foreign_keys = ON");
 
-// Baseline schema version. Kairos is a fresh start, so there is no migration
-// history to replay — initializeDatabase() just creates the tables and stamps
-// this version.
+// Schema versions:
 //   1 - schema_info, user_settings
 //   2 - budget/forecast calendar (calendar_years, calendar_months)
-const CURRENT_SCHEMA_VERSION = 2;
+//   3 - positions structure store (scenarios, cost component definitions,
+//       social security schemes, field catalog, hotels cache)
+//   4 - safe defaults for new positions (position_defaults), one row per
+//       (hotel OU, year)
+//   5 - mapping reference tables (account_maps, department_maps,
+//       account_department_combos) + mapping_tables_meta, cached from the backend
+//
+// Versions <= 2 predate the migration runner and are created wholesale by the
+// baseline exec in initializeDatabase() (idempotent IF NOT EXISTS). Later
+// versions are stepwise entries in MIGRATIONS, each run in its own transaction
+// and stamped as it lands.
+const CURRENT_SCHEMA_VERSION = 5;
+
+type LocalDb = InstanceType<typeof Database>;
+
+const POSITION_DEFAULTS_TABLE_SQL = `
+  -- Safe defaults that seed a new position's Contract columns, one row per
+  -- (hotel OU, year). weekly_hours drives Daily Hours (÷ 5); fields_json holds
+  -- the four defaults as { value, linked } so a field can be pinned away from
+  -- the calendar it otherwise tracks.
+  CREATE TABLE IF NOT EXISTS position_defaults (
+      ou           TEXT NOT NULL,
+      year         INTEGER NOT NULL,
+      weekly_hours REAL NOT NULL DEFAULT 40,
+      fields_json  TEXT NOT NULL,
+      updated_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ou, year)
+  );
+`;
+
+const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
+  3: (handle) => {
+    handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+  },
+  4: (handle) => {
+    handle.exec(POSITION_DEFAULTS_TABLE_SQL);
+  },
+  5: (handle) => {
+    handle.exec(MAPPING_TABLES_SQL);
+  },
+};
+
+/**
+ * Apply stepwise migrations above the stored schema version. Shared shape with
+ * secure_db.ts (deliberately duplicated — the two stores stay independent).
+ */
+function runMigrations(handle: LocalDb): void {
+  const row = handle
+    .prepare("SELECT value FROM schema_info WHERE key = 'schema_version'")
+    .get() as { value?: string } | undefined;
+  const stored = Number(row?.value ?? 0) || 0;
+
+  for (let version = stored + 1; version <= CURRENT_SCHEMA_VERSION; version++) {
+    const migrate = MIGRATIONS[version];
+    if (!migrate) continue; // versions <= 2 are covered by the baseline exec
+    handle.transaction(() => {
+      migrate(handle);
+      handle
+        .prepare(`
+          INSERT INTO schema_info (key, value, updated_at)
+          VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        `)
+        .run(String(version));
+    })();
+  }
+}
 
 interface UserSettings {
   themeMode?: "light" | "dark";
@@ -95,18 +169,27 @@ export async function initializeDatabase(): Promise<void> {
       );
     `);
 
-    // Stamp the baseline schema version.
+    // Stamp the baseline version (2) without ever downgrading a newer stamp —
+    // the stepwise runner below owns everything past the baseline.
     db.prepare(`
       INSERT INTO schema_info (key, value, updated_at)
-      VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+      VALUES ('schema_version', '2', CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
-    `).run(String(CURRENT_SCHEMA_VERSION));
+      WHERE CAST(schema_info.value AS INTEGER) < 2
+    `).run();
+
+    runMigrations(db);
   } catch (error) {
     console.error("Error initializing database:", error);
     throw error;
   }
+}
+
+/** The open plaintext database handle — for main-process repositories only. */
+export function localDbHandle(): LocalDb {
+  return db;
 }
 
 //------------------------------------------------------------------------------
@@ -413,6 +496,86 @@ export async function listCalendarYears(ou: string): Promise<number[]> {
 /** Drop a saved calendar (months cascade). */
 export async function deleteCalendarYear(ou: string, year: number): Promise<void> {
   db.prepare("DELETE FROM calendar_years WHERE ou = ? AND year = ?").run(ou, year);
+}
+
+//------------------------------------------------------------------------------
+//--- POSITION SAFE DEFAULTS ---------------------------------------------------
+// The numbers a new position's Contract columns start from, one row per
+// (hotel OU, year). Stored beside the calendar since they are plain planning
+// data that mostly track it.
+
+/** Read one hotel-year's safe defaults, or null if never saved. */
+export async function getPositionDefaults(
+  ou: string,
+  year: number
+): Promise<PositionDefaults | null> {
+  const row = db
+    .prepare(
+      "SELECT weekly_hours, fields_json, updated_at FROM position_defaults WHERE ou = ? AND year = ?"
+    )
+    .get(ou, year) as
+    | { weekly_hours: number; fields_json: string; updated_at: string }
+    | undefined;
+
+  if (!row) return null;
+
+  let fields: Partial<Record<DefaultKey, Partial<DefaultField>>> | undefined;
+  try {
+    fields = JSON.parse(row.fields_json);
+  } catch (error) {
+    console.error("Corrupt position_defaults.fields_json, using defaults:", error);
+    fields = undefined;
+  }
+
+  const defaults = normalizePositionDefaults(ou, year, row.weekly_hours, fields);
+  return { ...defaults, updatedAt: row.updated_at ?? null };
+}
+
+/** Upsert one hotel-year's safe defaults. */
+export async function savePositionDefaults(
+  defaults: PositionDefaults
+): Promise<void> {
+  const normalized = normalizePositionDefaults(
+    defaults.ou,
+    defaults.year,
+    defaults.weeklyHours,
+    defaults.fields
+  );
+
+  try {
+    db.prepare(`
+      INSERT INTO position_defaults (ou, year, weekly_hours, fields_json, updated_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(ou, year) DO UPDATE SET
+        weekly_hours = excluded.weekly_hours,
+        fields_json = excluded.fields_json,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      normalized.ou,
+      normalized.year,
+      normalized.weeklyHours,
+      JSON.stringify(normalized.fields)
+    );
+  } catch (error) {
+    console.error("Error saving position defaults:", error);
+    throw error;
+  }
+}
+
+/**
+ * Close the settings database — call on app quit.
+ *
+ * Closing the last connection is what makes SQLite checkpoint the WAL into the
+ * main file and unlink the -wal/-shm sidecars. Without this the log is never
+ * folded back in and grows across launches, leaving every startup to recover a
+ * journal that should already have been retired.
+ */
+export function closeLocalDatabase(): void {
+  try {
+    if (db.open) db.close();
+  } catch (error) {
+    console.warn("[local_db] Failed to close cleanly:", error);
+  }
 }
 
 //------------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 import { autoUpdater, net } from 'electron';
 import { BrowserWindow, app } from 'electron';
 import type { IpcHandler } from '../types';
+import { revealSecureDbKeyForDev } from '../../secure_db';
 
 // Use app.isPackaged to properly detect production vs development
 // app.isPackaged is true when running from a built/installed app
@@ -55,6 +56,12 @@ export function createAppHandlers(): Record<string, IpcHandler> {
   return {
     'app:get-version': async () => {
       return { version: app.getVersion() };
+    },
+
+    // TEMP / DEV ONLY: reveal the secure-DB key for external review of
+    // kairos_secure.db. Throws in packaged builds (see secure_db.ts).
+    'app:dev-secure-db-key': async () => {
+      return revealSecureDbKeyForDev();
     },
 
     'app:check-for-updates': async () => {

@@ -28,6 +28,7 @@ import Profile from "./routes/nestedPages/profile";
 import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
+import Positions from "./routes/nestedPages/positions";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // define the route
@@ -63,6 +64,11 @@ const router = createHashRouter([
         handle: { title: "Home" },
       },
       {
+        path: "positions",
+        element: <Positions />,
+        handle: { title: "Positions" },
+      },
+      {
         path: "profile",
         element: <Profile />,
         handle: { title: "My Profile" },
@@ -81,10 +87,7 @@ const router = createHashRouter([
   },
 ]);
 
-// MUI X Premium licence. This key is designed to be public — it is validated
-// offline and is expected to appear in the JS bundle. Order 119387, annual
-// subscription: any MUI X version released before 2026-10-13 works in
-// production indefinitely; renew before then to keep upgrading in development.
+
 LicenseInfo.setLicenseKey("4e66d921d752befefa9384a027675566Tz0xMTkzODcsRT0xNzkyMDIyMzk5MDAwLFM9cHJlbWl1bSxMTT1hbm51YWwsUFY9UTEtMjAyNixRPTEsQVQ9bXVsdGksS1Y9Mg==");
 
 //root document
