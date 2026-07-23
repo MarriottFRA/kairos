@@ -41,6 +41,9 @@ type SettingsState = {
   // Shared report settings
   includeDetailBreakdown: boolean;
   includeBanquetingBreakdown: boolean;
+  // Planning context (set on the Home page, read everywhere else)
+  budgetYear: number;
+  planningScenarioId: string;
 
   // Loading state
   loading: boolean;
@@ -86,6 +89,9 @@ type SettingsState = {
   // Shared report setters
   setIncludeDetailBreakdown: (enabled: boolean) => Promise<void>;
   setIncludeBanquetingBreakdown: (enabled: boolean) => Promise<void>;
+  // Planning context setters
+  setBudgetYear: (year: number) => Promise<void>;
+  setPlanningScenarioId: (scenarioId: string) => Promise<void>;
   updateMultipleSettings: (settings: Partial<AppSettings>) => Promise<void>;
 
   // Load and save
@@ -133,6 +139,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   // Shared report defaults
   includeDetailBreakdown: false,
   includeBanquetingBreakdown: false,
+  // Planning context defaults
+  budgetYear: new Date().getFullYear(),
+  planningScenarioId: "",
   loading: false,
   initialized: false,
 
@@ -565,6 +574,29 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  // Planning context setters
+  setBudgetYear: async (year) => {
+    const previous = get().budgetYear;
+    set({ budgetYear: year });
+    try {
+      await settingsService.setSetting(SETTINGS_KEYS.BUDGET_YEAR, year);
+    } catch (error) {
+      console.error("Failed to save budget year setting:", error);
+      set({ budgetYear: previous });
+    }
+  },
+
+  setPlanningScenarioId: async (scenarioId) => {
+    const previous = get().planningScenarioId;
+    set({ planningScenarioId: scenarioId });
+    try {
+      await settingsService.setSetting(SETTINGS_KEYS.PLANNING_SCENARIO_ID, scenarioId);
+    } catch (error) {
+      console.error("Failed to save planning scenario setting:", error);
+      set({ planningScenarioId: previous });
+    }
+  },
+
   // Update multiple settings at once
   updateMultipleSettings: async (settings) => {
     // Store previous state for rollback
@@ -668,6 +700,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         // Shared report settings
         includeDetailBreakdown: settings[SETTINGS_KEYS.INCLUDE_DETAIL_BREAKDOWN],
         includeBanquetingBreakdown: settings[SETTINGS_KEYS.INCLUDE_BANQUETING_BREAKDOWN],
+        // Planning context
+        budgetYear: settings[SETTINGS_KEYS.BUDGET_YEAR],
+        planningScenarioId: settings[SETTINGS_KEYS.PLANNING_SCENARIO_ID],
         initialized: true,
       });
 
@@ -775,3 +810,5 @@ export const useDateFormat = () => useSettingsStore((s) => s.dateFormat);
 export const useNumberFormat = () => useSettingsStore((s) => s.numberFormat);
 export const useIncludeDetailBreakdown = () => useSettingsStore((s) => s.includeDetailBreakdown);
 export const useIncludeBanquetingBreakdown = () => useSettingsStore((s) => s.includeBanquetingBreakdown);
+export const useBudgetYear = () => useSettingsStore((s) => s.budgetYear);
+export const usePlanningScenarioId = () => useSettingsStore((s) => s.planningScenarioId);

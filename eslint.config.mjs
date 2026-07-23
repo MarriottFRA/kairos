@@ -45,6 +45,29 @@ export default tseslint.config(
     },
   },
   {
+    // The simulation engine must stay pure and portable (renderer, main,
+    // future worker): no Electron, DB, or UI imports, and nothing outside
+    // src/shared/.
+    files: ['src/shared/engine/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['electron', 'electron/*', 'better-sqlite3*', 'react', 'react-*', '@mui/*', 'zustand*'],
+              message: 'src/shared/engine must stay dependency-free and portable.',
+            },
+            {
+              group: ['../../*', '!../../shared'],
+              message: 'The engine may only import from within src/shared/.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Build/install helper scripts are plain CommonJS, run by node directly.
     files: ['scripts/**/*.js'],
     rules: {

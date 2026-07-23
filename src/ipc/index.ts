@@ -4,13 +4,14 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createDataHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
   performanceMiddleware,
   securityMiddleware,
-  senderValidationMiddleware
+  senderValidationMiddleware,
+  ouScopeMiddleware
 } from "./middleware";
 import type { AuthController } from "../main/auth/authController";
 import type { ApiClient } from "../main/auth/apiClient";
@@ -53,9 +54,28 @@ export function initializeIpc(deps: {
     ipcRegistry.register(channel, handler);
   });
 
+  // Register mapping-tables handlers (version-gated sync of the cached reference
+  // tables into the plaintext local store; fetches through the same ApiClient).
+  const mappingTablesHandlers = createMappingTablesHandlers(apiClient);
+  Object.entries(mappingTablesHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
   // Register Settings handlers
   const settingsHandlers = createSettingsHandlers();
   Object.entries(settingsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
+  // Register Calendar handlers (budget/forecast calendar in the local store)
+  const calendarHandlers = createCalendarHandlers();
+  Object.entries(calendarHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
+  // Register Position safe-defaults handlers (seeds for new positions, local store)
+  const positionDefaultsHandlers = createPositionDefaultsHandlers();
+  Object.entries(positionDefaultsHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
   });
 
@@ -69,6 +89,42 @@ export function initializeIpc(deps: {
   const windowHandlers = createWindowHandlers();
   Object.entries(windowHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
+  });
+
+  // Register Positions handlers (positions grid: scenarios, field catalog,
+  // encrypted position values + PII). Every channel is OU-gated.
+  const positionsHandlers = createPositionsHandlers();
+  const ouGate = ouScopeMiddleware();
+  Object.entries(positionsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Budget-import handlers (pull a hotel's Excel budget file into the
+  // plaintext local store). OU-gated — a pull can only land in its own hotel.
+  const budgetImportHandlers = createBudgetImportHandlers();
+  Object.entries(budgetImportHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register KPI-driver handlers (define/persist/precompute reusable budget
+  // aggregates in the plaintext local store). OU-gated like budget import.
+  const kpiDriversHandlers = createKpiDriversHandlers();
+  Object.entries(kpiDriversHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Manual-input handlers (hand-entered cost lines in the encrypted
+  // secure store). OU-gated; the secure DB must be unlocked (post sign-in).
+  const manualInputHandlers = createManualInputHandlers();
+  Object.entries(manualInputHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Blocks handlers (user-facing block configs that compile into
+  // cost-component definitions, plaintext local store). OU-gated.
+  const blocksHandlers = createBlocksHandlers();
+  Object.entries(blocksHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
   });
 
   // Initialize the registry (sets up the main IPC listener)

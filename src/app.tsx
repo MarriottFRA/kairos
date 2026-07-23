@@ -28,6 +28,11 @@ import Profile from "./routes/nestedPages/profile";
 import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
+import BudgetSync from "./routes/nestedPages/budgetSync";
+import KpiDrivers from "./routes/nestedPages/kpiDrivers";
+import ManualInput from "./routes/nestedPages/manualInput";
+import Positions from "./routes/nestedPages/positions";
+import Results from "./routes/nestedPages/results";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // define the route
@@ -63,6 +68,31 @@ const router = createHashRouter([
         handle: { title: "Home" },
       },
       {
+        path: "budget-pull",
+        element: <BudgetSync />,
+        handle: { title: "Budget Pull" },
+      },
+      {
+        path: "kpi-drivers",
+        element: <KpiDrivers />,
+        handle: { title: "KPI Drivers" },
+      },
+      {
+        path: "manual-input",
+        element: <ManualInput />,
+        handle: { title: "Manual Input" },
+      },
+      {
+        path: "positions",
+        element: <Positions />,
+        handle: { title: "Positions" },
+      },
+      {
+        path: "results",
+        element: <Results />,
+        handle: { title: "Results" },
+      },
+      {
         path: "profile",
         element: <Profile />,
         handle: { title: "My Profile" },
@@ -81,11 +111,8 @@ const router = createHashRouter([
   },
 ]);
 
-// MUI X Premium licence. This key is designed to be public — it is validated
-// offline and is expected to appear in the JS bundle. Order 119387, annual
-// subscription: any MUI X version released before 2026-10-13 works in
-// production indefinitely; renew before then to keep upgrading in development.
-LicenseInfo.setLicenseKey("0170f20369e51857b2536db7dfa0f38eTz0xMTkzODcsRT0xNzkxOTM1OTk5MDAwLFM9cHJlbWl1bSxMTT1zdWJzY3JpcHRpb24sUFY9aW5pdGlhbCxLVj0y");
+
+LicenseInfo.setLicenseKey("4e66d921d752befefa9384a027675566Tz0xMTkzODcsRT0xNzkyMDIyMzk5MDAwLFM9cHJlbWl1bSxMTT1hbm51YWwsUFY9UTEtMjAyNixRPTEsQVQ9bXVsdGksS1Y9Mg==");
 
 //root document
 createRoot(document.getElementById("root")).render(

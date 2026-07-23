@@ -25,6 +25,14 @@ import {
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useSettingsStore } from "../../store/settings";
 import authService, { Hotel } from "../../services/auth";
+import {
+  getMappingTablesStatus,
+  rebuildMappingTables,
+} from "../../services/mappingTablesService";
+import type {
+  MappingSyncResult,
+  MappingTablesStatus,
+} from "../../shared/mappingTables/types";
 
 export default function Settings() {
   const themeMode = useSettingsStore((s) => s.themeMode);
@@ -40,6 +48,37 @@ export default function Settings() {
   const [loadingHotels, setLoadingHotels] = useState(false);
   const [hotelsError, setHotelsError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Mapping reference tables (cached account/department maps + combos).
+  const [mappingStatus, setMappingStatus] = useState<MappingTablesStatus | null>(
+    null
+  );
+  const [isRebuilding, setIsRebuilding] = useState(false);
+  const [mappingMessage, setMappingMessage] = useState<{
+    severity: "success" | "info" | "warning" | "error";
+    text: string;
+  } | null>(null);
+
+  // DEV ONLY: the revealed secure-DB key, fed to the db:browse export so
+  // kairos_secure.db can be opened in DB Browser. Gated on import.meta.env.DEV so
+  // this whole block — state, handler, and the card below — is dead-code-
+  // eliminated from production.
+  const [devKeyHex, setDevKeyHex] = useState<string | null>(null);
+  const [devKeyError, setDevKeyError] = useState<string | null>(null);
+
+  const handleRevealDevKey = async () => {
+    setDevKeyError(null);
+    try {
+      const envelope: any = await window.ipcApi.sendIpcRequest(
+        "app:dev-secure-db-key"
+      );
+      const { keyHex } = (envelope?.data ?? envelope) as { keyHex: string };
+      setDevKeyHex(keyHex);
+    } catch (err: any) {
+      // Thrown when locked ("sign in first") or in a packaged build.
+      setDevKeyError(err?.message || "Could not reveal the secure DB key");
+    }
+  };
 
   const loadHotels = async () => {
     try {
@@ -60,9 +99,61 @@ export default function Settings() {
     loadHotels();
   }, []);
 
+  const loadMappingStatus = async () => {
+    try {
+      setMappingStatus(await getMappingTablesStatus());
+    } catch (err) {
+      console.error("Failed to load mapping tables status:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadMappingStatus();
+  }, []);
+
   const handleRefreshHotels = async () => {
     setIsRefreshing(true);
     await loadHotels();
+  };
+
+  const describeOutcome = (result: MappingSyncResult): {
+    severity: "success" | "info" | "warning" | "error";
+    text: string;
+  } => {
+    switch (result.outcome) {
+      case "synced":
+        return { severity: "success", text: "Mapping tables rebuilt from the server." };
+      case "up-to-date":
+        return { severity: "info", text: "Mapping tables were already up to date." };
+      case "unavailable":
+        return {
+          severity: "warning",
+          text: "No mapping tables are published on the server yet.",
+        };
+      default:
+        return {
+          severity: "error",
+          text: result.message || "Failed to rebuild mapping tables.",
+        };
+    }
+  };
+
+  const handleRebuildMappingTables = async () => {
+    setIsRebuilding(true);
+    setMappingMessage(null);
+    try {
+      const result = await rebuildMappingTables();
+      setMappingStatus(result.status);
+      setMappingMessage(describeOutcome(result));
+    } catch (err: any) {
+      console.error("Failed to rebuild mapping tables:", err);
+      setMappingMessage({
+        severity: "error",
+        text: err?.message || "Failed to rebuild mapping tables.",
+      });
+    } finally {
+      setIsRebuilding(false);
+    }
   };
 
   const handleThemeChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -312,6 +403,189 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+      <Card variant="outlined" sx={{ mt: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <CardContent>
+          <Stack
+            direction="row"
+            sx={{
+              justifyContent: "space-between",
+              alignItems: "center",
+              mb: 2,
+            }}
+          >
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              Mapping Tables
+            </Typography>
+            <Button
+              variant="outlined"
+              size="small"
+              color="warning"
+              startIcon={
+                isRebuilding ? <CircularProgress size={16} /> : <RefreshIcon />
+              }
+              onClick={handleRebuildMappingTables}
+              disabled={isRebuilding}
+              sx={{
+                borderRadius: 1,
+                textTransform: "none",
+                minWidth: "auto",
+                px: 2,
+              }}
+            >
+              {isRebuilding ? "Rebuilding..." : "Clear & Rebuild"}
+            </Button>
+          </Stack>
+          <Divider sx={{ mb: 2 }} />
+
+          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+            Cached account and department maps plus their valid combinations.
+            These sync automatically when the server publishes a new version;
+            use Clear &amp; Rebuild to force a fresh download.
+          </Typography>
+
+          {mappingMessage && (
+            <Alert severity={mappingMessage.severity} sx={{ mb: 2 }}>
+              {mappingMessage.text}
+            </Alert>
+          )}
+
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 6, sm: 3 }}>
+              <TextField
+                fullWidth
+                label="Account maps"
+                value={mappingStatus?.counts.accountMaps ?? 0}
+                slotProps={{ input: { readOnly: true } }}
+                variant="outlined"
+                size="small"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 3 }}>
+              <TextField
+                fullWidth
+                label="Department maps"
+                value={mappingStatus?.counts.departmentMaps ?? 0}
+                slotProps={{ input: { readOnly: true } }}
+                variant="outlined"
+                size="small"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 3 }}>
+              <TextField
+                fullWidth
+                label="Combos"
+                value={mappingStatus?.counts.combos ?? 0}
+                slotProps={{ input: { readOnly: true } }}
+                variant="outlined"
+                size="small"
+              />
+            </Grid>
+            <Grid size={{ xs: 6, sm: 3 }}>
+              <TextField
+                fullWidth
+                label="Version"
+                value={mappingStatus?.version ?? "—"}
+                slotProps={{ input: { readOnly: true } }}
+                variant="outlined"
+                size="small"
+              />
+            </Grid>
+          </Grid>
+
+          {mappingStatus?.lastSyncedAt && (
+            <Typography variant="caption" sx={{ color: "text.secondary", mt: 2, display: "block" }}>
+              Last synced {new Date(mappingStatus.lastSyncedAt).toLocaleString()}
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
+
+      {import.meta.env.DEV && (
+        <Card
+          variant="outlined"
+          sx={{ mt: 2, borderRadius: 2, borderStyle: "dashed", opacity: 0.9 }}
+        >
+          <CardContent>
+            <Typography
+              variant="overline"
+              sx={{ color: "text.secondary", fontWeight: 700 }}
+            >
+              Developer · dev build only
+            </Typography>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+              Secure database key
+            </Typography>
+            <Divider sx={{ mb: 2 }} />
+
+            <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+              Reveals the derived key for <code>kairos_secure.db</code>, assembled
+              from this session's local + server halves. Feed it to{" "}
+              <code>db:browse</code>, which writes a throwaway SQLCipher copy you
+              can open in DB Browser for SQLite (the live store's ChaCha20 scheme
+              cannot be opened there directly). One-way and deleted on exit — no
+              plaintext ever hits disk. You must be signed in; this control does
+              not exist in packaged builds.
+            </Typography>
+
+            <Button
+              variant="outlined"
+              color="warning"
+              onClick={handleRevealDevKey}
+              sx={{ textTransform: "none" }}
+            >
+              {devKeyHex ? "Re-reveal key" : "Reveal secure DB key"}
+            </Button>
+
+            {devKeyError && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {devKeyError}
+              </Alert>
+            )}
+
+            {devKeyHex && (
+              <Box sx={{ mt: 2 }}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}
+                >
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                    Run this from the repo root:
+                  </Typography>
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void navigator.clipboard.writeText(
+                        `npm run db:browse -- --key ${devKeyHex}`
+                      )
+                    }
+                    sx={{ textTransform: "none" }}
+                  >
+                    Copy command
+                  </Button>
+                </Stack>
+                <Box
+                  component="pre"
+                  sx={{
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontSize: "0.8125rem",
+                    bgcolor: "action.hover",
+                    borderRadius: 1,
+                    p: 1.5,
+                    m: 0,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    userSelect: "all",
+                  }}
+                >
+                  {`npm run db:browse -- --key ${devKeyHex}`}
+                </Box>
+              </Box>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       <Box sx={{ mt: 4, textAlign: "center", pb: 2 }}>
         <Typography variant="caption" sx={{
           color: "text.secondary"

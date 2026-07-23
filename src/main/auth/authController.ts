@@ -18,6 +18,12 @@ import { MsBroker, BrokerError } from "./msBroker";
 import { TpmBinding, TpmState } from "./tpmBinding";
 import { EmitDeviceProgress, DeviceProgressPhase } from "./deviceProgress";
 import { gatherHardwareInfo } from "../system/hardwareInfo";
+import {
+  unlockSecureDatabase,
+  lockSecureDatabase,
+  isSecureDatabaseUnlocked,
+} from "../../secure_db";
+import { fetchServerKeyHalf } from "../security/serverKeyHalf";
 
 /** user_settings key holding the last-used login email (not a secret). */
 const LAST_USER_EMAIL_KEY = "last_user_email";
@@ -269,7 +275,7 @@ export class AuthController {
     this.msSession = null; // one-time handshake consumed
 
     // Remember the email for prefill on next launch (not a secret). Persisted
-    // best-effort; the local SQLite DB already lives under the user's Documents.
+    // best-effort; the local SQLite DB already lives in the app's data dir.
     this.lastUserEmail = email;
     db.setUserSettings({ [LAST_USER_EMAIL_KEY]: email }).catch(() => {
       /* non-fatal */
@@ -409,6 +415,9 @@ export class AuthController {
     if (options.bind) {
       await this.bindIfNeeded(emit, deviceId, deviceSecret);
     }
+
+    // ── Unlock the encrypted feature database for this session ──
+    await this.unlockSecureDbSafe(deviceId);
 
     emit("verify", "secure", "done");
     return { deviceId, securityLevel: this.deps.sessionManager.getSecurityLevel() };
@@ -585,6 +594,7 @@ export class AuthController {
       console.warn("[AuthController] Logout request failed:", error);
     }
     this.devicePending = false;
+    lockSecureDatabase();
     await this.deps.sessionManager.clear();
     return { success: true };
   }
@@ -607,7 +617,36 @@ export class AuthController {
   /** Attempt the (background) cold-start resume, then return resolved status. */
   async resume(): Promise<PublicAuthStatus> {
     await this.deps.sessionManager.resume();
+    // A resumed Level-2 session is as good as a fresh verify for the encrypted
+    // store — without this, feature data would stay locked until the next full
+    // device verification.
+    if (
+      this.deps.sessionManager.getSecurityLevel() >= 2 &&
+      this.deps.sessionManager.isActive() &&
+      this.deviceId
+    ) {
+      await this.unlockSecureDbSafe(this.deviceId);
+    }
     return this.buildStatus();
+  }
+
+  /**
+   * Best-effort unlock of the encrypted feature database. Failure here must
+   * never fail auth — the session is still valid, feature pages just see
+   * SECURE_DB_LOCKED until the next successful unlock.
+   */
+  private async unlockSecureDbSafe(deviceId: string): Promise<void> {
+    if (isSecureDatabaseUnlocked()) return;
+    try {
+      const serverHalf = await fetchServerKeyHalf(this.deps.apiClient, deviceId);
+      unlockSecureDatabase(serverHalf);
+      console.info("[AuthController] Secure database unlocked");
+    } catch (error) {
+      console.warn(
+        "[AuthController] Secure database unlock failed — feature data unavailable this session:",
+        error
+      );
+    }
   }
 
   private buildStatus(): PublicAuthStatus {

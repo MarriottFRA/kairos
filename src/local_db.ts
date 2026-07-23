@@ -1,7 +1,26 @@
-import { app, safeStorage } from "electron";
-import path from "path";
+import { safeStorage } from "electron";
 import Database from "better-sqlite3-multiple-ciphers";
-import fs from "fs";
+import {
+  CalendarYear,
+  DEFAULT_WEEKEND_MASK,
+  normalizeCalendar,
+} from "./shared/calendar";
+import {
+  DefaultField,
+  DefaultKey,
+  PositionDefaults,
+  normalizePositionDefaults,
+} from "./shared/positionDefaults";
+import { POSITIONS_STRUCTURE_TABLES_SQL } from "./main/positions/schema";
+import { MAPPING_TABLES_SQL } from "./main/mappingTables/schema";
+import { BUDGET_IMPORT_SQL } from "./main/budgetImport/schema";
+import { KPI_DRIVERS_SQL } from "./main/kpiDrivers/schema";
+import { applyBlocksStructureV12 } from "./main/blocks/schema";
+import {
+  LOCAL_DB_PATH,
+  ensureDataDir,
+  migrateLegacyDataDir,
+} from "./main/paths";
 
 // Kairos local store. This is the unencrypted database that the auth stack and
 // app settings depend on (refresh token, device salt, and user_settings).
@@ -15,25 +34,169 @@ import fs from "fs";
 // The exported functions stay `async` even though better-sqlite3 is
 // synchronous, so every existing caller is unaffected.
 
-const documentsPath = app.getPath("documents");
-const kairosFolderPath = path.join(documentsPath, "Kairos");
-// Ensure the "Kairos" folder exists, create it if it doesn't
-if (!fs.existsSync(kairosFolderPath)) {
-  fs.mkdirSync(kairosFolderPath, { recursive: true });
-}
-const dbPath = path.join(kairosFolderPath, "kairos.db");
+// Both of these must run before the connection below: SQLite files can only be
+// relocated while no process holds them open, and this module opens at import.
+ensureDataDir();
+migrateLegacyDataDir();
 
 // Open the SQLite database. Files previously created by the libsql client are
 // ordinary SQLite databases and open here unchanged.
-const db = new Database(dbPath);
+const db = new Database(LOCAL_DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 db.pragma("foreign_keys = ON");
 
-// Baseline schema version. Kairos is a fresh start, so there is no migration
-// history to replay — initializeDatabase() just creates the tables and stamps
-// this version.
-const CURRENT_SCHEMA_VERSION = 1;
+// Schema versions:
+//   1 - schema_info, user_settings
+//   2 - budget/forecast calendar (calendar_years, calendar_months)
+//   3 - positions structure store (scenarios, cost component definitions,
+//       social security schemes, field catalog, hotels cache)
+//   4 - safe defaults for new positions (position_defaults), one row per
+//       (hotel OU, year)
+//   5 - mapping reference tables (account_maps, department_maps,
+//       account_department_combos) + mapping_tables_meta, cached from the backend
+//   6 - bank-holiday premium config columns on calendar_years
+//   7 - budget import tables (budget_imports, budget_values), pulled from a
+//       hotel's Excel BGT Spread File
+//   8 - budget_imports.imported_by (who committed the pull), for DBs that built
+//       v7 before the column was part of the create
+//   9 - KPI drivers (kpi_drivers + dept-pattern/account child tables +
+//       kpi_driver_values precalc cache), aggregated from budget_values
+//  10 - cost_component_definitions.kpi_driver_id (marks a SPREAD block as
+//       KPI-driven, resolved to DIRECT_ABS at engine load)
+//  11 - kpi_drivers.description (optional free-text note, searchable in the UI)
+//  12 - blocks feature: block_configs (user-facing block configurations) +
+//       cost_component_definitions.block_id / base_ref columns
+//
+// Versions <= 2 predate the migration runner and are created wholesale by the
+// baseline exec in initializeDatabase() (idempotent IF NOT EXISTS). Later
+// versions are stepwise entries in MIGRATIONS, each run in its own transaction
+// and stamped as it lands.
+const CURRENT_SCHEMA_VERSION = 12;
+
+type LocalDb = InstanceType<typeof Database>;
+
+const POSITION_DEFAULTS_TABLE_SQL = `
+  -- Safe defaults that seed a new position's Contract columns, one row per
+  -- (hotel OU, year). weekly_hours drives Daily Hours (÷ 5); fields_json holds
+  -- the four defaults as { value, linked } so a field can be pinned away from
+  -- the calendar it otherwise tracks.
+  CREATE TABLE IF NOT EXISTS position_defaults (
+      ou           TEXT NOT NULL,
+      year         INTEGER NOT NULL,
+      weekly_hours REAL NOT NULL DEFAULT 40,
+      fields_json  TEXT NOT NULL,
+      updated_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (ou, year)
+  );
+`;
+
+const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
+  3: (handle) => {
+    handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+  },
+  4: (handle) => {
+    handle.exec(POSITION_DEFAULTS_TABLE_SQL);
+  },
+  5: (handle) => {
+    handle.exec(MAPPING_TABLES_SQL);
+  },
+  // Bank-holiday premium config, one set per hotel-year, stored on the calendar
+  // head. Off by default with sensible starting knobs the home page reveals when
+  // it is switched on; an empty account keeps the feature effectively inert.
+  6: (handle) => {
+    handle.exec(`
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_enabled INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_staff_fraction REAL NOT NULL DEFAULT 0.5;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_premium_multiplier REAL NOT NULL DEFAULT 2;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_account TEXT NOT NULL DEFAULT '';
+    `);
+  },
+  // Budget data pulled from a hotel's Excel BGT Spread File (plaintext, per OU).
+  7: (handle) => {
+    handle.exec(BUDGET_IMPORT_SQL);
+  },
+  // Add budget_imports.imported_by for DBs that created v7 before the column
+  // existed. ADD COLUMN isn't IF NOT EXISTS, so guard on the current columns —
+  // a fresh v7 already has it (from the create) and this becomes a no-op.
+  8: (handle) => {
+    const hasColumn = (
+      handle.prepare("PRAGMA table_info(budget_imports)").all() as Array<{
+        name: string;
+      }>
+    ).some((col) => col.name === "imported_by");
+    if (!hasColumn) {
+      handle.exec("ALTER TABLE budget_imports ADD COLUMN imported_by TEXT");
+    }
+  },
+  // KPI drivers: user-defined + precalc cache, aggregated from budget_values.
+  9: (handle) => {
+    handle.exec(KPI_DRIVERS_SQL);
+  },
+  // Mark a SPREAD component as KPI-driven. ADD COLUMN isn't IF NOT EXISTS, so
+  // guard on the current columns — a fresh v3 (created after the column was
+  // added to the baseline) already has it and this becomes a no-op.
+  10: (handle) => {
+    const hasColumn = (
+      handle
+        .prepare("PRAGMA table_info(cost_component_definitions)")
+        .all() as Array<{ name: string }>
+    ).some((col) => col.name === "kpi_driver_id");
+    if (!hasColumn) {
+      handle.exec(
+        "ALTER TABLE cost_component_definitions ADD COLUMN kpi_driver_id TEXT"
+      );
+    }
+  },
+  // Optional free-text description on a KPI driver. ADD COLUMN isn't IF NOT
+  // EXISTS, so guard on the current columns — a fresh v9 (created after the
+  // column was added to KPI_DRIVERS_SQL) already has it and this is a no-op.
+  11: (handle) => {
+    const hasColumn = (
+      handle.prepare("PRAGMA table_info(kpi_drivers)").all() as Array<{
+        name: string;
+      }>
+    ).some((col) => col.name === "description");
+    if (!hasColumn) {
+      handle.exec(
+        "ALTER TABLE kpi_drivers ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+      );
+    }
+  },
+  // Blocks: user-facing block configurations that compile into cost-component
+  // definitions (block_id back-ref + base_ref JSON for extended base kinds).
+  12: (handle) => {
+    applyBlocksStructureV12(handle);
+  },
+};
+
+/**
+ * Apply stepwise migrations above the stored schema version. Shared shape with
+ * secure_db.ts (deliberately duplicated — the two stores stay independent).
+ */
+function runMigrations(handle: LocalDb): void {
+  const row = handle
+    .prepare("SELECT value FROM schema_info WHERE key = 'schema_version'")
+    .get() as { value?: string } | undefined;
+  const stored = Number(row?.value ?? 0) || 0;
+
+  for (let version = stored + 1; version <= CURRENT_SCHEMA_VERSION; version++) {
+    const migrate = MIGRATIONS[version];
+    if (!migrate) continue; // versions <= 2 are covered by the baseline exec
+    handle.transaction(() => {
+      migrate(handle);
+      handle
+        .prepare(`
+          INSERT INTO schema_info (key, value, updated_at)
+          VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        `)
+        .run(String(version));
+    })();
+  }
+}
 
 interface UserSettings {
   themeMode?: "light" | "dark";
@@ -66,20 +229,49 @@ export async function initializeDatabase(): Promise<void> {
           value TEXT NOT NULL,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
+      -- Budget/forecast calendar, one row per (hotel OU, year). weekend_mask is
+      -- the weekday pattern used to seed the Weekends row; the per-month counts
+      -- in calendar_months stay authoritative once the user edits them.
+      CREATE TABLE IF NOT EXISTS calendar_years (
+          ou TEXT NOT NULL,
+          year INTEGER NOT NULL,
+          weekend_mask INTEGER NOT NULL,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (ou, year)
+      );
+      CREATE TABLE IF NOT EXISTS calendar_months (
+          ou TEXT NOT NULL,
+          year INTEGER NOT NULL,
+          month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+          calendar_days INTEGER NOT NULL,
+          public_holidays INTEGER NOT NULL DEFAULT 0,
+          weekend_days INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (ou, year, month),
+          FOREIGN KEY (ou, year) REFERENCES calendar_years (ou, year) ON DELETE CASCADE
+      );
     `);
 
-    // Stamp the baseline schema version.
+    // Stamp the baseline version (2) without ever downgrading a newer stamp —
+    // the stepwise runner below owns everything past the baseline.
     db.prepare(`
       INSERT INTO schema_info (key, value, updated_at)
-      VALUES ('schema_version', ?, CURRENT_TIMESTAMP)
+      VALUES ('schema_version', '2', CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
-    `).run(String(CURRENT_SCHEMA_VERSION));
+      WHERE CAST(schema_info.value AS INTEGER) < 2
+    `).run();
+
+    runMigrations(db);
   } catch (error) {
     console.error("Error initializing database:", error);
     throw error;
   }
+}
+
+/** The open plaintext database handle — for main-process repositories only. */
+export function localDbHandle(): LocalDb {
+  return db;
 }
 
 //------------------------------------------------------------------------------
@@ -283,6 +475,228 @@ export async function setUserSettings(settings: UserSettings): Promise<string> {
   }
 }
 
+//------------------------------------------------------------------------------
+//--- BUDGET / FORECAST CALENDAR -----------------------------------------------
+// Plain planning data (day counts per month), so it lives here in the
+// unencrypted store alongside settings rather than in secure_db.ts.
+
+/** Read one hotel-year calendar, or null if it has never been saved. */
+export async function getCalendarYear(
+  ou: string,
+  year: number
+): Promise<CalendarYear | null> {
+  const head = db
+    .prepare(
+      `SELECT weekend_mask, updated_at,
+              bank_holiday_enabled, bank_holiday_staff_fraction,
+              bank_holiday_premium_multiplier, bank_holiday_account
+         FROM calendar_years WHERE ou = ? AND year = ?`
+    )
+    .get(ou, year) as
+    | {
+        weekend_mask: number;
+        updated_at: string;
+        bank_holiday_enabled: number;
+        bank_holiday_staff_fraction: number;
+        bank_holiday_premium_multiplier: number;
+        bank_holiday_account: string;
+      }
+    | undefined;
+
+  if (!head) return null;
+
+  const rows = db
+    .prepare(
+      `SELECT month, calendar_days, public_holidays, weekend_days
+         FROM calendar_months
+        WHERE ou = ? AND year = ?
+        ORDER BY month`
+    )
+    .all(ou, year) as Array<{
+      month: number;
+      calendar_days: number;
+      public_holidays: number;
+      weekend_days: number;
+    }>;
+
+  const calendar = normalizeCalendar(
+    ou,
+    year,
+    head.weekend_mask,
+    rows.map((row) => ({
+      month: row.month,
+      calendarDays: row.calendar_days,
+      publicHolidays: row.public_holidays,
+      weekendDays: row.weekend_days,
+    })),
+    {
+      bankHolidayEnabled: !!head.bank_holiday_enabled,
+      bankHolidayStaffFraction: head.bank_holiday_staff_fraction,
+      bankHolidayPremiumMultiplier: head.bank_holiday_premium_multiplier,
+      bankHolidayAccount: head.bank_holiday_account,
+    }
+  );
+
+  return { ...calendar, updatedAt: head.updated_at ?? null };
+}
+
+/** Upsert a whole hotel-year calendar in one transaction. */
+export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
+  const { ou, year } = calendar;
+  const normalized = normalizeCalendar(
+    ou,
+    year,
+    calendar.weekendMask ?? DEFAULT_WEEKEND_MASK,
+    calendar.months ?? [],
+    calendar
+  );
+
+  const upsertHead = db.prepare(`
+    INSERT INTO calendar_years
+      (ou, year, weekend_mask, updated_at,
+       bank_holiday_enabled, bank_holiday_staff_fraction,
+       bank_holiday_premium_multiplier, bank_holiday_account)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+    ON CONFLICT(ou, year) DO UPDATE SET
+      weekend_mask = excluded.weekend_mask,
+      updated_at = CURRENT_TIMESTAMP,
+      bank_holiday_enabled = excluded.bank_holiday_enabled,
+      bank_holiday_staff_fraction = excluded.bank_holiday_staff_fraction,
+      bank_holiday_premium_multiplier = excluded.bank_holiday_premium_multiplier,
+      bank_holiday_account = excluded.bank_holiday_account
+  `);
+  const upsertMonth = db.prepare(`
+    INSERT INTO calendar_months
+      (ou, year, month, calendar_days, public_holidays, weekend_days)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ou, year, month) DO UPDATE SET
+      calendar_days = excluded.calendar_days,
+      public_holidays = excluded.public_holidays,
+      weekend_days = excluded.weekend_days
+  `);
+
+  try {
+    db.transaction(() => {
+      upsertHead.run(
+        ou,
+        year,
+        normalized.weekendMask,
+        normalized.bankHolidayEnabled ? 1 : 0,
+        normalized.bankHolidayStaffFraction,
+        normalized.bankHolidayPremiumMultiplier,
+        normalized.bankHolidayAccount
+      );
+      for (const row of normalized.months) {
+        upsertMonth.run(
+          ou,
+          year,
+          row.month,
+          row.calendarDays,
+          row.publicHolidays,
+          row.weekendDays
+        );
+      }
+    })();
+  } catch (error) {
+    console.error("Error saving calendar year:", error);
+    throw error;
+  }
+}
+
+/** Years that already have a saved calendar for this OU, newest first. */
+export async function listCalendarYears(ou: string): Promise<number[]> {
+  const rows = db
+    .prepare("SELECT year FROM calendar_years WHERE ou = ? ORDER BY year DESC")
+    .all(ou) as Array<{ year: number }>;
+  return rows.map((row) => row.year);
+}
+
+/** Drop a saved calendar (months cascade). */
+export async function deleteCalendarYear(ou: string, year: number): Promise<void> {
+  db.prepare("DELETE FROM calendar_years WHERE ou = ? AND year = ?").run(ou, year);
+}
+
+//------------------------------------------------------------------------------
+//--- POSITION SAFE DEFAULTS ---------------------------------------------------
+// The numbers a new position's Contract columns start from, one row per
+// (hotel OU, year). Stored beside the calendar since they are plain planning
+// data that mostly track it.
+
+/** Read one hotel-year's safe defaults, or null if never saved. */
+export async function getPositionDefaults(
+  ou: string,
+  year: number
+): Promise<PositionDefaults | null> {
+  const row = db
+    .prepare(
+      "SELECT weekly_hours, fields_json, updated_at FROM position_defaults WHERE ou = ? AND year = ?"
+    )
+    .get(ou, year) as
+    | { weekly_hours: number; fields_json: string; updated_at: string }
+    | undefined;
+
+  if (!row) return null;
+
+  let fields: Partial<Record<DefaultKey, Partial<DefaultField>>> | undefined;
+  try {
+    fields = JSON.parse(row.fields_json);
+  } catch (error) {
+    console.error("Corrupt position_defaults.fields_json, using defaults:", error);
+    fields = undefined;
+  }
+
+  const defaults = normalizePositionDefaults(ou, year, row.weekly_hours, fields);
+  return { ...defaults, updatedAt: row.updated_at ?? null };
+}
+
+/** Upsert one hotel-year's safe defaults. */
+export async function savePositionDefaults(
+  defaults: PositionDefaults
+): Promise<void> {
+  const normalized = normalizePositionDefaults(
+    defaults.ou,
+    defaults.year,
+    defaults.weeklyHours,
+    defaults.fields
+  );
+
+  try {
+    db.prepare(`
+      INSERT INTO position_defaults (ou, year, weekly_hours, fields_json, updated_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(ou, year) DO UPDATE SET
+        weekly_hours = excluded.weekly_hours,
+        fields_json = excluded.fields_json,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      normalized.ou,
+      normalized.year,
+      normalized.weeklyHours,
+      JSON.stringify(normalized.fields)
+    );
+  } catch (error) {
+    console.error("Error saving position defaults:", error);
+    throw error;
+  }
+}
+
+/**
+ * Close the settings database — call on app quit.
+ *
+ * Closing the last connection is what makes SQLite checkpoint the WAL into the
+ * main file and unlink the -wal/-shm sidecars. Without this the log is never
+ * folded back in and grows across launches, leaving every startup to recover a
+ * journal that should already have been retired.
+ */
+export function closeLocalDatabase(): void {
+  try {
+    if (db.open) db.close();
+  } catch (error) {
+    console.warn("[local_db] Failed to close cleanly:", error);
+  }
+}
+
+//------------------------------------------------------------------------------
 // Delete a specific setting
 export async function deleteUserSetting(key: string): Promise<string> {
   try {

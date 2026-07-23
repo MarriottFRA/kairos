@@ -48,6 +48,12 @@ export const SETTINGS_KEYS = {
   // Shared report settings
   INCLUDE_DETAIL_BREAKDOWN: 'includeDetailBreakdown',
   INCLUDE_BANQUETING_BREAKDOWN: 'includeBanquetingBreakdown',
+  // Positions grid layout (JSON string of exported DataGrid state)
+  POSITIONS_GRID_STATE: 'positionsGridState',
+  // Planning context: budget year + selected planning scenario, chosen on the
+  // Home page and consumed everywhere else (positions grid, future reports)
+  BUDGET_YEAR: 'budgetYear',
+  PLANNING_SCENARIO_ID: 'planningScenarioId',
 } as const;
 
 export type SettingsKey = typeof SETTINGS_KEYS[keyof typeof SETTINGS_KEYS];
@@ -91,6 +97,9 @@ export interface AppSettings {
   // Shared report settings
   [SETTINGS_KEYS.INCLUDE_DETAIL_BREAKDOWN]: boolean;
   [SETTINGS_KEYS.INCLUDE_BANQUETING_BREAKDOWN]: boolean;
+  [SETTINGS_KEYS.POSITIONS_GRID_STATE]: string;
+  [SETTINGS_KEYS.BUDGET_YEAR]: number;
+  [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: string;
 }
 
 // Default values for all settings
@@ -137,6 +146,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Shared report settings
   [SETTINGS_KEYS.INCLUDE_DETAIL_BREAKDOWN]: false,
   [SETTINGS_KEYS.INCLUDE_BANQUETING_BREAKDOWN]: false,
+  [SETTINGS_KEYS.POSITIONS_GRID_STATE]: "",
+  [SETTINGS_KEYS.BUDGET_YEAR]: currentYear,
+  [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: "",
 };
 
 // Type-safe partial settings for updates

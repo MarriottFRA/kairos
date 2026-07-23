@@ -151,6 +151,27 @@ export const senderValidationMiddleware = (
 };
 
 /**
+ * OU scope middleware - defense-in-depth gate for hotel-scoped channels.
+ * Rejects any request whose first argument does not carry a valid 7-character
+ * hotel OU ("OU" + 5 digits) BEFORE handler code runs. The structural
+ * guarantee lives one layer down (repositories require a branded OuScope, see
+ * src/main/positions/ouScope.ts); this middleware simply fails fast with a
+ * uniform message.
+ */
+export const ouScopeMiddleware = (): IpcMiddleware => {
+  return async (event, channel, args, next) => {
+    const { isValidOu } = await import("../main/positions/ouScope");
+    const request = args[0] as { ou?: unknown } | undefined;
+    if (!isValidOu(request?.ou)) {
+      throw new Error(
+        `INVALID_OU: '${channel}' requires a hotel OU ("OU" + 5 digits)`
+      );
+    }
+    return next();
+  };
+};
+
+/**
  * Security middleware - sanitizes potentially dangerous inputs
  */
 export const securityMiddleware = (): IpcMiddleware => {

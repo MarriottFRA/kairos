@@ -9,7 +9,7 @@ import { updateElectronApp } from "update-electron-app";
 import log from "electron-log";
 import path from "path";
 import dotenv from "dotenv";
-import { initializeDatabase } from "./local_db";
+import { closeLocalDatabase, initializeDatabase } from "./local_db";
 import { closeSecureDatabase } from "./secure_db";
 import { initializeIpc } from "./ipc";
 import { setupAutoUpdaterEvents } from "./ipc/handlers/app";
@@ -332,10 +332,12 @@ app.on("ready", async () => {
   }
 });
 
-// Close the encrypted database on the way out so WAL is checkpointed into the
-// main file rather than left for the next launch to recover.
+// Close both databases on the way out so each WAL is checkpointed into its main
+// file and the -wal/-shm sidecars are retired, rather than left for the next
+// launch to recover.
 app.on("will-quit", () => {
   closeSecureDatabase();
+  closeLocalDatabase();
 });
 
 // Cross-platform window behavior
