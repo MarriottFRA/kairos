@@ -1,0 +1,1627 @@
+Option Explicit
+Option Base 0
+Public Ignore As Boolean
+Public AccountList As Dictionary
+
+Function Validate() As Boolean
+    'custom validaiton funciton (forces "end" on the first couple of tests as they are critical)
+    Validate = True
+    Dim Validation_Array As Variant
+    
+    Dim MaxRows As Double, adWorksheet As Worksheet
+    Set adWorksheet = GetSheet_BaseName(ThisWorkbook, "AssociateDetails")
+    MaxRows = adWorksheet.Cells(adWorksheet.Rows.count, 5).End(xlUp).Row
+    
+    'check row count
+    If MaxRows < 6 Then
+        MsgBox "Validaiton Error - Row Count" & vbCrLf _
+            & "" & vbCrLf _
+            & "The file does not work on files with 3 or less rows" & vbCrLf _
+            & "" & vbCrLf _
+            & "Please add extra rows", vbOKOnly Or vbExclamation, "Min Row Count!"
+        Validate = False
+        End
+    End If
+    
+
+    'check structure
+    Dim StructureIntegrity As Boolean: StructureIntegrity = True
+    If adWorksheet.Cells(1, 45).Value2 = "Base_Percent_Increase" Then
+    Else
+        StructureIntegrity = False
+    End If
+    If adWorksheet.Range("FP1").Value2 = "ValueW_Social" Then
+    Else
+        StructureIntegrity = False
+    End If
+    If Not StructureIntegrity Then
+        MsgBox "Validaiton Error - File Structre Issue" & vbCrLf _
+            & "" & vbCrLf _
+            & "The file has been optimised for a specific column structure, adding, deleting or moving columns will break calculations" & vbCrLf _
+            & "" & vbCrLf _
+            & "Please contact the support team to have this fixed", vbOKOnly Or vbExclamation, "File Structure Altered!"
+        Validate = False
+        End
+    Else
+    End If
+    
+    'pick up everything, will validate in sections and colour red.
+    Dim i As Double
+    Dim xColumn As Double
+    Validation_Array = adWorksheet.Range("A1:FP" & MaxRows).Value2
+    
+    Dim xDepartments As New Dictionary
+    Dim xTypePosition As New Dictionary
+    Dim xPayroll As New Dictionary
+    Dim xStats As New Dictionary
+    Dim xAccount As New Dictionary
+    Dim CustomColumnList As New Dictionary
+    xDepartments.CompareMode = vbBinaryCompare
+    xTypePosition.CompareMode = vbBinaryCompare
+    xPayroll.CompareMode = vbBinaryCompare
+    xStats.CompareMode = vbBinaryCompare
+    xAccount.CompareMode = vbBinaryCompare
+    CustomColumnList.CompareMode = vbTextCompare
+    Dim ws_list As Worksheet
+    Set ws_list = ThisWorkbook.Worksheets("Lists")
+
+    ' Find last row for each column and populate dictionaries
+    Dim lastRow As Long
+
+    ' xTypePosition - Column 1
+    lastRow = ws_list.Cells(ws_list.Rows.count, 1).End(xlUp).Row
+    For i = 2 To lastRow
+        If Not IsEmpty(ws_list.Cells(i, 1).Value2) Then
+            xTypePosition(CStr(ws_list.Cells(i, 1).Value2)) = True
+        End If
+    Next i
+
+    ' xDepartments - Column 2
+    lastRow = ws_list.Cells(ws_list.Rows.count, 2).End(xlUp).Row
+    For i = 2 To lastRow
+        If Not IsEmpty(ws_list.Cells(i, 2).Value2) Then
+            xDepartments(CStr(ws_list.Cells(i, 2).Value2)) = True
+        End If
+    Next i
+
+    ' xPayroll - Column 8
+    lastRow = ws_list.Cells(ws_list.Rows.count, 8).End(xlUp).Row
+    For i = 2 To lastRow
+        If Not IsEmpty(ws_list.Cells(i, 8).Value2) Then
+            xPayroll(CStr(ws_list.Cells(i, 8).Value2)) = True
+        End If
+    Next i
+
+    ' xStats - Column 11
+    lastRow = ws_list.Cells(ws_list.Rows.count, 11).End(xlUp).Row
+    For i = 2 To lastRow
+        If Not IsEmpty(ws_list.Cells(i, 11).Value2) Then
+            xStats(CStr(ws_list.Cells(i, 11).Value2)) = True
+        End If
+    Next i
+
+    ' xAccount - Column 16
+    lastRow = ws_list.Cells(ws_list.Rows.count, 16).End(xlUp).Row
+    For i = 2 To lastRow
+        If Not IsEmpty(ws_list.Cells(i, 16).Value2) Then
+            xAccount(CStr(ws_list.Cells(i, 16).Value2)) = True
+        End If
+    Next i
+
+    xAccount("Blank") = True
+    
+    With adWorksheet
+    
+        'check department
+        For i = 4 To MaxRows
+            For xColumn = 5 To 5
+                If Not xDepartments.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check types
+        For i = 4 To MaxRows
+            For xColumn = 7 To 7
+                If Not xTypePosition.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+    
+        'check entry stats
+        For i = 4 To MaxRows
+            For xColumn = 9 To 16
+                If Not IsNumeric(Validation_Array(i, xColumn)) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check next big batch
+        For i = 4 To MaxRows
+            For xColumn = 18 To 47
+                If Not IsNumeric(Validation_Array(i, xColumn)) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check hours accounts
+        For i = 4 To MaxRows
+            For xColumn = 48 To 49
+                If Not xStats.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check FTE should be blank
+        For i = 4 To MaxRows
+            For xColumn = 50 To 50
+                If Not Validation_Array(i, xColumn) = "Blank" Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check FTE should be blank
+        For i = 4 To MaxRows
+            For xColumn = 51 To 51
+                If Not xPayroll.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'next batch of numbers
+        For i = 4 To MaxRows
+            For xColumn = 52 To 55
+                If Not IsNumeric(Validation_Array(i, xColumn)) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check accrual account
+        For i = 4 To MaxRows
+            For xColumn = 56 To 56
+                If Not xPayroll.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'next batch of numbers
+        For i = 4 To MaxRows
+            For xColumn = 57 To 69
+                If Not IsNumeric(Validation_Array(i, xColumn)) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        'check accrual account
+        For i = 4 To MaxRows
+            For xColumn = 70 To 70
+                If Not xPayroll.Exists(CStr(Validation_Array(i, xColumn))) Then
+                    adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                    Validate = False
+                End If
+            Next xColumn
+        Next i
+        
+        CustomColumnList(73) = True
+        CustomColumnList(76) = True
+        CustomColumnList(80) = True
+        CustomColumnList(84) = True
+        CustomColumnList(87) = True
+        CustomColumnList(90) = True
+        CustomColumnList(93) = True
+        CustomColumnList(96) = True
+        CustomColumnList(99) = True
+        CustomColumnList(102) = True
+        CustomColumnList(105) = True
+        CustomColumnList(108) = True
+        CustomColumnList(111) = True
+        CustomColumnList(114) = True
+        CustomColumnList(117) = True
+        CustomColumnList(120) = True
+        ' Overtime accounts
+        CustomColumnList(126) = True
+        CustomColumnList(127) = True
+        CustomColumnList(128) = True
+        CustomColumnList(141) = True
+        CustomColumnList(154) = True
+        CustomColumnList(171) = True
+
+        
+        
+        For i = 4 To MaxRows
+            For xColumn = 71 To 172
+            
+                If CustomColumnList(xColumn) Then
+                    If Not xAccount.Exists(CStr(Validation_Array(i, xColumn))) Then
+                        adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                        Validate = False
+                    End If
+                Else
+                    If Not IsNumeric(Validation_Array(i, xColumn)) Then
+                        adWorksheet.Cells(i, xColumn).Interior.Color = RGB(255, 0, 0)
+                        Validate = False
+                    End If
+                End If
+            Next xColumn
+        Next i
+        
+        
+    End With
+    
+    
+    If Not Validate Then
+        MsgBox "Validaiton Error - Data Entry Issues" & vbCrLf _
+            & "" & vbCrLf _
+            & "There are one or more data entry issues in the Associate Details tab, the invalid cells have been highlited in red." & vbCrLf _
+            & "" & vbCrLf _
+            & "Please fix the cells by entering the valid values for the fields.", vbOKOnly Or vbExclamation, "Data Entry Errors!"
+    End If
+    
+
+End Function
+
+Sub Generate_ExportData()
+    ' ----------------------------------------------------------------
+    ' Procedure Name: Generate_ExportData
+    ' Purpose: Generate the main spread calculations, also updates the stats review,
+    ' Purpose:   - The report generation should be seperated out in the next version to optimise the macro "flow"
+    ' Procedure Kind: Sub
+    ' Procedure Access: Public
+    ' Author: Richard Porins (rpori625)
+    ' Date: 28/07/2020
+    ' ----------------------------------------------------------------
+    'Declare Main Variables
+    Dim MaxArrayLength As Double, adWorksheet As Worksheet, MaxRows As Double, MaxAccountColumns As Double, ComboArray() As Variant, FullDataArray() As Variant, WorkingColumn As Double
+    Dim DepartmentColumn As Double, UniqueComboArray As Variant, UserSettingCalculation As Integer, TotalWorkingDays2 As Double, StatsReporting() As Variant, MaxStats As Double, statsTracker As Double
+    Dim Base_Single_Month_Column As Double, Base_Percent_Increase_Column As Double, Base_Manual_Increase_Column As Double, Base_Increase_Month_Column As Double, Spread1_Column As Double
+    Dim TotalValue As Double, ActiveMonthsIncrease As Double, IncreaseMonthly As Double, IncreaseMonth As Double, TotalWorkingMonths As Double, xSegment As Long, TotalWorkingDays As Double
+    Dim Seasonality(13) As Double, xDivisor As Double, HourlyTest As Integer, StructureIntegrity As Boolean, Hourly_Manager_Check_Column As Double, TotalBaseSalary As Double, xMultiplayer As Double
+    Dim TempColumn1 As Double, TempColumn2 As Double, TempColumn3 As Double, TempColumn4 As Double, TempColumn5 As Double, TempColumn6 As Double, TempColumn7 As Double, xDaysPerMonth(13, 2) As Double
+    Dim OutputBudgetExport() As Variant, UniqueCounter As Double, CurrentLoader As String, SingleDayPay As Double, MaxRowsBuyOut As Double, UniqueStatsCombo As Variant, StatsCombo() As Variant, OutPutStatsCombo() As Variant
+    'Declare throw away variables
+    Dim RawData_Array As Variant, TempDataArray As Variant, Buyout_Array_Raw As Variant, UniqueTracker As Double, TempColumn8 As Double, Validation_Array As Variant
+    Dim i As Double, o As Double, Found As Boolean, z As Double, x As Integer, P As Integer
+    Dim CN_A1 As Integer, CN_A2 As Integer, CN_A3 As Integer, CN_A4 As Integer, CN_A5 As Integer, CN_A6 As Integer, CN_A7 As Integer, CN_A8 As Integer, CN_A9 As Integer, CN_A10 As Integer, CN_A11 As Integer, CN_A12 As Integer, CN_A13 As Integer, CN_A14 As Integer, CN_A15 As Integer, CN_A16 As Integer, CN_A17 As Integer, CN_A18 As Integer, CN_A19 As Integer, CN_A20 As Integer
+    
+    Dim ValidationTests As Boolean
+    
+    Calculate
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    UserSettingCalculation = CalculationSetting
+    Application.Calculation = xlCalculationManual
+    
+    
+    'fixed/dynamic amount for minor monthly flex, since this flexes hourly pay which never will be 100% accurate
+    'First is weighted, second is flat for salaried spreads
+    xDaysPerMonth(0, 0) = ThisWorkbook.Worksheets("Menu").Cells(11, 15).Value2
+    xDaysPerMonth(0, 1) = 360
+    TempDataArray = ThisWorkbook.Worksheets("Menu").Range("C11:N11") ' fixed as range should be immutable
+    For i = 1 To 12
+        xDaysPerMonth(i, 0) = TempDataArray(1, i)
+        xDaysPerMonth(i, 1) = 30
+    Next i
+    '2D Array for data spread
+    '0 - Base Salary
+    '1 - Vacation Cost
+    '2 - Pension
+    '3 - Indemnity
+    '4 - Stock Options
+    '5 - Airfare
+    '6 - Transportation
+    '7 - Housing
+    '8 - Food Allowance
+    '9 - Hardship Allowance
+    '10 - Custom Allowance 1
+    '11 - Custom Allowance 2
+    '12 - Custom Allowance 3
+    '13 - Bonus Percentage
+    '14 - Incentive Percentage 1
+    '15 - Incentive Percentage 2
+    '16 - Incentive Fixed Value 1
+    '17 - Incentive Fixed Value 2
+    '18 - Social Security/NI
+    Dim MonthlyDataSpread(28, 13) As Double ' first number should match below
+    MaxAccountColumns = 29 ' Fixed Account count based on amount of category columns to calculate hypothetical maximum
+    'set base info
+    Set adWorksheet = GetSheet_BaseName(ThisWorkbook, "AssociateDetails")
+    MaxRows = adWorksheet.Cells(adWorksheet.Rows.count, 5).End(xlUp).Row
+    
+    Dim AllowedAccounts As New Collection
+    
+    AllowedAccounts.Add True, "Blank"
+    'AllowedAccounts.Add True, "988110"
+    'AllowedAccounts.Add True, "988110"
+
+    
+    'pre processing validaiton
+    ValidationTests = Validate
+
+    
+    If Not ValidationTests Then
+        Application.ScreenUpdating = True
+        Application.EnableEvents = True
+        Application.DisplayAlerts = True
+        UserSettingCalculation = CalculationSetting
+        Application.Calculation = UserSettingCalculation
+        Exit Sub
+    End If
+    'end validaiton
+        
+    
+    MaxRowsBuyOut = ThisWorkbook.Worksheets("Buyout & Manual Input").Cells(ThisWorkbook.Worksheets("Buyout & Manual Input").Rows.count, 2).End(xlUp).Row
+    MaxArrayLength = (((MaxRows - 3) * MaxAccountColumns)) + (MaxRowsBuyOut * 2) - 5
+    MaxStats = (MaxRows - 4)
+    'since the file structure will be locked no point of dynamic pick up keep a manual data load, this will significantly speed up data processing
+    'preload public varaibles that will need to be acccessed by other functions
+    Base_Single_Month_Column = 31 'Total Salary 44
+    Base_Percent_Increase_Column = Base_Single_Month_Column + 14
+    Base_Manual_Increase_Column = Base_Single_Month_Column + 15
+    Base_Increase_Month_Column = Base_Single_Month_Column + 16
+    Spread1_Column = 18
+    Hourly_Manager_Check_Column = 7
+    RawData_Array = adWorksheet.Range("A4:FP" & MaxRows).Value2
+    Buyout_Array_Raw = ThisWorkbook.Worksheets("Buyout & Manual Input").Range("A3:BD" & MaxRowsBuyOut).Value2
+    
+    'early binding for array to get unique value count.
+    ReDim ComboArray(MaxArrayLength) As Variant
+    ReDim FullDataArray(MaxArrayLength, 16) As Variant
+    ReDim StatsReporting(MaxStats, 7) As Variant
+    ReDim StatsCombo(MaxStats) As Variant
+    DepartmentColumn = 5 'set department column
+    xSegment = -1 'start segment at -1 so it itterates at increased increments
+    statsTracker = -1
+    'instead of looping though column data and wasting computational cycles to return modes of calculation the faster method is to
+    'customise the calculation for each type and cycle only though the rows.
+    'This method produces longer code but is hyperoptimised reducing cycle count by >200%
+    CN_A1 = 0
+    CN_A2 = 0
+    CN_A3 = 0
+    CN_A4 = 0
+    CN_A5 = 0
+    CN_A6 = 0
+    CN_A7 = 0
+    CN_A8 = 0
+    CN_A9 = 0
+    CN_A10 = 0
+    CN_A11 = 0
+    CN_A12 = 0
+    CN_A13 = 0
+    CN_A14 = 0
+    CN_A15 = 0
+    CN_A16 = 0
+    CN_A17 = 0
+    CN_A18 = 0
+    CN_A19 = 0
+    CN_A20 = 0
+    'technically could set each variable to be the value rather than this if statement...
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A1").Value2 Then CN_A1 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A2").Value2 Then CN_A2 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A3").Value2 Then CN_A3 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A4").Value2 Then CN_A4 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A5").Value2 Then CN_A5 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A6").Value2 Then CN_A6 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A7").Value2 Then CN_A7 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A8").Value2 Then CN_A8 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A9").Value2 Then CN_A9 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A10").Value2 Then CN_A10 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A11").Value2 Then CN_A11 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A12").Value2 Then CN_A12 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A13").Value2 Then CN_A13 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A14").Value2 Then CN_A14 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A15").Value2 Then CN_A15 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A16").Value2 Then CN_A16 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A17").Value2 Then CN_A17 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A18").Value2 Then CN_A18 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A19").Value2 Then CN_A19 = 1
+    If ThisWorkbook.Worksheets("Settings").Range("CN_A20").Value2 Then CN_A20 = 1
+    
+    For i = 1 To UBound(RawData_Array)
+        '----------------------Section 1 - Basic Salary ---------------------------------
+        xSegment = xSegment + 1
+        'check if associate is hourly
+        
+        If Right(RawData_Array(i, Hourly_Manager_Check_Column), 10) = "Hourly Pay" Then
+            HourlyTest = 0
+        Else
+            HourlyTest = 1
+        End If
+        
+        WorkingColumn = 51 'account base column
+        'set combos
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 13) = RawData_Array(i, DepartmentColumn + 2) ' Managed/Hourly
+        FullDataArray(xSegment, 14) = RawData_Array(i, DepartmentColumn + 3) ' Job Title
+        'wipe data from last loop
+        TotalValue = 0
+        ActiveMonthsIncrease = 0
+        TotalWorkingMonths = 0
+        TotalWorkingDays = 0
+        TotalWorkingDays2 = 0
+        TotalBaseSalary = 0
+        IncreaseMonth = RawData_Array(i, Base_Increase_Month_Column)
+        'preload seasonalty array so you don't need to reference the sheet
+        For z = 1 To 12
+            Seasonality(z) = RawData_Array(i, z + Spread1_Column - 1)
+        Next z
+        
+        'precalculate base metadata for the loop
+        For z = 1 To 12
+            If Not Seasonality(z) = 0 Then
+                TotalWorkingMonths = TotalWorkingMonths + Seasonality(z)
+                TotalWorkingDays = TotalWorkingDays + (xDaysPerMonth(z, HourlyTest) * Seasonality(z))
+                TotalWorkingDays2 = TotalWorkingDays2 + (xDaysPerMonth(z, 0) * Seasonality(z))
+            Else
+            End If
+            If Not Seasonality(z) = 0 And Not z < IncreaseMonth Then ActiveMonthsIncrease = ActiveMonthsIncrease + Seasonality(z)
+        Next z
+        If ActiveMonthsIncrease = 0 Then
+            IncreaseMonthly = 0
+        Else
+            IncreaseMonthly = RawData_Array(i, Base_Manual_Increase_Column) / ActiveMonthsIncrease
+        End If
+        'math loop for the base salary
+        For z = 1 To 12
+            If Not Seasonality(z) = 0 Then
+                If z < IncreaseMonth Then
+                    MonthlyDataSpread(0, z) = RawData_Array(i, Base_Single_Month_Column) * TotalWorkingMonths / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z) + (RawData_Array(i, Base_Single_Month_Column + z) * Seasonality(z))
+                Else
+                    MonthlyDataSpread(0, z) = (RawData_Array(i, Base_Single_Month_Column) * TotalWorkingMonths / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z) * (1 + RawData_Array(i, Base_Percent_Increase_Column))) + (IncreaseMonthly * Seasonality(z)) + (RawData_Array(i, Base_Single_Month_Column + z) * Seasonality(z))
+                End If
+            Else
+                MonthlyDataSpread(0, z) = 0
+            End If
+            TotalBaseSalary = TotalBaseSalary + MonthlyDataSpread(0, z)
+            FullDataArray(xSegment, z) = MonthlyDataSpread(0, z)
+        Next z
+
+        
+        '----------------------Section 2 - Vacation ---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 70 ' holiday account
+        'set combos
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 17) 'holiday days for associate MODIFY
+        TempColumn2 = 9 'Contract yearly days
+        TempColumn2 = RawData_Array(i, TempColumn2) - RawData_Array(i, TempColumn2 + 1) - RawData_Array(i, TempColumn2 + 2)
+        TempColumn3 = WorkingColumn - 13 'Monthly weights for holidays
+        TempColumn4 = 0 ' cycler set to -1 for arithmetic purposes so first value is 0
+        TempColumn7 = 0 ' Holiday arithmetic tracker, if total days exceeds tracker days remaining days set to 0
+        SingleDayPay = RawData_Array(i, WorkingColumn - 16)
+        'since total working months has be already affected by seasonality flex it would get a double impact here, so we need to adjust back the singledaypay
+        If TotalWorkingMonths > 0 Then
+            SingleDayPay = SingleDayPay / TotalWorkingMonths * 12
+        End If
+
+        For z = 1 To 12
+            MonthlyDataSpread(1, z) = RawData_Array(i, TempColumn3 - 1 + z) * Seasonality(z) * TempColumn1
+        Next z
+
+        For z = 1 To 12
+            If Not Seasonality(z) = 0 Then
+                If z < IncreaseMonth Then
+                    MonthlyDataSpread(1, z) = MonthlyDataSpread(1, z) * SingleDayPay
+                Else
+                    MonthlyDataSpread(1, z) = MonthlyDataSpread(1, z) * SingleDayPay * (1 + RawData_Array(i, Base_Percent_Increase_Column))
+                End If
+                
+            Else
+                MonthlyDataSpread(1, z) = 0
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(1, z)
+        Next z
+        '----------------------Section 3 - Pension ---------------------------------
+        'percentile spread on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 73 ' account pension
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'pension % weight
+        
+        For z = 1 To 12
+            MonthlyDataSpread(2, z) = MonthlyDataSpread(0, z) * TempColumn1
+            FullDataArray(xSegment, z) = MonthlyDataSpread(2, z)
+        Next z
+        '----------------------Section 4 - Indemnity ---------------------------------
+        'weighted monthly spread of total based on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 76 ' account Indemnity
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 2) 'indemnity yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(3, z) = 0
+            Else
+                MonthlyDataSpread(3, z) = TempColumn1 / TotalBaseSalary * MonthlyDataSpread(0, z)
+            End If
+            
+            FullDataArray(xSegment, z) = MonthlyDataSpread(3, z)
+        Next z
+        '----------------------Section 5 - Stock Options ---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 80 ' account Stock Options
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'stock yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(4, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(4, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(4, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(4, z)
+        Next z
+        '----------------------Section 6 - AirfareTickets ---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 84 ' account AirfareTickets
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'AirfareTickets yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(5, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(5, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(5, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(5, z)
+        Next z
+        '----------------------Section 7 - TransportaionAllowance ---------------------------------
+        'Entierly Flat Spread by days
+        xSegment = xSegment + 1
+        WorkingColumn = 87 ' account TransportaionAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'TransportaionAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(6, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(6, z) = TempColumn1 / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(6, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(6, z)
+        Next z
+        '----------------------Section 8 - HousingAllowance ---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 90 ' account HousingAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'HousingAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(7, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(7, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(7, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(7, z)
+        Next z
+        '----------------------Section 9 - FoodAllowance ---------------------------------
+        'Spread flat by days in month
+        xSegment = xSegment + 1
+        WorkingColumn = 93 ' account FoodAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'FoodAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(8, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(8, z) = TempColumn1 / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(8, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(8, z)
+        Next z
+        '----------------------Section 10 - HardshipAllowance ---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 96 ' account HardshipAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'HardshipAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(9, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(9, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(9, z) = 0
+                End If
+            End If
+
+            FullDataArray(xSegment, z) = MonthlyDataSpread(9, z)
+        Next z
+        '----------------------Section 11 - CustomAllowance Flat Monthly Spread ---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 99 ' account CustomAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'CustomAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(10, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(10, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(10, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(10, z)
+        Next z
+        '----------------------Section 12 - CustomAllowance Flat Daily Spread ---------------------------------
+        'Spread flat by days in month
+        xSegment = xSegment + 1
+        WorkingColumn = 102 ' account CustomAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'CustomAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(11, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(11, z) = TempColumn1 / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(11, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(11, z)
+        Next z
+        '----------------------Section 13 - CustomAllowance Weighted Monthly Spread ---------------------------------
+        'weighted monthly spread of total based on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 105 ' account CustomAllowance
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'CustomAllowance yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(12, z) = 0
+            Else
+                MonthlyDataSpread(12, z) = TempColumn1 / TotalBaseSalary * MonthlyDataSpread(0, z)
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(12, z)
+        Next z
+        '----------------------Section 14 - BonusPercentage---------------------------------
+        'percentile spread on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 108 ' account BonusPercentage
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'BonusPercentage % weight
+        
+        For z = 1 To 12
+            MonthlyDataSpread(13, z) = MonthlyDataSpread(0, z) * TempColumn1
+            FullDataArray(xSegment, z) = MonthlyDataSpread(13, z)
+        Next z
+        '----------------------Section 15 - IncentivePercentage 1---------------------------------
+        'percentile spread on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 111 ' account IncentivePercentage
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'IncentivePercentage % weight
+        
+        For z = 1 To 12
+            MonthlyDataSpread(14, z) = MonthlyDataSpread(0, z) * TempColumn1
+            FullDataArray(xSegment, z) = MonthlyDataSpread(14, z)
+        Next z
+        '----------------------Section 16 - IncentivePercentage 2---------------------------------
+        'percentile spread on base salary
+        xSegment = xSegment + 1
+        WorkingColumn = 114 ' account IncentivePercentage
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'IncentivePercentage % weight
+        
+        For z = 1 To 12
+            MonthlyDataSpread(15, z) = MonthlyDataSpread(0, z) * TempColumn1
+            FullDataArray(xSegment, z) = MonthlyDataSpread(15, z)
+        Next z
+        '----------------------Section 17 - IncentiveFlatMonthyl---------------------------------
+        'Entierly Flat Spread by month
+        xSegment = xSegment + 1
+        WorkingColumn = 117 ' account IncentiveFlatMonthyl
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'IncentiveFlatMonthyl yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(16, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(16, z) = TempColumn1 / TotalWorkingMonths * Seasonality(z)
+                Else
+                    MonthlyDataSpread(16, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(16, z)
+        Next z
+        '----------------------Section 18 - IncentiveFlatDaily---------------------------------
+        'Spread flat by days in month
+        xSegment = xSegment + 1
+        WorkingColumn = 120 ' account IncentiveFlatDaily
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn + 1) 'IncentiveFlatDaily yearly value
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(17, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(17, z) = TempColumn1 / TotalWorkingDays * xDaysPerMonth(z, HourlyTest) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(17, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(17, z)
+        Next z
+        '----------------------Section 19 - Custom Monthly Spread 1---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 141 ' account Monthly Custom
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = WorkingColumn - 13
+        
+        For z = 1 To 12
+            MonthlyDataSpread(18, z) = RawData_Array(i, TempColumn1 + z) * Seasonality(z)
+            FullDataArray(xSegment, z) = MonthlyDataSpread(18, z)
+        Next z
+        '----------------------Section 20 - Stats HeadCount---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 49 ' account HeadCount
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, 15) 'HeadCount value
+        statsTracker = statsTracker + 1
+        StatsReporting(statsTracker, 0) = Left(ComboArray(xSegment), 4)
+        StatsReporting(statsTracker, 1) = FullDataArray(xSegment, 13) 'Managed
+        StatsReporting(statsTracker, 2) = FullDataArray(xSegment, 14) 'Job title
+        StatsReporting(statsTracker, 3) = TempColumn1
+        
+        
+        For z = 1 To 12
+            If Not Seasonality(z) = 0 Then
+                MonthlyDataSpread(19, z) = TempColumn1
+            Else
+                MonthlyDataSpread(19, z) = 0
+            End If
+        Next z
+        FullDataArray(xSegment, 1) = TempColumn1 'return only jan fcst will need a workaround
+        '----------------------Section 21 - Stats Position Count---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 49 ' account FTEHeadCount
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & "972540"
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & "972540"
+        TempColumn1 = RawData_Array(i, 15) 'HeadCount value
+        StatsReporting(statsTracker, 4) = RawData_Array(i, 15) 'FTEHeadCount value
+        
+        For z = 1 To 12
+            If Not Seasonality(z) = 0 Then
+                MonthlyDataSpread(20, z) = TempColumn1 'HeadCount value
+            Else
+                MonthlyDataSpread(20, z) = 0
+            End If
+        Next z
+        FullDataArray(xSegment, 1) = TempColumn1
+        '----------------------Section 22 - HoursWorked---------------------------------
+        'Spread flat by days in month
+        xSegment = xSegment + 1
+        WorkingColumn = 48 ' account HoursWorked
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, 14) 'HoursWorked yearly value
+        TempColumn2 = RawData_Array(i, 53) * RawData_Array(i, 12) 'contracted vacation hours
+        TempColumn3 = 57 'starting column for Monthly weights for holidays
+        TempColumn1 = TempColumn1 + TempColumn2 'add back vacation days to spread them based on vacation taken
+
+
+        For z = 1 To 12
+            MonthlyDataSpread(21, z) = RawData_Array(i, TempColumn3 - 1 + z) * Seasonality(z) * TempColumn2
+        Next z
+
+        
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(21, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(21, z) = (TempColumn1 / TotalWorkingDays2 * xDaysPerMonth(z, 0) * Seasonality(z)) - MonthlyDataSpread(21, z)
+                Else
+                    MonthlyDataSpread(21, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(21, z)
+        Next z
+        '-------------------------------Section 23 - Holiday Accrual-------------------------------------
+        'deduct holiday
+        For z = 1 To 12
+            FullDataArray(xSegment - 21, z) = MonthlyDataSpread(0, z) - MonthlyDataSpread(1, z)
+        Next z
+        'spread accrual cost
+        xSegment = xSegment + 1
+        WorkingColumn = 56 ' account Holiday Accrual
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'days  to accrue per month
+        TempColumn2 = RawData_Array(i, WorkingColumn - 2) 'cost per day
+        
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(22, z) = 0
+            Else
+                If Not Seasonality(z) = 0 Then
+                    If z < IncreaseMonth Then
+                        MonthlyDataSpread(22, z) = (TempColumn1 * TempColumn2 * Seasonality(z)) - MonthlyDataSpread(1, z)
+                    Else
+                        MonthlyDataSpread(22, z) = (TempColumn1 * TempColumn2 * Seasonality(z) * (1 + RawData_Array(i, Base_Percent_Increase_Column))) - MonthlyDataSpread(1, z)
+                    End If
+                Else
+                    MonthlyDataSpread(22, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(22, z)
+        Next z
+        '----------------------Section 24 - Custom Monthly Spread 2---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 154 ' account Monthly Custom
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = WorkingColumn - 13
+        
+        For z = 1 To 12
+            MonthlyDataSpread(23, z) = RawData_Array(i, TempColumn1 + z) * Seasonality(z)
+            FullDataArray(xSegment, z) = MonthlyDataSpread(23, z)
+        Next z
+    
+        '----------------------Section 25 - Overtime Cost---------------------------------
+        ' Move overtime cost here so SocialSecurity captures it
+        xSegment = xSegment + 1
+        WorkingColumn = 126 ' account Overtime Cost
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, 125) ' Overtime Yearly Cost
+
+        For z = 1 To 12
+            If TempColumn1 = 0 Then
+                MonthlyDataSpread(26, z) = 0
+            Else
+                If TotalWorkingMonths > 0 And Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(26, z) = (TempColumn1 / TotalWorkingMonths) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(26, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(26, z)
+        Next z
+
+        '----------------------Section 26 - SocialSecurity---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 171 ' account SocialSecurity
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, WorkingColumn - 1) 'yearly Cap
+        TempColumn2 = RawData_Array(i, WorkingColumn - 2) 'monthly Cap
+        P = WorkingColumn - 16 'Tax Starter Column
+        TempColumn3 = 0 'Tax Group 0 started increments with 2
+        TempColumn4 = 0 'Yearly Total
+        TempColumn5 = 0 'Temp Tax Value
+        TempColumn6 = 0 'Already Taxed
+        TempColumn7 = 0 'Remainder
+        TempColumn8 = 0 'Final Monthly Tax Amount
+    
+        For z = 1 To 12
+            TempColumn8 = 0
+            MonthlyDataSpread(24, z) = (MonthlyDataSpread(0, z) * CN_A1) + (MonthlyDataSpread(2, z) * CN_A2) + (MonthlyDataSpread(3, z) * CN_A3) + (MonthlyDataSpread(4, z) * CN_A4) + (MonthlyDataSpread(6, z) * CN_A5) + (MonthlyDataSpread(7, z) * CN_A6) + (MonthlyDataSpread(8, z) * CN_A7) + (MonthlyDataSpread(9, z) * CN_A8) + (MonthlyDataSpread(10, z) * CN_A9) + (MonthlyDataSpread(11, z) * CN_A10) + (MonthlyDataSpread(12, z) * CN_A11) + (MonthlyDataSpread(13, z) * CN_A12) + (MonthlyDataSpread(14, z) * CN_A13) + (MonthlyDataSpread(15, z) * CN_A14) + (MonthlyDataSpread(16, z) * CN_A15) + (MonthlyDataSpread(17, z) * CN_A16) + (MonthlyDataSpread(5, z) * CN_A17) + (MonthlyDataSpread(18, z) * CN_A18) + (MonthlyDataSpread(23, z) * CN_A19) + (MonthlyDataSpread(26, z) * CN_A20)
+            
+            If TempColumn2 = 0 Then
+            Else
+                If MonthlyDataSpread(24, z) > TempColumn2 Then MonthlyDataSpread(24, z) = TempColumn2
+            End If
+            If TempColumn1 = 0 Then
+            Else
+                If MonthlyDataSpread(24, z) + TempColumn4 > TempColumn1 Then MonthlyDataSpread(24, z) = TempColumn1 - TempColumn4
+            End If
+            
+            TempColumn4 = MonthlyDataSpread(24, z) + TempColumn4
+            TempColumn7 = MonthlyDataSpread(24, z)
+            
+            If TempColumn7 = 0 Then
+            Else
+                While Not TempColumn7 = 0
+                    If RawData_Array(i, P + TempColumn3) = 0 Then
+                        TempColumn8 = TempColumn7 * RawData_Array(i, P + 1 + TempColumn3) + TempColumn8
+                        TempColumn6 = TempColumn6 + TempColumn7
+                        TempColumn7 = TempColumn7 - TempColumn7
+                    Else
+                        If TempColumn4 > RawData_Array(i, P + TempColumn3) Then
+                            TempColumn5 = RawData_Array(i, P + TempColumn3) - TempColumn6
+                            TempColumn6 = TempColumn6 + TempColumn5
+                            TempColumn7 = TempColumn7 - TempColumn5
+                            TempColumn8 = TempColumn5 * RawData_Array(i, P + 1 + TempColumn3) + TempColumn8
+                            TempColumn3 = TempColumn3 + 2
+                        Else
+                            TempColumn6 = TempColumn6 + TempColumn7
+                            TempColumn8 = TempColumn7 * RawData_Array(i, P + 1 + TempColumn3) + TempColumn8
+                            TempColumn7 = TempColumn7 - TempColumn7
+                        End If
+                    End If
+                Wend
+            End If
+            
+            MonthlyDataSpread(24, z) = TempColumn8
+            FullDataArray(xSegment, z) = MonthlyDataSpread(24, z)
+        Next z
+    
+    
+        '----------------------Section 27 - FTE---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 50 ' account FTEHeadCount
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn1 = RawData_Array(i, 16) 'FTE value
+        StatsReporting(statsTracker, 4) = RawData_Array(i, 16) 'FTE value
+        
+        
+        For z = 1 To 12
+            MonthlyDataSpread(25, z) = TempColumn1 * Seasonality(z)
+            FullDataArray(xSegment, z) = MonthlyDataSpread(25, z)
+        Next z
+
+        '----------------------Section 28 - Overtime Hours (Acc 1)---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 127 ' account Overtime Hours 1
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        TempColumn2 = RawData_Array(i, 124) ' Overtime Yearly Hours
+
+        For z = 1 To 12
+            If TempColumn2 = 0 Then
+                MonthlyDataSpread(27, z) = 0
+            Else
+                If TotalWorkingMonths > 0 And Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(27, z) = (TempColumn2 / TotalWorkingMonths) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(27, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(27, z)
+        Next z
+
+        '----------------------Section 29 - Overtime Hours (Acc 2)---------------------------------
+        xSegment = xSegment + 1
+        WorkingColumn = 128 ' account Overtime Hours 2
+        FullDataArray(xSegment, 13) = FullDataArray(xSegment - 1, 13)
+        FullDataArray(xSegment, 14) = FullDataArray(xSegment - 1, 14)
+        ComboArray(xSegment) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+        FullDataArray(xSegment, 0) = RawData_Array(i, DepartmentColumn) & RawData_Array(i, WorkingColumn)
+
+        For z = 1 To 12
+            If TempColumn2 = 0 Then
+                MonthlyDataSpread(28, z) = 0
+            Else
+                If TotalWorkingMonths > 0 And Not Seasonality(z) = 0 Then
+                    MonthlyDataSpread(28, z) = (TempColumn2 / TotalWorkingMonths) * Seasonality(z)
+                Else
+                    MonthlyDataSpread(28, z) = 0
+                End If
+            End If
+            FullDataArray(xSegment, z) = MonthlyDataSpread(28, z)
+        Next z
+
+    Next i
+    '---------------add Custom Input section here-----------------------------------------------------
+    If MaxRowsBuyOut = 2 Then
+    Else
+        For i = 1 To UBound(Buyout_Array_Raw)
+            xSegment = xSegment + 1
+            ComboArray(xSegment) = Buyout_Array_Raw(i, 2) & Buyout_Array_Raw(i, 3)
+            FullDataArray(xSegment, 0) = Buyout_Array_Raw(i, 2) & Buyout_Array_Raw(i, 3)
+            For z = 1 To 12
+                FullDataArray(xSegment, z) = Buyout_Array_Raw(i, ((z - 1) * 4) + 8)
+            Next z
+        Next i
+        For i = 1 To UBound(Buyout_Array_Raw)
+            xSegment = xSegment + 1
+            ComboArray(xSegment) = Buyout_Array_Raw(i, 2) & Buyout_Array_Raw(i, 4)
+            FullDataArray(xSegment, 0) = Buyout_Array_Raw(i, 2) & Buyout_Array_Raw(i, 4)
+            For z = 1 To 12
+                FullDataArray(xSegment, z) = Buyout_Array_Raw(i, ((z - 1) * 4) + 5)
+            Next z
+        Next i
+    End If
+    
+    
+    '------------data clean up and sort---------------
+    
+    For i = 0 To statsTracker
+        StatsReporting(i, 0) = GroupLabler(StatsReporting(i, 0)) & StatsReporting(i, 2)
+        StatsCombo(i) = StatsReporting(i, 0)
+    Next i
+    
+    UniqueStatsCombo = CollectionGlitch(StatsCombo)
+
+    If Not UniqueStatsCombo(UBound(UniqueStatsCombo)) = "" Then
+        ReDim Preserve UniqueStatsCombo(1 To UBound(UniqueStatsCombo))
+        ReDim OutPutStatsCombo(1 To UBound(UniqueStatsCombo), 0 To 9)
+    Else
+        For i = 1 To UBound(UniqueStatsCombo)
+            If UniqueStatsCombo(i) = "" Then
+                ReDim Preserve UniqueStatsCombo(1 To i - 1)
+                ReDim OutPutStatsCombo(1 To i - 1, 0 To 9)
+                Exit For
+            End If
+        Next i
+    End If
+    
+    UniqueStatsCombo = QuickSortList(UniqueStatsCombo)
+    StatsReporting = QuickSortTable(StatsReporting, 0, -1, 0)
+    CurrentLoader = ""
+    UniqueCounter = 0
+    
+    For i = 0 To statsTracker
+        If Not CurrentLoader = LCase(StatsReporting(i, 0)) Then
+            CurrentLoader = LCase(StatsReporting(i, 0))
+            UniqueCounter = UniqueCounter + 1
+            OutPutStatsCombo(UniqueCounter, 0) = CurrentLoader
+            OutPutStatsCombo(UniqueCounter, 7) = StatsReporting(i, 2)
+        Else
+        End If
+        
+        Select Case StatsReporting(i, 1)
+            Case "Manager Salaried Pay", "Manager Salaried Pay (Non Exempt)"
+                OutPutStatsCombo(UniqueCounter, 1) = OutPutStatsCombo(UniqueCounter, 1) + StatsReporting(i, 3)
+                OutPutStatsCombo(UniqueCounter, 4) = OutPutStatsCombo(UniqueCounter, 4) + StatsReporting(i, 4)
+            Case "Associate Hourly Pay", "Associate Hourly (MEA)", "Associate Salaried Pay", "Supervisor Salaried Pay", "Supervisor Hourly Pay"
+                OutPutStatsCombo(UniqueCounter, 2) = OutPutStatsCombo(UniqueCounter, 2) + StatsReporting(i, 3)
+                OutPutStatsCombo(UniqueCounter, 5) = OutPutStatsCombo(UniqueCounter, 5) + StatsReporting(i, 4)
+            Case "Casual Hourly Pay", "Casual Salaried Pay"
+                OutPutStatsCombo(UniqueCounter, 3) = OutPutStatsCombo(UniqueCounter, 3) + StatsReporting(i, 3)
+                OutPutStatsCombo(UniqueCounter, 6) = OutPutStatsCombo(UniqueCounter, 6) + StatsReporting(i, 4)
+        End Select
+    Next i
+    
+    ThisWorkbook.Worksheets("Staffing Overview").Range("A7:G99999").Clear
+    ThisWorkbook.Worksheets("Staffing Overview").Range("H7:AE99999").ClearFormats
+    CurrentLoader = ""
+    UniqueCounter = 0 'rowCounter
+    UniqueTracker = 0 'rowCounter
+    
+    For i = 1 To UBound(OutPutStatsCombo)
+        UniqueCounter = UniqueCounter + 1
+        If Not CurrentLoader = Left(OutPutStatsCombo(i, 0), 2) Then
+            CurrentLoader = Left(OutPutStatsCombo(i, 0), 2)
+                Select Case Left(OutPutStatsCombo(i, 0), 2)
+                    Case "10"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Rooms"
+                    Case "11"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Reservations"
+                    Case "13"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "F&B - Outlets and Lounge"
+                    Case "14"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "F&B - Catering"
+                    Case "15"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "F&B - Kitchen"
+                    Case "16"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Golf"
+                    Case "17"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Spa & Recreation"
+                    Case "18"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Other Operated Departments"
+                    Case "19"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Administrative & General"
+                    Case "20"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Sales & Marketing and Convention Service"
+                    Case "21"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Property Operation & Maintenance"
+                    Case "22"
+                        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = "Other UOE"
+                End Select
+            With ThisWorkbook.Worksheets("Staffing Overview").Range("A" & UniqueCounter + 6 & ":AE" & UniqueCounter + 6).Interior
+                .Pattern = xlSolid
+                .PatternColorIndex = xlAutomatic
+                .ThemeColor = xlThemeColorDark2
+            End With
+            UniqueCounter = UniqueCounter + 1
+        Else
+        End If
+        
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 2).Value2 = OutPutStatsCombo(i, 1)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 3).Value2 = OutPutStatsCombo(i, 2)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 4).Value2 = OutPutStatsCombo(i, 3)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 5).Value2 = OutPutStatsCombo(i, 4)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 6).Value2 = OutPutStatsCombo(i, 5)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 7).Value2 = OutPutStatsCombo(i, 6)
+        ThisWorkbook.Worksheets("Staffing Overview").Cells(UniqueCounter + 6, 1).Value2 = OutPutStatsCombo(i, 7)
+    Next i
+    
+    'return list of unique values only
+    UniqueComboArray = CollectionGlitch(ComboArray)
+    
+    'resize array to save computational cycles during quicksort#
+    If Not UniqueComboArray(UBound(UniqueComboArray)) = "" Then
+        ReDim Preserve UniqueComboArray(1 To UBound(UniqueComboArray))
+        ReDim OutputBudgetExport(1 To UBound(UniqueComboArray), 0 To 16)
+    Else
+        For i = 1 To UBound(UniqueComboArray)
+            If UniqueComboArray(i) = "" Then
+                ReDim Preserve UniqueComboArray(1 To i - 1)
+                ReDim OutputBudgetExport(1 To i - 1, 0 To 16)
+                Exit For
+            End If
+        Next i
+    End If
+    
+    'quick sort main list
+    UniqueComboArray = QuickSortList(UniqueComboArray)
+    FullDataArray = QuickSortTable(FullDataArray, 0, -1, 0)
+        
+    'track unique values to switch inputs
+    CurrentLoader = ""
+    UniqueCounter = 0
+    
+    For i = 0 To UBound(FullDataArray)
+    
+        If Not FullDataArray(i, 0) = CurrentLoader Then
+            UniqueCounter = UniqueCounter + 1
+            CurrentLoader = FullDataArray(i, 0)
+            OutputBudgetExport(UniqueCounter, 0) = CurrentLoader
+        Else
+        End If
+    
+        For z = 1 To 12
+            OutputBudgetExport(UniqueCounter, z) = OutputBudgetExport(UniqueCounter, z) + FullDataArray(i, z)
+        Next z
+    
+    Next i
+    ThisWorkbook.Worksheets("Budget_Export").Range("A2:Q99999").Clear
+    'ThisWorkbook.Worksheets("Budget_Export").Range("A2:Q99999").Clear
+    UniqueCounter = 1
+    For i = 1 To UBound(UniqueComboArray): Do
+        If Not CheckCombo(Left(OutputBudgetExport(i, 0), 4) & "-" & Right(OutputBudgetExport(i, 0), 6)) Then Exit Do
+        ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 1) = Left(OutputBudgetExport(i, 0), 4) & "-" & Right(OutputBudgetExport(i, 0), 6)
+        ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 2) = "'" & Left(OutputBudgetExport(i, 0), 4)
+        ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 3) = Right(OutputBudgetExport(i, 0), 6)
+        xMultiplayer = 1000
+        If Left(Right(OutputBudgetExport(i, 0), 6), 1) = "9" Then xMultiplayer = 1
+        For z = 1 To 12
+            ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, z + 4) = OutputBudgetExport(i, z) / xMultiplayer
+        Next z
+        UniqueCounter = UniqueCounter + 1
+    Loop While False: Next i
+    
+    ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 1) = "0410-988112"
+    ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 2) = "'0410"
+    ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 3) = "988112"
+    For z = 1 To 12
+        ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, z + 4) = 0
+    Next z
+    ThisWorkbook.Worksheets("Budget_Export").Cells(UniqueCounter + 1, 5) = ThisWorkbook.Worksheets("Settings").Cells(31, 2).Value2
+    UniqueCounter = UniqueCounter + 1
+    
+    Call AddAllocationLines
+    
+    Application.Calculation = CalculationSetting
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    MsgBox ("Refresh Complete - Please consider saving this workbook.")
+
+End Sub
+Sub AddAllocationLines()
+    Application.EnableEvents = False
+    Dim BottomExport As Double, BottomAllocation As Double, Allocation As Variant, ExportS As Worksheet, AllocS As Worksheet, i As Double, x As Double, InsertRow As Double, AccountLoad As String
+    Set ExportS = ThisWorkbook.Worksheets("Budget_Export")
+    Set AllocS = ThisWorkbook.Worksheets("Allocations")
+    BottomExport = ExportS.Cells(ExportS.Rows.count, 2).End(xlUp).Row
+    BottomAllocation = AllocS.Cells(AllocS.Rows.count, 1).End(xlUp).Row
+    If BottomAllocation = 9 Then Exit Sub
+    Allocation = AllocS.Range("A10:K" & BottomAllocation).Value2
+    InsertRow = BottomExport
+
+    For i = 1 To 5
+        For x = 1 To BottomAllocation - 9
+            If Not AllocS.Cells(7, i * 2) = "Active" Then Exit For
+            AccountLoad = AllocS.Cells(8, (i * 2) + 1).Value2
+            InsertRow = InsertRow + 1
+            ExportS.Cells(InsertRow, 1) = Allocation(x, 1) & "-" & AccountLoad
+            ExportS.Cells(InsertRow, 2).NumberFormat = "@"
+            ExportS.Cells(InsertRow, 2) = Allocation(x, 1)
+            ExportS.Cells(InsertRow, 3) = AccountLoad
+            ExportS.Cells(InsertRow, 5) = Allocation(x, i * 2)
+            ExportS.Range(ExportS.Cells(InsertRow, 6), ExportS.Cells(InsertRow, 16)).Value2 = 0
+        Next x
+    Next i
+
+    BottomExport = ExportS.Cells(ExportS.Rows.count, 2).End(xlUp).Row
+    ExportS.Range("Q2:Q" & BottomExport).FormulaR1C1 = "=SUM(RC[-12]:RC[-1])"
+    ExportS.Range("Q2:Q" & BottomExport).Calculate
+    ExportS.Range("Q2:Q" & BottomExport).Value2 = ExportS.Range("Q2:Q" & BottomExport).Value2
+
+End Sub
+
+Sub ExportData2BST(AutoCreateAccounts As Boolean)
+    'Main variables grouped by type
+    Dim xLocation As String, xMessage As String
+    Dim BST As Workbook, WB As Workbook
+    Dim PasteSheet As Worksheet, ExportRaw As Variant
+    Dim lastRow As Double, LogCounter As Double, CompleteCounter As Double, NewValue As Double, RowNumber As Double
+    Dim AccCombo As Range
+    Dim wasOpen As Boolean
+    Dim Overwrite As Boolean: Overwrite = ThisWorkbook.Worksheets("Settings").Range("B6").Value2
+    Dim UserSettingCalculation As Integer, MonthOffset As Integer
+    're-usable throw away varaibles
+    Dim i As Double, x As Integer
+    'set static or starting variables
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    UserSettingCalculation = CalculationSetting
+    Application.Calculation = xlCalculationManual
+    
+    
+    
+        'get all accounts and their codes
+    Dim AccountMaxRows As Double
+    Dim AccountsTable As Variant
+    Set AccountList = New Dictionary
+    
+    
+    With ThisWorkbook.Worksheets("Lists")
+        AccountMaxRows = .Cells(.Rows.count, 16).End(xlUp).Row
+        AccountsTable = .Range("P1:Q" & AccountMaxRows).Value2
+    End With
+    
+    For i = 2 To AccountMaxRows
+        AccountList(AccountsTable(i, 1)) = AccountsTable(i, 2)
+    Next i
+    
+    
+    
+    MonthOffset = ThisWorkbook.Worksheets("Settings").Range("B7").Value2 - 1
+    LogCounter = 0
+    CompleteCounter = 0
+    Set PasteSheet = ThisWorkbook.Worksheets("Log")
+    PasteSheet.Range("A2:R99999").Clear
+    With PasteSheet.Tab
+        .ThemeColor = xlThemeColorAccent6
+        .TintAndShade = 0.399975585192419
+    End With
+
+    xLocation = FileLocation("Select your BST", "*.xlsm") ' get BST Location
+    If xLocation = "" Then
+        MsgBox ("User Cancelled")
+        Exit Sub
+    Else
+        For Each WB In Workbooks
+            If WB.FullName = xLocation Then Set BST = WB 'Check if BST is Open
+        Next WB
+        If BST Is Nothing Then
+            Set BST = Workbooks.Open(xLocation) 'set BST workbook
+            wasOpen = False
+        Else
+            wasOpen = True
+        End If
+        
+    End If
+    With ThisWorkbook.Worksheets("Budget_Export")
+        lastRow = .Cells(.Rows.count, "A").End(xlUp).Row
+    End With
+    For i = 2 To lastRow
+        ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Value2 = "Failed - See Log"
+        With ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Font
+            .Color = -16777024
+            .TintAndShade = 0
+        End With
+        'tries to select correct department
+        If Not PasteSheet.Name = ThisWorkbook.Worksheets("Budget_Export").Cells(i, 2).Value2 Then
+            If Not wsExists(BST, ThisWorkbook.Worksheets("Budget_Export").Cells(i, 2).Value2) Then GoTo NotFound
+            Set PasteSheet = BST.Worksheets(ThisWorkbook.Worksheets("Budget_Export").Cells(i, 2).Value2)
+        End If
+        
+        Set AccCombo = Nothing
+        On Error Resume Next
+        Set AccCombo = PasteSheet.Cells(Application.Match(ThisWorkbook.Worksheets("Budget_Export").Cells(i, 1).Value2, PasteSheet.Range("B:B"), 0), 2)
+        On Error GoTo -1
+        On Error GoTo 0
+        
+        If AccCombo Is Nothing Then
+            If AutoCreateAccounts Then
+                'call create new account
+                Request_BST_New_Account ThisWorkbook.Worksheets("Budget_Export").Cells(i, 2).Value2, ThisWorkbook.Worksheets("Budget_Export").Cells(i, 3).Value2, "Payroll Auto Added", BST
+                LogCounter = LogCounter + 1
+                ThisWorkbook.Worksheets("Log").Range("A" & LogCounter + 1 & ":Q" & LogCounter + 1).Value2 = ThisWorkbook.Worksheets("Budget_Export").Range("A" & i & ":Q" & i).Value2
+                ThisWorkbook.Worksheets("Log").Range("R" & LogCounter + 1).Value2 = "Accounted added to BST/FST."
+                On Error GoTo AccNotFound
+                Set AccCombo = PasteSheet.Cells(Application.Match(ThisWorkbook.Worksheets("Budget_Export").Cells(i, 1).Value2, PasteSheet.Range("B:B"), 0), 2)
+                'the BST slows the code down, attempt to speed it back up
+                Application.ScreenUpdating = False
+                Application.EnableEvents = False
+                Application.DisplayAlerts = False
+                On Error GoTo -1
+                On Error GoTo 0
+            Else
+                ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Value2 = "Account not found"
+                GoTo AccNotFound
+            End If
+
+        End If
+        
+        
+        
+        If Overwrite Then
+            'overwrite
+            Set AccCombo = AccCombo.Resize(, 12 - MonthOffset).Offset(0, 7 + MonthOffset)
+            On Error GoTo Protected
+            AccCombo.Value2 = ThisWorkbook.Worksheets("Budget_Export").Range(ThisWorkbook.Worksheets("Budget_Export").Cells(i, 5 + MonthOffset), ThisWorkbook.Worksheets("Budget_Export").Cells(i, 16)).Value2
+            ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Value2 = "Success"
+            With ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Font
+                .ThemeColor = xlThemeColorAccent6
+                .TintAndShade = -0.499984740745262
+            End With
+            On Error GoTo -1
+            On Error GoTo 0
+        Else
+            'add
+            Set AccCombo = AccCombo.Offset(0, 6 + MonthOffset)
+            For x = 1 To 12 - MonthOffset
+                Set AccCombo = AccCombo.Offset(0, 1)
+                On Error GoTo Protected
+                AccCombo.Value2 = AccCombo.Value2 + ThisWorkbook.Worksheets("Budget_Export").Cells(i, x + 4).Value2
+                On Error GoTo -1
+                On Error GoTo 0
+            Next x
+            ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Value2 = "Success"
+            With ThisWorkbook.Worksheets("Budget_Export").Cells(i, 4).Font
+                .ThemeColor = xlThemeColorAccent6
+                .TintAndShade = -0.499984740745262
+            End With
+        End If
+        CompleteCounter = CompleteCounter + 1
+        GoTo NextCycle
+Protected:
+        On Error GoTo -1
+        On Error GoTo 0
+        LogCounter = LogCounter + 1
+        ThisWorkbook.Worksheets("Log").Range("A" & LogCounter + 1 & ":Q" & LogCounter + 1).Value2 = ThisWorkbook.Worksheets("Budget_Export").Range("A" & i & ":Q" & i).Value2
+        ThisWorkbook.Worksheets("Log").Range("R" & LogCounter + 1).Value2 = "Combo Protected in BST - Please review, could be allocation."
+        GoTo NextCycle
+NotFound:
+        On Error GoTo -1
+        On Error GoTo 0
+        LogCounter = LogCounter + 1
+        ThisWorkbook.Worksheets("Log").Range("A" & LogCounter + 1 & ":Q" & LogCounter + 1).Value2 = ThisWorkbook.Worksheets("Budget_Export").Range("A" & i & ":Q" & i).Value2
+        ThisWorkbook.Worksheets("Log").Range("R" & LogCounter + 1).Value2 = "Department Not Found - Please add department"
+        GoTo NextCycle
+AccNotFound:
+        On Error GoTo -1
+        On Error GoTo 0
+        LogCounter = LogCounter + 1
+        ThisWorkbook.Worksheets("Log").Range("A" & LogCounter + 1 & ":Q" & LogCounter + 1).Value2 = ThisWorkbook.Worksheets("Budget_Export").Range("A" & i & ":Q" & i).Value2
+        ThisWorkbook.Worksheets("Log").Range("R" & LogCounter + 1).Value2 = "Account Not Found - Please add account"
+NextCycle:
+    Next i
+    xMessage = "Injection Process Complete: " & CompleteCounter * 12 & " - Successfull Entries"
+    If LogCounter > 0 Then
+        xMessage = xMessage & " | " & LogCounter & " - Row Notification(s) please review 'Log' sheet"
+        With ThisWorkbook.Worksheets("Log").Tab
+            .Color = 255
+            .TintAndShade = 0
+        End With
+    Else
+    End If
+    If Not wasOpen Then BST.Close savechanges:=True
+    
+    MsgBox (xMessage)
+    
+    Application.Calculation = CalculationSetting
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    ThisWorkbook.Activate
+    
+End Sub
+
+Function Request_BST_New_Account(xDep As String, xGLAcct As String, xGLDescrip As String, wkbk As Workbook)
+    'The BST/FST implementation is poorly designed and utilizes active positions. Therefore, we need to replicate this behavior in our code.
+    On Error Resume Next
+    wkbk.Activate
+    wkbk.Worksheets(xDep).Select
+    wkbk.Worksheets(xDep).Activate
+
+    If AccountList.Exists(xGLAcct) Then
+        xGLDescrip = AccountList(xGLAcct)
+    End If
+
+    Application.Run "'" & wkbk.FullName & "'!AddNewRow", xDep, xGLAcct, xGLDescrip
+
+End Function
+
+Sub ExportZero2BST()
+    'Main variables grouped by type
+    Dim xLocation As String, xMessage As String
+    Dim BST As Workbook, WB As Workbook
+    Dim PasteSheet As Worksheet, ExportRaw As Variant
+    Dim lastRow As Double, LogCounter As Double, CompleteCounter As Double, NewValue As Double, RowNumber As Double
+    Dim AccCombo As Range, ws As Worksheet, MaxRows As Double
+    Dim wasOpen As Boolean
+    Dim UserSettingCalculation As Integer, MonthOffset As Integer
+    're-usable throw away varaibles
+    Dim i As Double, x As Integer
+    'set static or starting variables
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    UserSettingCalculation = CalculationSetting
+    Application.Calculation = xlCalculationManual
+    
+    LogCounter = 0
+    CompleteCounter = 0
+    Set PasteSheet = ThisWorkbook.Worksheets("Log")
+    PasteSheet.Range("A2:R99999").Clear
+    With PasteSheet.Tab
+        .ThemeColor = xlThemeColorAccent6
+        .TintAndShade = 0.399975585192419
+    End With
+
+    xLocation = FileLocation("Select your BST", "*.xlsm") ' get BST Location
+    If xLocation = "" Then
+        MsgBox ("User Cancelled")
+        Exit Sub
+    Else
+        For Each WB In Workbooks
+            If WB.FullName = xLocation Then Set BST = WB 'Check if BST is Open
+        Next WB
+        If BST Is Nothing Then
+            Set BST = Workbooks.Open(xLocation) 'set BST workbook
+            wasOpen = False
+        Else
+            wasOpen = True
+        End If
+        
+    End If
+    
+    For Each ws In BST.Worksheets
+        If realDep(ws) Then
+            MaxRows = ws.Cells(ws.Rows.count, 2).End(xlUp).Row
+            On Error Resume Next
+            For i = 1 To MaxRows
+                If CheckCombo(ws.Cells(i, 2)) And _
+                    (Left(Right(ws.Cells(i, 2), 6), 1) = "5" Or Left(ws.Cells(i, 2), 3) = "988" Or Left(ws.Cells(i, 2), 5) = "97254") And _
+                    Not Left(ws.Cells(i, 3), 3) = "All" Then
+                    ws.Range("I" & i & ":T" & i).Value2 = 0
+                Else
+                End If
+            Next i
+        Else
+        End If
+    Next
+    On Error GoTo -1
+    On Error GoTo 0
+
+    If Not wasOpen Then BST.Close savechanges:=True
+    
+    MsgBox ("All possible payroll data & the 988xxx stats data was cleared, please review your BST")
+    
+    Application.Calculation = CalculationSetting
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    
+End Sub
+

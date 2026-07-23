@@ -46,11 +46,12 @@ export type FieldLookup = Map<string, FieldDef>;
 const POSITION_COLUMNS = `
   id, scenario_id, lineage_id, active,
   department_code, job_type_code, cluster, pay_type,
-  headcount, fte, seasonality, monthly_base_salary, additional_monthly_costs,
+  headcount, fte, seasonality, monthly_base_salary, hourly_rate,
+  additional_monthly_costs,
   merit_increase_pct, manual_yearly_increase, increase_month,
   daily_contract_hours, yearly_hours_worked, vacation_days,
-  daily_vacation_cost, vacation_monthly_weights, accrual_days_per_month,
-  accrual_cost_per_day, extra_values, updated_at`;
+  vacation_monthly_weights, accrual_days_per_month,
+  extra_values, updated_at`;
 
 function parseVector(raw: unknown): number[] {
   try {
@@ -94,6 +95,7 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     fte: row.fte as number,
     seasonality: parseVector(row.seasonality),
     monthlyBaseSalary: row.monthly_base_salary as number,
+    hourlyRate: row.hourly_rate as number,
     additionalMonthlyCosts: parseVector(row.additional_monthly_costs),
     meritIncreasePct: row.merit_increase_pct as number,
     manualYearlyIncrease: row.manual_yearly_increase as number,
@@ -101,10 +103,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     dailyContractHours: row.daily_contract_hours as number,
     yearlyHoursWorked: row.yearly_hours_worked as number,
     vacationDays: row.vacation_days as number,
-    dailyVacationCost: row.daily_vacation_cost as number,
     vacationMonthlyWeights: parseVector(row.vacation_monthly_weights),
     accrualDaysPerMonth: row.accrual_days_per_month as number,
-    accrualCostPerDay: row.accrual_cost_per_day as number,
     extraValues: parseJsonObject(row.extra_values),
     updatedAt: row.updated_at as string,
   };
@@ -128,7 +128,7 @@ export function loadScenarioValues(
     prepared(
       db,
       `SELECT position_id, component_def_id, rate, yearly_value, monthly_values,
-              qty, unit_rate, updated_at
+              qty, unit_rate, account_code, stats_account_code, updated_at
          FROM component_values
         WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
     ).all(scope.ou, scenarioId) as Array<Record<string, unknown>>
@@ -141,6 +141,8 @@ export function loadScenarioValues(
       monthlyValues: row.monthly_values ? parseVector(row.monthly_values) : null,
       qty: row.qty as number | null,
       unitRate: row.unit_rate as number | null,
+      accountCode: (row.account_code as string | null) ?? null,
+      statsAccountCode: (row.stats_account_code as string | null) ?? null,
       updatedAt: row.updated_at as string,
     })
   );
@@ -424,11 +426,29 @@ function applyUpdate(
   return prepared(db, sql).run(...params).changes;
 }
 
+/** Wire-field → column map for component_values patches. Column names come
+ *  exclusively from here — never from the IPC payload. */
+const COMPONENT_VALUE_COLUMNS: Record<string, string> = {
+  rate: "rate",
+  yearlyValue: "yearly_value",
+  monthlyValues: "monthly_values",
+  qty: "qty",
+  unitRate: "unit_rate",
+  accountCode: "account_code",
+  statsAccountCode: "stats_account_code",
+};
+
+/** The two per-row account overrides are TEXT; everything else numeric. */
+const COMPONENT_VALUE_TEXT_FIELDS = new Set(["accountCode", "statsAccountCode"]);
+
 export function batchWrite(
   db: Db,
   scope: OuScope,
   request: PositionsBatchWriteRequest,
-  lookup: FieldLookup
+  lookup: FieldLookup,
+  /** Valid component-definition ids for this OU (from the plaintext store).
+   *  Patches referencing anything else throw — accuracy over silent loss. */
+  componentDefIds?: ReadonlySet<string>
 ): PositionsBatchWriteResponse {
   const scenarioId = String(request.scenarioId ?? "");
   if (!scenarioId) throw new Error("A scenarioId is required");
@@ -481,6 +501,54 @@ export function batchWrite(
         db, "position_pii", "position_id", patch.positionId, scope,
         splitPiiFields(patch.fields ?? {}, lookup), stamp
       );
+    }
+
+    // Block inputs. Runs after creates so a patch for a just-created row
+    // lands in the same transaction. The ensure INSERT selects FROM positions
+    // bound to (ou, scenario), so a position id from another hotel or
+    // scenario can never gain a value row here.
+    for (const patch of request.componentValuePatches ?? []) {
+      if (!componentDefIds?.has(patch.componentDefId)) {
+        throw new Error(`Unknown component definition: ${patch.componentDefId}`);
+      }
+      const entries = Object.entries(patch.fields ?? {}).filter(
+        ([, value]) => value !== undefined
+      );
+      if (entries.length === 0) continue;
+
+      prepared(
+        db,
+        `INSERT INTO component_values (position_id, component_def_id, ou, scenario_id, updated_at)
+         SELECT id, ?, ou, scenario_id, ? FROM positions
+          WHERE id = ? AND ou = ? AND scenario_id = ? AND deleted_at IS NULL
+         ON CONFLICT(position_id, component_def_id) DO NOTHING`
+      ).run(patch.componentDefId, stamp, patch.positionId, scope.ou, scenarioId);
+
+      const columns: string[] = [];
+      const params: unknown[] = [];
+      for (const [key, value] of entries.sort(([a], [b]) => (a < b ? -1 : 1))) {
+        const column = COMPONENT_VALUE_COLUMNS[key];
+        if (!column) throw new Error(`Unknown component value field: ${key}`);
+        columns.push(`${column} = ?`);
+        if (key === "monthlyValues") {
+          params.push(value === null ? null : coerceVector(value));
+        } else if (COMPONENT_VALUE_TEXT_FIELDS.has(key)) {
+          if (value !== null && typeof value !== "string") {
+            throw new Error(`Component value '${key}' must be a string or null`);
+          }
+          params.push(value);
+        } else {
+          if (value !== null && (typeof value !== "number" || !Number.isFinite(value))) {
+            throw new Error(`Component value '${key}' must be a number or null`);
+          }
+          params.push(value);
+        }
+      }
+      applied += prepared(
+        db,
+        `UPDATE component_values SET ${columns.join(", ")}, updated_at = ?, deleted_at = NULL
+          WHERE position_id = ? AND component_def_id = ? AND ou = ?`
+      ).run(...params, stamp, patch.positionId, patch.componentDefId, scope.ou).changes;
     }
 
     for (const id of request.softDeleteIds ?? []) {
@@ -587,18 +655,18 @@ export function cloneScenarioValues(
       `INSERT INTO positions (
          id, ou, scenario_id, lineage_id, active,
          department_code, job_type_code, cluster, pay_type, headcount, fte,
-         seasonality, monthly_base_salary, additional_monthly_costs,
+         seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
-         daily_vacation_cost, vacation_monthly_weights, accrual_days_per_month,
-         accrual_cost_per_day, extra_values, updated_at, deleted_at)
+         vacation_monthly_weights, accrual_days_per_month,
+         extra_values, updated_at, deleted_at)
        SELECT ?, ou, ?, lineage_id, active,
          department_code, job_type_code, cluster, pay_type, headcount, fte,
-         seasonality, monthly_base_salary, additional_monthly_costs,
+         seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
-         daily_vacation_cost, vacation_monthly_weights, accrual_days_per_month,
-         accrual_cost_per_day, extra_values, ?, NULL
+         vacation_monthly_weights, accrual_days_per_month,
+         extra_values, ?, NULL
          FROM positions
         WHERE id = ? AND ou = ? AND deleted_at IS NULL`
     );

@@ -16,6 +16,7 @@ import {
   FLAG_INCREASE_AWARE,
   Op,
   SCRATCH_ACC,
+  SCRATCH_DAYRATE,
   SCRATCH_GROSS,
   SCRATCH_INC,
   SCRATCH_INCMONTH,
@@ -53,17 +54,22 @@ function ssTax(pool: Float64Array, ofs: number, count: number, x: number): numbe
 // comparison on every instruction; plain consts compile to register compares.
 const OP_DERIVE = Op.DERIVE;
 const OP_BASE_SALARY = Op.BASE_SALARY;
+const OP_BASE_SALARY_HOURLY = Op.BASE_SALARY_HOURLY;
 const OP_VACATION = Op.VACATION;
 const OP_BASE_DEDUCT = Op.BASE_DEDUCT;
 const OP_ACCRUAL = Op.ACCRUAL;
+const OP_BANK_HOLIDAY = Op.BANK_HOLIDAY;
 const OP_ACC_CLEAR = Op.ACC_CLEAR;
 const OP_ACC_ADD_GROSS = Op.ACC_ADD_GROSS;
 const OP_ACC_ADD_LINE = Op.ACC_ADD_LINE;
+const OP_ACC_ADD_DAYS = Op.ACC_ADD_DAYS;
+const OP_ACC_ADD_VAC = Op.ACC_ADD_VAC;
 const OP_PCT_OF_ACC = Op.PCT_OF_ACC;
 const OP_WEIGHT_BY_ACC = Op.WEIGHT_BY_ACC;
 const OP_FLAT_ACTIVE = Op.FLAT_ACTIVE;
 const OP_FLAT_DAY = Op.FLAT_DAY;
 const OP_DIRECT = Op.DIRECT;
+const OP_DIRECT_ABS = Op.DIRECT_ABS;
 const OP_SOCIAL_SEC = Op.SOCIAL_SEC;
 const OP_STAT_HC = Op.STAT_HC;
 const OP_STAT_FTE = Op.STAT_FTE;
@@ -75,7 +81,7 @@ export function executePosition(
   scratch: Float64Array,
   p: number
 ): void {
-  const { op, outLine, arg0, paramOfs, paramPool, seasonality, daysPerMonth, realDays } = plan;
+  const { op, outLine, arg0, paramOfs, paramPool, seasonality, daysPerMonth, realDays, holidayDays } = plan;
   const posOfs = p * MONTHS;
   const end = plan.positionInstrStart[p + 1];
 
@@ -123,6 +129,10 @@ export function executePosition(
         const twd = scratch[SCRATCH_TWD];
         const manualMonthly = scratch[SCRATCH_MANUAL];
         const incMonth = scratch[SCRATCH_INCMONTH];
+        // Per-working-day base pay (pre-increase) — what one vacation/accrual day
+        // is worth. twd = 0 only when the position never works, and then no
+        // vacation is emitted anyway, so a guard keeps it finite.
+        scratch[SCRATCH_DAYRATE] = twd > 0 ? (base * twm) / twd : 0;
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           let gross = 0;
@@ -138,17 +148,41 @@ export function executePosition(
         break;
       }
 
+      case OP_BASE_SALARY_HOURLY: {
+        const out = outLine[i] * MONTHS;
+        const coeff = paramPool[pp];
+        const manualMonthly = scratch[SCRATCH_MANUAL];
+        const incMonth = scratch[SCRATCH_INCMONTH];
+        // Hourly per-day pay is the coeff itself (rate·contract hours) — no
+        // twm/twd normalization, matching how the hourly base spreads.
+        scratch[SCRATCH_DAYRATE] = coeff;
+        for (let m = 0; m < MONTHS; m++) {
+          const s = seasonality[posOfs + m];
+          let gross = 0;
+          if (s !== 0) {
+            const daySpread = coeff * realDays[m] * s * scratch[SCRATCH_INC + m];
+            const manual = m >= incMonth ? manualMonthly * s : 0;
+            gross = daySpread + manual + paramPool[pp + 1 + m] * s;
+          }
+          scratch[SCRATCH_GROSS + m] = gross;
+          values[out + m] = gross;
+        }
+        break;
+      }
+
       case OP_VACATION: {
         const vacationDays = paramPool[pp];
-        const dailyCost = paramPool[pp + 1];
-        const twm = scratch[SCRATCH_TWM];
-        const adjustedDailyPay = twm > 0 ? (dailyCost / twm) * 12 : dailyCost;
+        const dayRate = scratch[SCRATCH_DAYRATE];
+        // Weights are normalized by their own total (see reference.vacationCost),
+        // so the year's leave sums to vacationDays whatever the raw weights total.
+        let weightTotal = 0;
+        for (let m = 0; m < MONTHS; m++) weightTotal += paramPool[pp + 1 + m];
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           scratch[SCRATCH_VAC + m] =
-            s === 0
+            s === 0 || weightTotal === 0
               ? 0
-              : vacationDays * paramPool[pp + 2 + m] * s * adjustedDailyPay *
+              : vacationDays * paramPool[pp + 1 + m] / weightTotal * s * dayRate *
                 scratch[SCRATCH_INC + m];
         }
         break;
@@ -163,14 +197,30 @@ export function executePosition(
       case OP_ACCRUAL: {
         const out = outLine[i] * MONTHS;
         const accrualDays = paramPool[pp];
-        const costPerDay = paramPool[pp + 1];
+        const dayRate = scratch[SCRATCH_DAYRATE];
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           values[out + m] =
             accrualDays === 0 || s === 0
               ? 0
-              : accrualDays * costPerDay * s * scratch[SCRATCH_INC + m] -
+              : accrualDays * dayRate * s * scratch[SCRATCH_INC + m] -
                 scratch[SCRATCH_VAC + m];
+        }
+        break;
+      }
+
+      case OP_BANK_HOLIDAY: {
+        const out = outLine[i] * MONTHS;
+        const combinedMult = paramPool[pp];
+        const dayRate = scratch[SCRATCH_DAYRATE];
+        const increaseAware = (arg0[i] & FLAG_INCREASE_AWARE) !== 0;
+        for (let m = 0; m < MONTHS; m++) {
+          const s = seasonality[posOfs + m];
+          values[out + m] =
+            combinedMult === 0 || s === 0
+              ? 0
+              : combinedMult * dayRate * holidayDays[m] * s *
+                (increaseAware ? scratch[SCRATCH_INC + m] : 1);
         }
         break;
       }
@@ -188,6 +238,28 @@ export function executePosition(
       case OP_ACC_ADD_LINE: {
         const src = arg0[i] * MONTHS;
         for (let m = 0; m < MONTHS; m++) scratch[SCRATCH_ACC + m] += values[src + m];
+        break;
+      }
+
+      case OP_ACC_ADD_DAYS: {
+        // arg0 = 1 → productive-days calendar; 0 → the position's pay basis.
+        if (arg0[i] === 1) {
+          for (let m = 0; m < MONTHS; m++) {
+            scratch[SCRATCH_ACC + m] += realDays[m] * seasonality[posOfs + m];
+          }
+        } else {
+          for (let m = 0; m < MONTHS; m++) {
+            scratch[SCRATCH_ACC + m] +=
+              daysPerMonth[posOfs + m] * seasonality[posOfs + m];
+          }
+        }
+        break;
+      }
+
+      case OP_ACC_ADD_VAC: {
+        for (let m = 0; m < MONTHS; m++) {
+          scratch[SCRATCH_ACC + m] += scratch[SCRATCH_VAC + m];
+        }
         break;
       }
 
@@ -255,6 +327,17 @@ export function executePosition(
         break;
       }
 
+      case OP_DIRECT_ABS: {
+        // Absolute pass-through: the KPI series is already resolved to per-month
+        // figures at load time, so no seasonality/increase scaling here. (The
+        // count-multiplier pass below also skips DIRECT_ABS lines.)
+        const out = outLine[i] * MONTHS;
+        for (let m = 0; m < MONTHS; m++) {
+          values[out + m] = paramPool[pp + m];
+        }
+        break;
+      }
+
       case OP_SOCIAL_SEC: {
         const out = outLine[i] * MONTHS;
         const monthlyCap = paramPool[pp];
@@ -295,18 +378,43 @@ export function executePosition(
         const totalHours = paramPool[pp];
         const vacationHours = paramPool[pp + 1];
         const twd2 = scratch[SCRATCH_TWD2];
+        // Weights normalized by their total (see reference.hoursWorked), so the
+        // hours taken back out equal the vacation hours added in.
+        let weightTotal = 0;
+        for (let m = 0; m < MONTHS; m++) weightTotal += paramPool[pp + 2 + m];
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           if (totalHours === 0 || s === 0) {
             values[out + m] = 0;
           } else {
             const spread = (totalHours / twd2) * realDays[m] * s;
-            const vacOut = vacationHours * paramPool[pp + 2 + m] * s;
+            const vacOut =
+              weightTotal === 0 ? 0 : vacationHours * paramPool[pp + 2 + m] / weightTotal * s;
             values[out + m] = spread - vacOut;
           }
         }
         break;
       }
+    }
+  }
+
+  // Count multiplier: this row stands for `posHeadcount[p]` identical positions.
+  // Every line was computed as a single unit first — so per-person effects like
+  // the social-security caps land correctly — then the whole slice is booked C
+  // times over here. The HEADCOUNT stat already emits the count itself (see
+  // compile.ts), so it is exempt; scaling it too would square the count. Mirrors
+  // referencePosition; keep the two in lockstep.
+  const count = plan.posHeadcount[p];
+  if (count !== 1) {
+    const defs = plan.componentDefs;
+    const defCount = defs.length;
+    for (let di = 0; di < defCount; di++) {
+      const def = defs[di];
+      if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
+      // KPI-driven lines are absolute (whole-line amount), not per-head.
+      if (def.spreadMethod === "DIRECT_ABS") continue;
+      const lineOfs = (p * defCount + di) * MONTHS;
+      for (let m = 0; m < MONTHS; m++) values[lineOfs + m] *= count;
     }
   }
 }

@@ -77,7 +77,6 @@ describe("instruction emission", () => {
             monthlyBaseSalary: 2500,
             additionalMonthlyCosts: addl,
             vacationDays: 12,
-            dailyVacationCost: 80,
             vacationMonthlyWeights: weights,
           }),
         ],
@@ -89,20 +88,20 @@ describe("instruction emission", () => {
     expect(vacation).toMatchObject({
       name: "VACATION",
       outLine: LINE_NONE,
-      params: [12, 80, ...weights],
+      params: [12, ...weights],
     });
     expect(deduct).toMatchObject({ name: "BASE_DEDUCT", outLine: line });
   });
 
-  it("emits ACCRUAL with days and cost params", () => {
+  it("emits ACCRUAL with the days-per-month param", () => {
     const plan = mustCompile(
       makeInput({
         definitions: [baseDef(), makeDef({ id: "acc", kind: "HOLIDAY_ACCRUAL" })],
-        positions: [makePosition({ id: "p1", accrualDaysPerMonth: 2.5, accrualCostPerDay: 90 })],
+        positions: [makePosition({ id: "p1", accrualDaysPerMonth: 2.5 })],
       })
     );
     const accrual = decode(plan, 0).find((instr) => instr.name === "ACCRUAL");
-    expect(accrual).toMatchObject({ outLine: lineOf(plan, 0, "acc"), params: [2.5, 90] });
+    expect(accrual).toMatchObject({ outLine: lineOf(plan, 0, "acc"), params: [2.5] });
   });
 
   it("realizes a default base selector as ACC_CLEAR + ACC_ADD_GROSS", () => {

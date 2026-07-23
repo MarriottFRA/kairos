@@ -62,6 +62,7 @@ export interface CompiledPlan {
   seasonality: Float64Array; // P×12
   daysPerMonth: Float64Array; // P×12, pay-type basis resolved
   realDays: Float64Array; // 12 (HOURS-stat basis)
+  holidayDays: Float64Array; // 12 (BANK_HOLIDAY count basis)
   posHeadcount: Float64Array; // P
   posFte: Float64Array; // P
   positionStatRow: Uint32Array; // P → statKeys index
@@ -75,7 +76,15 @@ export type CompileResult = { plan: CompiledPlan } | { errors: CompileError[] };
 
 // ---------------------------------------------------------------------------
 
-const BASE_REFERENCEABLE = new Set(["BASE_SALARY", "SPREAD", "SOCIAL_SECURITY"]);
+// STAT lines (hours worked, headcount, FTE) are ordinary lines in the value
+// matrix, so ACC_ADD_LINE can feed them to a % base like any spread — they
+// power "multiplier of hours" blocks.
+const BASE_REFERENCEABLE = new Set([
+  "BASE_SALARY",
+  "SPREAD",
+  "SOCIAL_SECURITY",
+  "STAT",
+]);
 
 function compareDefs(a: CostComponentDefinition, b: CostComponentDefinition): number {
   return a.sortOrder - b.sortOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -109,6 +118,15 @@ function validate(
       code: "MULTIPLE_ACCRUAL",
       message: "Only one HOLIDAY_ACCRUAL component definition is allowed.",
       refs: accrualDefs.map((def) => def.id),
+    });
+  }
+
+  const bankHolidayDefs = definitions.filter((def) => def.kind === "BANK_HOLIDAY");
+  if (bankHolidayDefs.length > 1) {
+    errors.push({
+      code: "MULTIPLE_BANK_HOLIDAY",
+      message: "Only one BANK_HOLIDAY component definition is allowed.",
+      refs: bankHolidayDefs.map((def) => def.id),
     });
   }
 
@@ -225,8 +243,8 @@ function validateScheme(scheme: SocialSecurityScheme): CompileError | null {
 /**
  * Kahn topological sort over the component dependency DAG. Dependencies:
  * PERCENT_OF / WEIGHTED_BY_BASE / SOCIAL_SECURITY depend on their base
- * components (default base = BASE_SALARY); HOLIDAY_ACCRUAL depends on
- * BASE_SALARY (it consumes the vacation series computed with the base).
+ * components (default base = BASE_SALARY); HOLIDAY_ACCRUAL and BANK_HOLIDAY
+ * depend on BASE_SALARY (they read the per-working-day base pay it derives).
  * Ready nodes are taken in (sortOrder, id) order → deterministic output.
  */
 function topoSort(
@@ -241,12 +259,17 @@ function topoSort(
     const def = sorted[i];
     const usesBase =
       def.kind === "HOLIDAY_ACCRUAL" ||
+      def.kind === "BANK_HOLIDAY" ||
       def.kind === "SOCIAL_SECURITY" ||
       (def.kind === "SPREAD" &&
         (def.spreadMethod === "PERCENT_OF" || def.spreadMethod === "WEIGHTED_BY_BASE"));
     if (!usesBase) continue;
 
-    if (def.kind !== "HOLIDAY_ACCRUAL" && def.baseSelector?.kind === "COMPONENTS") {
+    if (
+      def.kind !== "HOLIDAY_ACCRUAL" &&
+      def.kind !== "BANK_HOLIDAY" &&
+      def.baseSelector?.kind === "COMPONENTS"
+    ) {
       for (const refId of def.baseSelector.componentIds) {
         const refIndex = indexById.get(refId);
         if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
@@ -386,6 +409,19 @@ export function compile(input: ScenarioInput): CompileResult {
       emitter.emit(Op.ACC_ADD_GROSS, LINE_NONE, 0, []);
       return;
     }
+    if (selector.kind === "CALENDAR") {
+      emitter.emit(
+        Op.ACC_ADD_DAYS,
+        LINE_NONE,
+        selector.series === "REAL_DAYS" ? 1 : 0,
+        []
+      );
+      return;
+    }
+    if (selector.kind === "VACATION") {
+      emitter.emit(Op.ACC_ADD_VAC, LINE_NONE, 0, []);
+      return;
+    }
     for (const refId of selector.componentIds) {
       const refIndex = defIndexById.get(refId);
       if (refIndex === undefined) continue; // validated above; defensive
@@ -424,38 +460,62 @@ export function compile(input: ScenarioInput): CompileResult {
     for (let di = 0; di < defCount; di++) {
       const def = componentDefs[di];
       const line = lineBase + di;
+      const value = valueByKey.get(`${position.id}|${def.id}`);
 
       const dept =
         def.departmentMode === "FIXED" && def.fixedDepartment
           ? def.fixedDepartment
           : position.departmentCode;
-      lineAggRow[line] = aggInterner.intern(`${dept}|${def.accountCode}`, {
+      // Per-row account override ("unlocked" blocks): the aggregation key is
+      // interned at compile time, so an override is purely a key change — the
+      // VM and every line value are untouched.
+      const account = value?.accountCode ?? def.accountCode;
+      lineAggRow[line] = aggInterner.intern(`${dept}|${account}`, {
         dept,
-        account: def.accountCode,
+        account,
       });
 
-      const value = valueByKey.get(`${position.id}|${def.id}`);
       const increaseFlag = def.increaseAware ? FLAG_INCREASE_AWARE : 0;
 
       switch (def.kind) {
         case "BASE_SALARY": {
-          emitter.emit(Op.BASE_SALARY, line, 0, [
-            position.monthlyBaseSalary,
-            ...position.additionalMonthlyCosts,
-          ]);
+          // Hourly-rate positions derive the base from rate × contract hours,
+          // spread over realDays (net productive days); the coefficient is
+          // pre-multiplied here so the VM mirrors the reference bit-for-bit.
+          // Presence of hourlyRate is the discriminator — the two salary inputs
+          // are mutually exclusive (enforced in the grid), so hourlyRate wins.
+          if (position.hourlyRate > 0) {
+            emitter.emit(Op.BASE_SALARY_HOURLY, line, 0, [
+              position.hourlyRate * position.dailyContractHours,
+              ...position.additionalMonthlyCosts,
+            ]);
+          } else {
+            emitter.emit(Op.BASE_SALARY, line, 0, [
+              position.monthlyBaseSalary,
+              ...position.additionalMonthlyCosts,
+            ]);
+          }
           emitter.emit(Op.VACATION, LINE_NONE, 0, [
             position.vacationDays,
-            position.dailyVacationCost,
             ...position.vacationMonthlyWeights,
           ]);
           emitter.emit(Op.BASE_DEDUCT, line, 0, []);
           break;
         }
         case "HOLIDAY_ACCRUAL": {
-          emitter.emit(Op.ACCRUAL, line, 0, [
-            position.accrualDaysPerMonth,
-            position.accrualCostPerDay,
-          ]);
+          emitter.emit(Op.ACCRUAL, line, 0, [position.accrualDaysPerMonth]);
+          break;
+        }
+        case "BANK_HOLIDAY": {
+          // The staff-fraction × premium is folded into one coefficient here.
+          // Hourly-wage staff only (hourlyRate > 0) — their base excludes the
+          // holiday day, so a worked holiday is fully additional; for everyone
+          // else the coefficient is 0, so the line is a branchless zero.
+          const combinedMult =
+            position.hourlyRate > 0
+              ? (def.bankHolidayStaffFraction ?? 0) * (def.bankHolidayPremiumMultiplier ?? 0)
+              : 0;
+          emitter.emit(Op.BANK_HOLIDAY, line, increaseFlag, [combinedMult]);
           break;
         }
         case "SOCIAL_SECURITY": {
@@ -522,6 +582,44 @@ export function compile(input: ScenarioInput): CompileResult {
               emitter.emit(Op.DIRECT, line, increaseFlag, params);
               break;
             }
+            case "FLAT_MONTHLY": {
+              // Per-month amount (yearlyValue slot) lowered to DIRECT with a
+              // constant vector — DIRECT's seas/inc handling matches the spec.
+              const amount = value?.yearlyValue ?? 0;
+              emitter.emit(
+                Op.DIRECT,
+                line,
+                increaseFlag,
+                new Array<number>(MONTHS).fill(amount)
+              );
+              break;
+            }
+            case "VACATION_WEIGHTED": {
+              // Yearly × normalized vacation weights precomputed per position,
+              // lowered to DIRECT (which applies seasonality + increase).
+              const yearly = value?.yearlyValue ?? 0;
+              const weights = position.vacationMonthlyWeights;
+              let weightTotal = 0;
+              for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
+              const params = new Array<number>(MONTHS).fill(0);
+              if (yearly !== 0 && weightTotal !== 0) {
+                for (let m = 0; m < MONTHS; m++) {
+                  params[m] = yearly * weights[m] / weightTotal;
+                }
+              }
+              emitter.emit(Op.DIRECT, line, increaseFlag, params);
+              break;
+            }
+            case "DIRECT_ABS": {
+              // Absolute pass-through for KPI-driven blocks: the loader has
+              // already folded the KPI series × per-position multiplier into
+              // monthlyValues, so emit them verbatim (no seasonality/increase).
+              const monthly = value?.monthlyValues ?? [];
+              const params = new Array<number>(MONTHS);
+              for (let m = 0; m < MONTHS; m++) params[m] = monthly[m] ?? 0;
+              emitter.emit(Op.DIRECT_ABS, line, 0, params);
+              break;
+            }
           }
           break;
         }
@@ -562,6 +660,7 @@ export function compile(input: ScenarioInput): CompileResult {
     seasonality,
     daysPerMonth,
     realDays: Float64Array.from(input.calendar.realDays),
+    holidayDays: Float64Array.from(input.calendar.holidayDays),
     posHeadcount,
     posFte,
     positionStatRow,

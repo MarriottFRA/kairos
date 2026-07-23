@@ -24,7 +24,11 @@ import ListItemText from "@mui/material/ListItemText";
 import Toolbar from "@mui/material/Toolbar";
 import Box from "@mui/material/Box";
 import HomeIcon from "@mui/icons-material/Home";
+import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import InsightsIcon from "@mui/icons-material/Insights";
+import EditNoteIcon from "@mui/icons-material/EditNote";
 import BadgeIcon from "@mui/icons-material/Badge";
+import AssessmentIcon from "@mui/icons-material/Assessment";
 import ApartmentIcon from "@mui/icons-material/Apartment";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
@@ -644,12 +648,44 @@ const handleSignOut = useCallback(async () => {
               <ListItemText primary="Home" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
+          <ListItem key="budget-pull" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/budget-pull")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <FileDownloadIcon />
+              </ListItemIcon>
+              <ListItemText primary="Budget Pull" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          <ListItem key="kpi-drivers" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/kpi-drivers")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <InsightsIcon />
+              </ListItemIcon>
+              <ListItemText primary="KPI Drivers" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          <ListItem key="manual-input" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/manual-input")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <EditNoteIcon />
+              </ListItemIcon>
+              <ListItemText primary="Manual Input" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
           <ListItem key="positions" disablePadding sx={{ display: "block" }}>
             <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/positions")}>
               <ListItemIcon sx={listItemIconStyle}>
                 <BadgeIcon />
               </ListItemIcon>
               <ListItemText primary="Positions" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          <ListItem key="results" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/results")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <AssessmentIcon />
+              </ListItemIcon>
+              <ListItemText primary="Results" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
         </List>

@@ -13,6 +13,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -37,7 +38,29 @@ import {
   toCreate,
   toPatch,
   toRow,
+  vacationCostById,
 } from "../../shared/positions/rowModel";
+import { buildCalendarContext } from "../../shared/engine/calendarContext";
+import { CalendarContext } from "../../shared/engine/types";
+import { CalendarYear } from "../../shared/calendar";
+import { loadCalendar } from "../../services/calendarService";
+import { BlockDto, BlockInput, BlocksListResponse } from "../../shared/blocks/ipc";
+import {
+  applyComponentValuesToRow,
+  blockPatchesFromRow,
+  changedBlockKeys,
+  sanitizeBlockInputs,
+} from "../../shared/positions/blockRows";
+import { runLiveSim } from "../../shared/positions/liveSim";
+import {
+  deleteBlock as deleteBlockService,
+  listBlocks,
+  restoreBlock as restoreBlockService,
+  saveBlock as saveBlockService,
+} from "../../services/blocksService";
+import { listKpiDrivers } from "../../services/kpiDriversService";
+import { KpiDriverWithSeries } from "../../shared/kpiDrivers/ipc";
+import BlockDialog from "../../components/blocks/BlockDialog";
 import {
   RemovedFieldDto,
   ScenarioDto,
@@ -53,6 +76,8 @@ import {
   sweepRemovedFields,
 } from "../../services/fieldCatalogService";
 import { loadPii, loadPositions } from "../../services/positionsService";
+import { loadAccounts, loadDepartments } from "../../services/mappingTablesService";
+import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { listScenarios } from "../../services/scenarioService";
 import { loadPositionDefaults } from "../../services/positionDefaultsService";
 import {
@@ -175,6 +200,32 @@ const IDLE_SNAPSHOT: QueueSnapshot = {
   lastError: null,
 };
 
+/**
+ * Mirror the picked department's code into its sibling code column.
+ *
+ * Runs on every committed edit and paste (via processRowUpdate), so a
+ * hand-typed or pasted name fills the code just like a dropdown pick would. It
+ * is keyed off the catalog's `departments` sources, so it stays correct if a
+ * second such pairing is ever added. An unknown name clears the code rather than
+ * leaving a stale one; with no reference data loaded the map is empty and the
+ * code column is left editable (see columnFactory), so nothing is touched here.
+ */
+function applyDeptCodeAutofill(
+  row: PositionRow,
+  oldRow: PositionRow,
+  catalog: FieldCatalog,
+  deptCodeByName: ReadonlyMap<string, string>
+): void {
+  if (deptCodeByName.size === 0) return;
+  for (const def of catalog.fields) {
+    const source = def.dropdownSource;
+    if (source?.kind !== "departments" || !source.codeField) continue;
+    if (Object.is(row[def.key], oldRow[def.key])) continue;
+    const name = typeof row[def.key] === "string" ? (row[def.key] as string) : "";
+    row[source.codeField] = name ? deptCodeByName.get(name) ?? null : null;
+  }
+}
+
 export default function Positions() {
   const selectedHotelOu = useSelectedHotel();
   const apiRef = useGridApiRef();
@@ -189,7 +240,31 @@ export default function Positions() {
   /** Every scenario for this hotel, all years — the copy dialog's source list. */
   const [allScenarios, setAllScenarios] = useState<ScenarioDto[]>([]);
   const [catalog, setCatalog] = useState<FieldCatalog | null>(null);
+  // Global reference data (not OU-scoped): loaded once, feeds the Department
+  // type-ahead and the Dept Name auto-fill.
+  const [departments, setDepartments] = useState<DepartmentOption[]>([]);
+  // Global reference data (not OU-scoped): the whole account_maps cache, loaded
+  // once, feeds every account type-ahead — each field narrows it to its subset.
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [rows, setRows] = useState<PositionRow[]>([]);
+  // The calendar's day basis (net productive / flat days) feeds the engine's
+  // vacation valuation; null until loaded, which reads as a blank cost column.
+  const [calendarCtx, setCalendarCtx] = useState<CalendarContext | null>(null);
+  // The raw calendar record too — the live block simulation needs the year's
+  // full config (incl. the bank-holiday premium) to mirror a budget run.
+  const [calendarYear, setCalendarYear] = useState<CalendarYear | null>(null);
+  // The hotel's blocks + their compiled definitions + SS schemes — the
+  // structure half of the live simulation, loaded with the positions.
+  const [blocksModel, setBlocksModel] = useState<BlocksListResponse | null>(null);
+  // KPI drivers with cached series: the block dialog's KPI options AND the
+  // series feed for KPI-based blocks in the live sim.
+  const [kpiDrivers, setKpiDrivers] = useState<KpiDriverWithSeries[]>([]);
+  /** Block dialog: closed | create | edit-this-block. */
+  const [blockDialog, setBlockDialog] = useState<
+    { mode: "create" } | { mode: "edit"; block: BlockDto } | null
+  >(null);
+  const [blockBusy, setBlockBusy] = useState(false);
+  const [undoBlock, setUndoBlock] = useState<BlockDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -237,6 +312,19 @@ export default function Positions() {
   const queueRef = useRef<PositionsWriteQueue | null>(null);
   const catalogRef = useRef<FieldCatalog | null>(null);
   catalogRef.current = catalog;
+  // Blocks mirror, so handleRowUpdate stays a stable callback while the block
+  // set changes under it (same pattern as catalogRef).
+  const blocksRef = useRef<BlockDto[]>([]);
+  blocksRef.current = blocksModel?.blocks ?? [];
+  // name -> code, for the Department code auto-fill in the edit/paste path. A
+  // ref so handleRowUpdate stays a stable callback while the map updates under
+  // it. Names carry the unique code, so the mapping is effectively 1:1; on the
+  // rare duplicate name the last department wins.
+  const deptCodeByNameRef = useRef<ReadonlyMap<string, string>>(new Map());
+  deptCodeByNameRef.current = useMemo(
+    () => new Map(departments.map((dept) => [dept.name, dept.code])),
+    [departments]
+  );
   // Safe defaults for (hotel, budget year) — read only when adding a position,
   // so a ref (not state) is enough; a new row seeds from it and is then
   // independent.
@@ -286,6 +374,33 @@ export default function Positions() {
     };
   }, [selectedHotelOu, budgetYear, planningScenarioId, setPlanningScenarioId]);
 
+  // ── Department + account reference data (global): the pickers' options ──
+  // Best-effort — a never-synced cache resolves to [], which the grid renders as
+  // free-text columns rather than blocking data entry.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [deptOptions, accountOptions] = await Promise.all([
+          loadDepartments(),
+          loadAccounts(),
+        ]);
+        if (cancelled) return;
+        setDepartments(deptOptions);
+        setAccounts(accountOptions);
+      } catch (err) {
+        console.error("Failed to load reference data:", err);
+        if (!cancelled) {
+          setDepartments([]);
+          setAccounts([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ── Safe defaults for (hotel, budget year): the seed for a new position ──
   useEffect(() => {
     if (!selectedHotelOu) {
@@ -306,6 +421,92 @@ export default function Positions() {
       cancelled = true;
     };
   }, [selectedHotelOu, budgetYear]);
+
+  // ── Calendar day basis for the engine's vacation valuation ──
+  // Same source loadScenarioInput uses; unsaved years come back seeded from
+  // defaults, so the cost column matches what a budget run would compute.
+  useEffect(() => {
+    if (!selectedHotelOu || !scenario) {
+      setCalendarCtx(null);
+      setCalendarYear(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { calendar } = await loadCalendar(selectedHotelOu, scenario.year);
+        if (!cancelled) {
+          setCalendarCtx(buildCalendarContext(calendar));
+          setCalendarYear(calendar);
+        }
+      } catch (err) {
+        console.error("Failed to load calendar for vacation cost:", err);
+        if (!cancelled) {
+          setCalendarCtx(null);
+          setCalendarYear(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHotelOu, scenario]);
+
+  // ── KPI drivers (per OU): the block dialog's KPI options + live-sim series ──
+  // Best-effort — with none loaded, KPI-based blocks simply show zero totals.
+  useEffect(() => {
+    if (!selectedHotelOu) {
+      setKpiDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const drivers = await listKpiDrivers(selectedHotelOu);
+        if (!cancelled) setKpiDrivers(drivers);
+      } catch (err) {
+        console.error("Failed to load KPI drivers for blocks:", err);
+        if (!cancelled) setKpiDrivers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHotelOu]);
+
+  // Engine-simulated vacation cost per row, recomputed as rows or the calendar
+  // change. One pass of the same spread math the budget runs — instant for a
+  // grid's worth of positions, and never drifts from the authoritative figure.
+  const vacationCosts = useMemo(
+    () => vacationCostById(rows, calendarCtx, scenario?.id ?? ""),
+    [rows, calendarCtx, scenario]
+  );
+
+  // ── Live block simulation: the real engine over the live rows ──
+  // Recomputed on every committed edit (cell commit, not keystroke) — a full
+  // compile + simulate is single-digit milliseconds at grid scale, and the
+  // math is the exact code a budget run executes, so totals can never drift.
+  const kpiSeriesByDriver = useMemo(() => {
+    const map = new Map(kpiDrivers.map((entry) => [entry.driver.id as string, entry.series]));
+    return (driverId: string) => map.get(driverId) ?? [];
+  }, [kpiDrivers]);
+
+  const liveSim = useMemo(() => {
+    if (!blocksModel || !scenario || !selectedHotelOu) {
+      return { results: null, errors: null } as const;
+    }
+    const run = runLiveSim({
+      rows,
+      blocks: blocksModel.blocks,
+      definitions: blocksModel.definitions,
+      ssSchemes: blocksModel.ssSchemes,
+      calendarYear,
+      kpiSeries: kpiSeriesByDriver,
+      scenarioId: scenario.id,
+      ou: selectedHotelOu,
+    });
+    return { results: run.results, errors: run.errors } as const;
+  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu]);
 
   // ── Queue lifecycle: one per (hotel, scenario), flushed before swap ──
   useEffect((): (() => void) | undefined => {
@@ -350,14 +551,32 @@ export default function Positions() {
 
     (async () => {
       try {
-        const [loadedCatalog, values, pii] = await Promise.all([
+        const [loadedCatalog, values, pii, blocksResponse] = await Promise.all([
           getFieldCatalog(selectedHotelOu),
           loadPositions(selectedHotelOu, scenario.id),
           loadPii(selectedHotelOu, scenario.id),
+          listBlocks(selectedHotelOu),
         ]);
         if (cancelled) return;
         setCatalog(loadedCatalog);
-        setRows(values.positions.map((p) => toRow(p, pii[p.id] ?? null)));
+        setBlocksModel(blocksResponse);
+        // Fold each position's block inputs (component values) into its flat
+        // row — one source of truth for editing, saving and the live sim.
+        const valuesByPosition = new Map<string, typeof values.componentValues>();
+        for (const value of values.componentValues) {
+          const list = valuesByPosition.get(value.positionId) ?? [];
+          list.push(value);
+          valuesByPosition.set(value.positionId, list);
+        }
+        setRows(
+          values.positions.map((p) =>
+            applyComponentValuesToRow(
+              toRow(p, pii[p.id] ?? null),
+              valuesByPosition.get(p.id),
+              blocksResponse.blocks
+            )
+          )
+        );
         // Best-effort cleanup: purge removed columns that are empty or past the
         // grace window. The secure store is unlocked (we just read it), and
         // purged keys are already out of the catalog, so nothing here needs the
@@ -390,11 +609,24 @@ export default function Positions() {
       const queue = queueRef.current;
       if (!currentCatalog || !queue) return oldRow;
 
-      const sanitized = sanitizeRow(newRow, oldRow, currentCatalog);
+      const blocks = blocksRef.current;
+      let sanitized = sanitizeRow(newRow, oldRow, currentCatalog);
+      sanitized = sanitizeBlockInputs(sanitized, oldRow, blocks);
+      // Derive the department code from the picked/typed/pasted name before
+      // diffing, so the mirrored code rides into the same patch as the name.
+      applyDeptCodeAutofill(sanitized, oldRow, currentCatalog, deptCodeByNameRef.current);
       const changed = changedFieldKeys(oldRow, sanitized, currentCatalog);
-      if (changed.length === 0) return oldRow;
+      const changedBlocks = changedBlockKeys(oldRow, sanitized, blocks);
+      if (changed.length === 0 && changedBlocks.length === 0) return oldRow;
 
-      queue.enqueuePatch(sanitized.id, toPatch(sanitized, changed, currentCatalog));
+      if (changed.length > 0) {
+        queue.enqueuePatch(sanitized.id, toPatch(sanitized, changed, currentCatalog));
+      }
+      // Block inputs ride the same queue as component-value patches — same
+      // coalescing, same status dots, same transaction as any position edit.
+      for (const patch of blockPatchesFromRow(sanitized, changedBlocks, blocks)) {
+        queue.enqueueComponentPatch(patch.positionId, patch.componentDefId, patch.fields);
+      }
       setRows((current) =>
         current.map((row) => (row.id === sanitized.id ? sanitized : row))
       );
@@ -430,7 +662,9 @@ export default function Positions() {
         if (rowIndex !== undefined && rowIndex >= 0) {
           apiRef.current?.scrollToIndexes({ rowIndex });
         }
-        const firstField = masked ? "departmentCode" : "empNumber";
+        // With PII masked, the first reachable editable cell is the Department
+        // picker (Dept Name) — departmentCode is the read-only code mirror now.
+        const firstField = masked ? "deptName" : "empNumber";
         apiRef.current?.startCellEditMode({ id: draft.id, field: firstField });
       } catch {
         /* focus is best-effort */
@@ -690,6 +924,71 @@ export default function Positions() {
     [selectedIds]
   );
 
+  // ── Blocks: add / edit / delete (with undo) ──
+  // Column changes are reactive (the columns memo reads blocksModel), so no
+  // grid remount is needed; new bands append after the catalog sections.
+  const handleSaveBlock = useCallback(
+    (input: BlockInput) => {
+      if (!selectedHotelOu) return;
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          // Drain pending edits first so a recompiled definition set can never
+          // invalidate an in-flight component-value patch.
+          await queueRef.current?.flushNow();
+          const response = await saveBlockService(selectedHotelOu, input);
+          setBlocksModel(response);
+          setBlockDialog(null);
+          setToast(input.id ? `Updated "${input.label}"` : `Added block "${input.label}"`);
+        } catch (err) {
+          console.error("Failed to save block:", err);
+          setError(err instanceof Error ? err.message : "Could not save that block");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [selectedHotelOu]
+  );
+
+  const handleDeleteBlock = useCallback(
+    (block: BlockDto) => {
+      if (!selectedHotelOu) return;
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          await queueRef.current?.flushNow();
+          const response = await deleteBlockService(selectedHotelOu, block.id);
+          setBlocksModel(response);
+          setBlockDialog(null);
+          setUndoBlock(block);
+        } catch (err) {
+          console.error("Failed to delete block:", err);
+          setError(err instanceof Error ? err.message : "Could not delete that block");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [selectedHotelOu]
+  );
+
+  const handleUndoDeleteBlock = useCallback(() => {
+    const target = undoBlock;
+    if (!target || !selectedHotelOu) return;
+    setUndoBlock(null);
+    void (async () => {
+      try {
+        const response = await restoreBlockService(selectedHotelOu, target.id);
+        setBlocksModel(response);
+        setToast(`Restored "${target.label}"`);
+      } catch (err) {
+        console.error("Failed to restore block:", err);
+        setError(err instanceof Error ? err.message : "Could not restore that block");
+      }
+    })();
+  }, [undoBlock, selectedHotelOu]);
+
   const handlePasteStart = useCallback(() => queueRef.current?.setPaused(true), []);
   const handlePasteEnd = useCallback(() => queueRef.current?.setPaused(false), []);
 
@@ -729,6 +1028,15 @@ export default function Positions() {
         </Alert>
       )}
 
+      {/* Structure problems (e.g. blocks referencing each other in a loop)
+          pause the block totals; everything else keeps working. */}
+      {liveSim.errors && liveSim.errors.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Block totals are paused: {liveSim.errors[0]?.message} Edit the block
+          configuration to fix this.
+        </Alert>
+      )}
+
       {/* The year/scenario context lives on the toolbar's right edge — one row
           for controls, status and context, so the grid gets the height back. */}
       <Box sx={{ mb: 1.5 }}>
@@ -744,6 +1052,7 @@ export default function Positions() {
           queueState={queueSnapshot.state}
           pendingRows={queueSnapshot.pendingRows}
           onAddPosition={handleAddPosition}
+          onAddBlock={() => setBlockDialog({ mode: "create" })}
           onToggleMask={() => setMasked((value) => !value)}
           onToggleGroup={() => setGroupByDept((value) => !value)}
           onToggleInactive={() => setShowInactive((value) => !value)}
@@ -776,6 +1085,11 @@ export default function Positions() {
             key={gridEpoch}
             rows={rows}
             catalog={catalog}
+            departments={departments}
+            accounts={accounts}
+            vacationCostById={vacationCosts}
+            blocks={blocksModel?.blocks ?? []}
+            blockResults={liveSim.results}
             masked={masked}
             groupByDept={groupByDept}
             showInactive={showInactive}
@@ -794,6 +1108,7 @@ export default function Positions() {
             onAddField={handleAddField}
             onRemoveField={handleRemoveField}
             onManageColumns={handleManageColumns}
+            onEditBlock={(block) => setBlockDialog({ mode: "edit", block })}
           />
         )}
       </Box>
@@ -847,6 +1162,21 @@ export default function Positions() {
         onClose={() => setManageOpen(false)}
       />
 
+      <BlockDialog
+        open={!!blockDialog}
+        block={blockDialog?.mode === "edit" ? blockDialog.block : null}
+        blocks={blocksModel?.blocks ?? []}
+        kpiDrivers={kpiDrivers.map((entry) => ({
+          id: entry.driver.id as string,
+          label: entry.driver.label,
+        }))}
+        accounts={accounts}
+        saving={blockBusy}
+        onClose={() => setBlockDialog(null)}
+        onSave={handleSaveBlock}
+        onDelete={handleDeleteBlock}
+      />
+
       <Snackbar
         open={!!undoRow}
         autoHideDuration={6000}
@@ -866,6 +1196,18 @@ export default function Positions() {
         message={undoRemoved ? `Column "${undoRemoved.label}" removed` : ""}
         action={
           <Button color="secondary" size="small" onClick={handleUndoRemoveField}>
+            Undo
+          </Button>
+        }
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      />
+      <Snackbar
+        open={!!undoBlock}
+        autoHideDuration={8000}
+        onClose={() => setUndoBlock(null)}
+        message={undoBlock ? `Block "${undoBlock.label}" deleted` : ""}
+        action={
+          <Button color="secondary" size="small" onClick={handleUndoDeleteBlock}>
             Undo
           </Button>
         }

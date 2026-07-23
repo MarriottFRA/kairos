@@ -17,6 +17,7 @@ import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import {
   ensureDefaultScenario,
+  getComponentDefinitions,
   getFieldCatalog,
   listRemovedFields,
   listScenarios,
@@ -34,6 +35,13 @@ import {
   scrubExtraValueKeys,
 } from "../../main/positions/positionsRepo";
 import { loadScenarioInput } from "../../main/positions/loadScenarioInput";
+import {
+  computeFingerprint,
+  OutputLineWrite,
+  readOutputs,
+  writeRun,
+} from "../../main/positions/outputsRepo";
+import { compile, simulate } from "../../shared/engine/simulate";
 import { uuidv7 } from "../../shared/engine/ids";
 import { buildFieldMap } from "../../shared/positions/rowModel";
 import {
@@ -41,6 +49,7 @@ import {
   FieldCatalogPurgeResponse,
   FieldCatalogResponse,
   FieldCatalogSaveRequest,
+  OutputsResponse,
   PiiRecord,
   PositionsBatchWriteRequest,
   PositionsBatchWriteResponse,
@@ -304,7 +313,16 @@ export class PositionsHandlers {
       // resolve through it before touching SQL.
       const catalog = getFieldCatalog(localDbHandle(), scope);
       const lookup = buildFieldMap(catalog);
-      return ok(batchWrite(secureDb(), scope, request, lookup));
+      // Same role for block inputs: componentValuePatches must reference a
+      // definition that actually exists for this OU (plaintext store).
+      const componentDefIds = request?.componentValuePatches?.length
+        ? new Set(
+            getComponentDefinitions(localDbHandle(), scope).map(
+              (def) => def.id as string
+            )
+          )
+        : undefined;
+      return ok(batchWrite(secureDb(), scope, request, lookup, componentDefIds));
     } catch (error) {
       console.error("Failed to write positions batch:", error);
       return fail(error, null);
@@ -340,6 +358,97 @@ export class PositionsHandlers {
       return fail(error, null);
     }
   };
+
+  // ── Persisted engine output (Recalculate → Results page) ──
+
+  /** Run the engine over the PERSISTED scenario and overwrite the stored
+   *  outputs. Blank-account lines (calculation-only blocks) are computed but
+   *  never written — the workbook's "Blank" contract. */
+  recalc: IpcHandler<any, IpcResult<OutputsResponse | null>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      const scenarioId = requireScenarioId(request);
+      const getCalendarEitherForm = async (ou: string, year: number) =>
+        (await getCalendarYear(ou, year)) ??
+        (await getCalendarYear(ou.replace(/^OU/, ""), year));
+
+      const input = await loadScenarioInput(
+        localDbHandle(),
+        secureDb(),
+        scope,
+        scenarioId,
+        getCalendarEitherForm
+      );
+      const compiled = compile(input);
+      if ("errors" in compiled) {
+        throw new Error(
+          compiled.errors.map((entry) => entry.message).join(" ") ||
+            "The block setup cannot be calculated."
+        );
+      }
+      const result = simulate(compiled.plan);
+
+      const lines: OutputLineWrite[] = [];
+      for (const position of input.positions) {
+        for (const line of result.positionLines(position.id)) {
+          if (!line.account) continue; // calculation-only — never output
+          const months = Array.from(line.months);
+          let total = 0;
+          for (const value of months) total += value;
+          lines.push({
+            positionId: position.id as string,
+            componentDefId: line.component.id as string,
+            label: line.component.label,
+            dept: line.dept,
+            account: line.account,
+            months,
+            total,
+          });
+        }
+      }
+
+      // Fingerprint AFTER the load (same data the run saw).
+      const fingerprint = computeFingerprint(
+        localDbHandle(),
+        secureDb(),
+        scope,
+        scenarioId
+      );
+      writeRun(
+        secureDb(),
+        scope,
+        scenarioId,
+        {
+          fingerprint,
+          computedAt: new Date().toISOString(),
+          positionCount: input.positions.length,
+        },
+        lines
+      );
+      return ok(readOutputs(localDbHandle(), secureDb(), scope, scenarioId));
+    } catch (error) {
+      console.error("Failed to recalculate outputs:", error);
+      return fail(error, null);
+    }
+  };
+
+  /** The stored outputs + staleness, aggregated to dept×account. */
+  outputsGet: IpcHandler<any, IpcResult<OutputsResponse | null>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      const scenarioId = requireScenarioId(request);
+      return ok(readOutputs(localDbHandle(), secureDb(), scope, scenarioId));
+    } catch (error) {
+      console.error("Failed to read outputs:", error);
+      return fail(error, null);
+    }
+  };
 }
 
 export function createPositionsHandlers() {
@@ -358,5 +467,7 @@ export function createPositionsHandlers() {
     "positions:pii-get": handlers.piiGet,
     "positions:batch-write": handlers.batchWrite,
     "positions:scenario-input": handlers.scenarioInput,
+    "positions:recalc": handlers.recalc,
+    "positions:outputs-get": handlers.outputsGet,
   };
 }

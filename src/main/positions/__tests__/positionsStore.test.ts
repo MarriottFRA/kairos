@@ -8,13 +8,23 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { compile } from "../../../shared/engine/compile";
+import { simulate } from "../../../shared/engine/simulate";
+import { BUDGET_IMPORT_SQL } from "../../budgetImport/schema";
+import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
+import {
+  recomputeAllForOu,
+  saveDriver as saveKpiDriver,
+} from "../../kpiDrivers/repo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
-import { SYSTEM_FIELD_SEED } from "../../../shared/positions/fieldSeed";
+import { SEED_VERSION, SYSTEM_FIELD_SEED } from "../../../shared/positions/fieldSeed";
 import {
   applyValueStoreV3,
+  applyValueStoreV4,
+  applyValueStoreV5,
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../schema";
+import { applyBlocksStructureV12 } from "../../blocks/schema";
 import { OuScope, resolveOuScope } from "../ouScope";
 import {
   DEFAULT_SCENARIO_LABEL,
@@ -37,6 +47,8 @@ import {
   scrubExtraValueKeys,
 } from "../positionsRepo";
 import { loadScenarioInput } from "../loadScenarioInput";
+import { computeFingerprint, readOutputs, writeRun } from "../outputsRepo";
+import { ENGINE_OUTPUTS_SQL } from "../schema";
 
 type Db = InstanceType<typeof Database>;
 
@@ -49,8 +61,10 @@ let valuesDb: Db;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+  applyBlocksStructureV12(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
+  valuesDb.exec(ENGINE_OUTPUTS_SQL);
 });
 
 function catalogFor(scope: OuScope) {
@@ -89,6 +103,36 @@ describe("field catalog seed", () => {
     ensureFieldCatalogSeed(structureDb, OU_A);
     ensureFieldCatalogSeed(structureDb, OU_A);
     expect(catalogFor(OU_A).fields).toHaveLength(SYSTEM_FIELD_SEED.length);
+  });
+
+  it("re-applies a changed system dropdownSource when the seed version climbs", () => {
+    catalogFor(OU_A); // seeds at the current SEED_VERSION
+    // Simulate a catalog left by an older app version (the picker on the code
+    // field, no source on the name field), then roll the stored seed_version
+    // back so the next read must re-apply the seed.
+    const stale = structureDb.prepare(
+      `UPDATE field_catalog
+          SET dropdown_source = ?, seed_version = ?
+        WHERE ou = ? AND field_key = ?`
+    );
+    stale.run(
+      JSON.stringify({ kind: "departments", nameField: "deptName" }),
+      SEED_VERSION - 1,
+      OU_A.ou,
+      "departmentCode"
+    );
+    stale.run(null, SEED_VERSION - 1, OU_A.ou, "deptName");
+
+    // getFieldCatalog runs ensureFieldCatalogSeed, which must rewrite both stale
+    // rows to the current seed: the picker moves onto deptName (with its
+    // codeField), and departmentCode loses its source and becomes the read-only
+    // code mirror.
+    const fields = catalogFor(OU_A).fields;
+    expect(fields.find((f) => f.key === "deptName")?.dropdownSource).toEqual({
+      kind: "departments",
+      codeField: "departmentCode",
+    });
+    expect(fields.find((f) => f.key === "departmentCode")?.dropdownSource).toBeFalsy();
   });
 
   it("preserves a user rename of an unlocked field across re-seeding", () => {
@@ -458,6 +502,153 @@ describe("batch write", () => {
     expect(loadScenarioValues(valuesDb, OU_A, SCENARIO).positions).toHaveLength(1);
     expect(loadScenarioValues(valuesDb, OU_B, SCENARIO).positions).toHaveLength(0);
   });
+
+  describe("component value patches (block inputs)", () => {
+    const DEFS = new Set(["blk-1:cost", "blk-2:cost"]);
+
+    function patchComponent(
+      scope: OuScope,
+      patches: Array<{
+        positionId: string;
+        componentDefId: string;
+        fields: Record<string, unknown>;
+      }>
+    ) {
+      return batchWrite(
+        valuesDb,
+        scope,
+        {
+          ou: scope.ou,
+          scenarioId: SCENARIO,
+          componentValuePatches: patches as never,
+        },
+        lookupFor(scope),
+        DEFS
+      );
+    }
+
+    it("lands in the same batch as the create and round-trips", () => {
+      batchWrite(
+        valuesDb,
+        OU_A,
+        {
+          ou: OU_A.ou,
+          scenarioId: SCENARIO,
+          creates: [{ id: "pos-1", fields: { departmentCode: "D110" } }],
+          componentValuePatches: [
+            { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { yearlyValue: 250 } },
+          ],
+        },
+        lookupFor(OU_A),
+        DEFS
+      );
+
+      const loaded = loadScenarioValues(valuesDb, OU_A, SCENARIO);
+      expect(loaded.componentValues).toHaveLength(1);
+      expect(loaded.componentValues[0]).toMatchObject({
+        positionId: "pos-1",
+        componentDefId: "blk-1:cost",
+        yearlyValue: 250,
+      });
+    });
+
+    it("merges sparse slots across batches and keeps vectors whole", () => {
+      createOnePosition(OU_A);
+      patchComponent(OU_A, [
+        { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { rate: 0.05 } },
+      ]);
+      patchComponent(OU_A, [
+        { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { qty: 12, unitRate: 30 } },
+        {
+          positionId: "pos-1",
+          componentDefId: "blk-2:cost",
+          fields: { monthlyValues: [1, 2, 3] },
+        },
+      ]);
+
+      const values = loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues;
+      const first = values.find((value) => value.componentDefId === "blk-1:cost")!;
+      expect(first.rate).toBe(0.05); // earlier slot survives the later patch
+      expect(first.qty).toBe(12);
+      expect(first.unitRate).toBe(30);
+      const second = values.find((value) => value.componentDefId === "blk-2:cost")!;
+      expect(second.monthlyValues).toEqual([1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    });
+
+    it("round-trips per-row account overrides (TEXT fields)", () => {
+      createOnePosition(OU_A);
+      patchComponent(OU_A, [
+        {
+          positionId: "pos-1",
+          componentDefId: "blk-1:cost",
+          fields: { qty: 5, accountCode: "512345", statsAccountCode: "988111" },
+        },
+      ]);
+      const [value] = loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues;
+      expect(value.accountCode).toBe("512345");
+      expect(value.statsAccountCode).toBe("988111");
+
+      // Clearing back to the block default stores NULL.
+      patchComponent(OU_A, [
+        { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { accountCode: null } },
+      ]);
+      const [cleared] = loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues;
+      expect(cleared.accountCode).toBeNull();
+      expect(cleared.statsAccountCode).toBe("988111");
+
+      expect(() =>
+        patchComponent(OU_A, [
+          { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { accountCode: 42 } },
+        ])
+      ).toThrow(/must be a string/);
+    });
+
+    it("rejects unknown definitions and junk values", () => {
+      createOnePosition(OU_A);
+      expect(() =>
+        patchComponent(OU_A, [
+          { positionId: "pos-1", componentDefId: "ghost", fields: { rate: 1 } },
+        ])
+      ).toThrow(/Unknown component definition/);
+      expect(() =>
+        patchComponent(OU_A, [
+          { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { rate: "abc" } },
+        ])
+      ).toThrow(/must be a number/);
+    });
+
+    it("cannot attach values to another OU's position", () => {
+      createOnePosition(OU_A);
+      patchComponent(OU_B, [
+        { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { rate: 0.9 } },
+      ]);
+      expect(loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues).toHaveLength(0);
+      expect(loadScenarioValues(valuesDb, OU_B, SCENARIO).componentValues).toHaveLength(0);
+    });
+
+    it("follows the position through soft delete and restore", () => {
+      createOnePosition(OU_A);
+      patchComponent(OU_A, [
+        { positionId: "pos-1", componentDefId: "blk-1:cost", fields: { rate: 0.1 } },
+      ]);
+
+      batchWrite(
+        valuesDb, OU_A,
+        { ou: OU_A.ou, scenarioId: SCENARIO, softDeleteIds: ["pos-1"] },
+        lookupFor(OU_A)
+      );
+      expect(loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues).toHaveLength(0);
+
+      batchWrite(
+        valuesDb, OU_A,
+        { ou: OU_A.ou, scenarioId: SCENARIO, restoreIds: ["pos-1"] },
+        lookupFor(OU_A)
+      );
+      const values = loadScenarioValues(valuesDb, OU_A, SCENARIO).componentValues;
+      expect(values).toHaveLength(1);
+      expect(values[0].rate).toBe(0.1);
+    });
+  });
 });
 
 describe("engine round trip", () => {
@@ -499,7 +690,6 @@ describe("engine round trip", () => {
               additionalMonthlyCosts: Array(12).fill(0),
               vacationMonthlyWeights: Array(12).fill(1 / 12),
               vacationDays: 30,
-              dailyVacationCost: 80,
               dailyContractHours: 8,
               yearlyHoursWorked: 2080,
             },
@@ -529,6 +719,122 @@ describe("engine round trip", () => {
     await expect(
       loadScenarioInput(structureDb, valuesDb, OU_B, scenario.id, async () => null)
     ).rejects.toThrow(/not found in this hotel/);
+  });
+
+  it("injects a KPI-driven block as absolute values (series × multiplier)", async () => {
+    // KPI + budget tables live beside the structure store in the plaintext DB.
+    structureDb.exec(BUDGET_IMPORT_SQL);
+    structureDb.exec(KPI_DRIVERS_SQL);
+
+    // Budget: dept D110 revenue (A3) in bucket 1 — Jan 100, Feb 200.
+    structureDb
+      .prepare(
+        `INSERT INTO budget_imports (id, ou, source_filename, imported_at, row_count)
+         VALUES ('imp-1', ?, 'f.xlsm', '2026-01-01T00:00:00Z', 0)`
+      )
+      .run(OU_A.ou);
+    const seedVal = structureDb.prepare(
+      `INSERT INTO budget_values
+         (import_id, ou, dept, account, combo, bucket_index, period, value)
+       VALUES ('imp-1', ?, 'D110', 'A3001', 'D110-A3001', 1, ?, ?)`
+    );
+    seedVal.run(OU_A.ou, 1, 100);
+    seedVal.run(OU_A.ou, 2, 200);
+
+    // An EXPLICIT "all departments, A3" driver, then precompute its series.
+    saveKpiDriver(structureDb, {
+      id: "kpi-rev",
+      ou: OU_A.ou,
+      label: "Revenue",
+      deptMode: "EXPLICIT",
+      deptPatterns: ["*"],
+      accountPrefixes: ["A3"],
+      bucketIndex: 1,
+      sortOrder: 0,
+      createdBy: null,
+      now: "2026-01-01T00:00:00Z",
+    });
+    recomputeAllForOu(structureDb, OU_A.ou, { computedAt: "2026-01-01T00:00:00Z" });
+
+    const scenario = saveScenario(structureDb, OU_A, { year: 2027, label: "B27" });
+
+    // Mandatory base + a KPI-driven SPREAD block (persisted as DIRECT_ABS).
+    structureDb
+      .prepare(
+        `INSERT INTO cost_component_definitions
+           (id, ou, kind, label, account_code, department_mode, increase_aware,
+            sort_order, updated_at)
+         VALUES ('def-base', ?, 'BASE_SALARY', 'Base Salary', '500100',
+                 'POSITION', 1, 0, '2026-01-01T00:00:00Z')`
+      )
+      .run(OU_A.ou);
+    structureDb
+      .prepare(
+        `INSERT INTO cost_component_definitions
+           (id, ou, kind, spread_method, label, account_code, department_mode,
+            increase_aware, sort_order, kpi_driver_id, updated_at)
+         VALUES ('def-kpi', ?, 'SPREAD', 'DIRECT_ABS', 'KPI Line', '700000',
+                 'POSITION', 0, 1, 'kpi-rev', '2026-01-01T00:00:00Z')`
+      )
+      .run(OU_A.ou);
+
+    // A seasonal position with 2 identical heads — neither must affect the line.
+    batchWrite(
+      valuesDb,
+      OU_A,
+      {
+        ou: OU_A.ou,
+        scenarioId: scenario.id,
+        creates: [
+          {
+            id: "pos-rt",
+            fields: {
+              departmentCode: "D110",
+              jobTypeCode: "Manager",
+              cluster: "Rooms",
+              payType: "SALARIED",
+              headcount: 2,
+              fte: 1,
+              monthlyBaseSalary: 2500,
+              seasonality: [1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+              vacationMonthlyWeights: Array(12).fill(1 / 12),
+            },
+          },
+        ],
+      },
+      lookupFor(OU_A)
+    );
+
+    // The per-position multiplier lives in component_values.rate (× 2 here).
+    valuesDb
+      .prepare(
+        `INSERT INTO component_values
+           (position_id, component_def_id, ou, scenario_id, rate, updated_at)
+         VALUES ('pos-rt', 'def-kpi', ?, ?, 2, '2026-01-01T00:00:00Z')`
+      )
+      .run(OU_A.ou, scenario.id);
+
+    const input = await loadScenarioInput(
+      structureDb,
+      valuesDb,
+      OU_A,
+      scenario.id,
+      async () => null
+    );
+
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+
+    const kpiLine = result
+      .positionLines("pos-rt" as never)
+      .find((l) => l.component.id === ("def-kpi" as never))!;
+
+    // series ['*'] = [100, 200, 0, ...] × multiplier 2 = [200, 400, 0, ...],
+    // untouched by the Feb 0.5 seasonality or the 2 heads.
+    expect(kpiLine.months[0]).toBe(200);
+    expect(kpiLine.months[1]).toBe(400);
+    expect(Array.from(kpiLine.months.slice(2))).toEqual(Array(10).fill(0));
   });
 });
 
@@ -693,6 +999,100 @@ describe("cross-year positions", () => {
   });
 });
 
+describe("engine outputs", () => {
+  const SCENARIO = "scn-out-1";
+  const line = (
+    positionId: string,
+    defId: string,
+    dept: string,
+    account: string,
+    perMonth: number
+  ) => ({
+    positionId,
+    componentDefId: defId,
+    label: defId,
+    dept,
+    account,
+    months: new Array(12).fill(perMonth),
+    total: perMonth * 12,
+  });
+
+  it("aggregates lines to dept×account and tags statistics accounts", () => {
+    writeRun(
+      valuesDb, OU_A, SCENARIO,
+      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 2 },
+      [
+        line("p1", "blk-1:cost", "0410", "511000", 100),
+        line("p2", "blk-1:cost", "0410", "511000", 50),
+        line("p1", "blk-2:stat", "0410", "988200", 4),
+      ]
+    );
+
+    const outputs = readOutputs(structureDb, valuesDb, OU_A, SCENARIO);
+    expect(outputs.run).toMatchObject({ lineCount: 3, positionCount: 2 });
+    expect(outputs.rows).toHaveLength(2);
+    const cost = outputs.rows.find((row) => row.account === "511000")!;
+    expect(cost.isStats).toBe(false);
+    expect(cost.months[0]).toBe(150);
+    expect(cost.total).toBe(1800);
+    const stat = outputs.rows.find((row) => row.account === "988200")!;
+    expect(stat.isStats).toBe(true);
+    expect(stat.total).toBe(48);
+  });
+
+  it("overwrites wholesale on a new run and isolates OUs", () => {
+    writeRun(
+      valuesDb, OU_A, SCENARIO,
+      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      [line("p1", "blk-1:cost", "0410", "511000", 100)]
+    );
+    writeRun(
+      valuesDb, OU_A, SCENARIO,
+      { fingerprint: "fp-2", computedAt: "2026-01-03T00:00:00Z", positionCount: 1 },
+      [line("p1", "blk-1:cost", "0410", "522000", 70)]
+    );
+
+    const outputs = readOutputs(structureDb, valuesDb, OU_A, SCENARIO);
+    expect(outputs.rows).toHaveLength(1);
+    expect(outputs.rows[0].account).toBe("522000");
+    expect(readOutputs(structureDb, valuesDb, OU_B, SCENARIO).run).toBeNull();
+  });
+
+  it("reports stale when any input source drifts after the run", () => {
+    batchWrite(
+      valuesDb, OU_A,
+      {
+        ou: OU_A.ou,
+        scenarioId: SCENARIO,
+        creates: [{ id: "pos-1", fields: { departmentCode: "D110" } }],
+      },
+      lookupFor(OU_A)
+    );
+
+    const fingerprint = computeFingerprint(structureDb, valuesDb, OU_A, SCENARIO);
+    writeRun(
+      valuesDb, OU_A, SCENARIO,
+      { fingerprint, computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      [line("pos-1", "blk-1:cost", "D110", "511000", 10)]
+    );
+    expect(readOutputs(structureDb, valuesDb, OU_A, SCENARIO).stale).toBe(false);
+
+    // Any input change drifts the fingerprint. A new position is the
+    // deterministic case (COUNT moves even within the same millisecond);
+    // plain edits drift via MAX(updated_at).
+    batchWrite(
+      valuesDb, OU_A,
+      {
+        ou: OU_A.ou,
+        scenarioId: SCENARIO,
+        creates: [{ id: "pos-2", fields: { departmentCode: "D120" } }],
+      },
+      lookupFor(OU_A)
+    );
+    expect(readOutputs(structureDb, valuesDb, OU_A, SCENARIO).stale).toBe(true);
+  });
+});
+
 describe("migration runner shape", () => {
   it("upgrades a pre-lineage value store in place", () => {
     // A v2 file: the positions table as it shipped, without the two columns.
@@ -720,16 +1120,72 @@ describe("migration runner shape", () => {
     legacy.close();
   });
 
+  it("backfills hourly_rate on a store that already ran v3", () => {
+    // A v3 file as it shipped before hourly_rate existed: lineage/active are
+    // present, hourly_rate is not, and the runner would never re-run v3.
+    const legacy = new Database(":memory:") as Db;
+    legacy.exec(`
+      CREATE TABLE positions (
+        id TEXT PRIMARY KEY, ou TEXT NOT NULL, scenario_id TEXT NOT NULL,
+        lineage_id TEXT NOT NULL DEFAULT '',
+        active INTEGER NOT NULL DEFAULT 1,
+        monthly_base_salary REAL NOT NULL DEFAULT 0,
+        extra_values TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL, deleted_at TEXT
+      );
+      INSERT INTO positions (id, ou, scenario_id, updated_at)
+      VALUES ('old-1', 'OU12345', 'scn', '2026-01-01T00:00:00Z');
+    `);
+
+    applyValueStoreV4(legacy);
+    applyValueStoreV4(legacy); // idempotent — re-running must not throw
+
+    const row = legacy
+      .prepare("SELECT hourly_rate FROM positions WHERE id = 'old-1'")
+      .get() as { hourly_rate: number };
+    expect(row.hourly_rate).toBe(0);
+    legacy.close();
+  });
+
+  it("drops the derived-rate input columns on a store that still has them", () => {
+    // A pre-v5 file: the two now-derived rate columns are present and must go.
+    const legacy = new Database(":memory:") as Db;
+    legacy.exec(`
+      CREATE TABLE positions (
+        id TEXT PRIMARY KEY, ou TEXT NOT NULL, scenario_id TEXT NOT NULL,
+        daily_vacation_cost REAL NOT NULL DEFAULT 0,
+        accrual_cost_per_day REAL NOT NULL DEFAULT 0,
+        extra_values TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL, deleted_at TEXT
+      );
+      INSERT INTO positions (id, ou, scenario_id, updated_at)
+      VALUES ('old-1', 'OU12345', 'scn', '2026-01-01T00:00:00Z');
+    `);
+
+    applyValueStoreV5(legacy);
+    applyValueStoreV5(legacy); // idempotent — re-running must not throw
+
+    const columns = (
+      legacy.prepare("PRAGMA table_info(positions)").all() as Array<{ name: string }>
+    ).map((column) => column.name);
+    expect(columns).not.toContain("daily_vacation_cost");
+    expect(columns).not.toContain("accrual_cost_per_day");
+    legacy.close();
+  });
+
 
   it("value-store DDL is idempotent (re-exec is safe)", () => {
     valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
     valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
+    valuesDb.exec(ENGINE_OUTPUTS_SQL);
     const tables = valuesDb
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>;
     expect(tables.map((t) => t.name)).toEqual([
       "buyout_rows",
       "component_values",
+      "engine_output_lines",
+      "engine_runs",
       "position_pii",
       "positions",
     ]);

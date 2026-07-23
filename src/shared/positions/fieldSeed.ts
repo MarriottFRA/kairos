@@ -33,7 +33,81 @@ import {
 // v5: added `active` at the head of the Employee band. Positions now persist
 // across years (a scenario copy rolls them forward), so there has to be a way
 // to say "this post isn't budgeted this year" without deleting the row.
-export const SEED_VERSION = 5;
+// Note: the `employee` band's display label is "Position" — it only ever held
+// the post's attributes (department, classification, job title), never the
+// person's; the person lives under "Employee PII". Band labels come from the
+// SECTIONS constant, which getFieldCatalog returns directly (never stored per
+// OU), so relabelling a band needs no seed bump — only field changes do.
+// v6: `departmentCode`'s dropdownSource gained `nameField: "deptName"`, wiring
+// the Department picker to auto-fill the (now read-only) Dept Name column.
+// v7: inverted that — the picker moved onto `deptName` (you search departments
+// by name), and `departmentCode` became the read-only mirror it auto-fills, via
+// `dropdownSource: { kind: "departments", codeField: "departmentCode" }`.
+// dropdown_source is stored per OU and only re-applied when seed_version climbs,
+// so these attribute changes need the bump to reach catalogs seeded earlier.
+// v8: two changes.
+//  (a) Classification (jobTypeCode) options no longer include "Hourly" — that was
+//      a pay basis masquerading as a grade. Classification is now a clean set of
+//      post grades (Manager, Manager (Non Exempt), Supervisor, Associate, Casual,
+//      Buyout Labour); the salaried/hourly axis stays on Pay Basis (payType).
+//  (b) Pay Basis (payType), Cluster, and headcount (relabelled "Count") moved
+//      from the Contract band into Position — they describe the post, not its
+//      contract mechanics, and sit next to Classification. "Count" is just the
+//      headcount multiplier renamed; the key/column/engine are unchanged.
+//      Relocating a field between bands relies on the seed re-applying sort_order
+//      on a version bump (see ensureFieldCatalogSeed); without that the moved
+//      field's band would draw its header twice.
+// v9: Manhours Paid (yearlyManhoursPaid) became a read-only COMPUTED column —
+//     paid days (Yearly Days − Days Off) × Daily Hours — instead of a free-entry
+//     POSITION_EXTRA field. The bump re-applies storage/editable over catalogs
+//     seeded earlier; any value previously typed into extra_values is ignored
+//     (COMPUTED columns derive from the row, never read storage).
+// v10: Hourly Rate (hourlyRate) added to the Basic Salary band — an alternate,
+//     mutually-exclusive input to Monthly Basic that derives the base from
+//     rate × hours worked (see engine reference.ts). New engine scalar column
+//     hourly_rate on the positions table (migrated in schema.ts).
+// v11: Daily Cost (dailyVacationCost) and Accrual Cost (accrualCostPerDay) removed
+//     as inputs — a vacation/accrual day is now valued by the engine at the
+//     position's derived per-working-day base pay (see engine reference.ts). The
+//     bump retires the two fields from catalogs seeded earlier; their columns are
+//     dropped from the positions table (schema.ts migration v5). "Estimated Cost"
+//     (vacationEstimate) is now the engine-simulated Vacation Cost.
+// v12: Accrual Days (accrualDaysPerMonth) stopped being an input — it is now a
+//     read-only COMPUTED column, Yearly Days ÷ 12, so the monthly entitlement
+//     always shows. Whether accruals are actually *generated* is decided by the
+//     Accrual account: the value fed to the engine is zeroed for a position with
+//     no accrual account (see loadScenarioInput / rowModel.rowToEnginePosition),
+//     and the engine's existing accrualDays===0 guard suppresses the line. The
+//     bump re-applies storage/editable over catalogs seeded earlier; the vestigial
+//     accrual_days_per_month column is left in place (no longer read or written).
+// v13: account columns sit beside the data they book, not bunched in Basic Salary.
+//     Working Hours account (workingHoursAccount) moved into Contract, right after
+//     Manhours Worked; Headcount account (headCountAccount) moved into Position,
+//     right after Count. FTE account (fteAccount) dropped outright — FTE is a ratio
+//     with no GL account of its own; ensureFieldCatalogSeed prunes retired keys, so
+//     the column and its extra_values are cleaned up on the next seed. Both moves are
+//     section + sort_order changes on POSITION_EXTRA fields (keys unchanged), so
+//     stored values survive; the bump is what re-applies the new section/order to
+//     catalogs seeded earlier (refresh is version-gated).
+// v14: account fields gained a dropdown, seeded from the account_maps table and
+//     narrowed per field — the picker searches by description (detail level max)
+//     but stores the base_account code. The subset each field offers is carried
+//     on its dropdownSource.filter: Headcount and Working Hours book to A9…
+//     accounts; Salary, Accrual and Benefits book to A5…; the Home page's bank
+//     holiday premium account (not a catalog field) uses the same A5… rule. The
+//     prefixes are a first, broad pass to be narrowed later (see AccountFilter).
+//     Filters are the only change, so stored account values survive; dropdown_source
+//     is stored per OU and re-applied only when seed_version climbs, so the bump is
+//     what reaches catalogs seeded earlier.
+export const SEED_VERSION = 14;
+
+/** base_account prefixes each account field books to — a first, broad pass the
+ *  user will narrow later. Kept beside the seed so the A9/A5 split is stated
+ *  once and every account field's filter reads from the same place. */
+const HEADCOUNT_ACCOUNT_FILTER = { startsWith: ["A9"] };
+const HOURS_ACCOUNT_FILTER = { startsWith: ["A9"] };
+const SALARY_ACCOUNT_FILTER = { startsWith: ["A5"] };
+const VACATION_ACCOUNT_FILTER = { startsWith: ["A5"] };
 
 export const SECTIONS: SectionDef[] = [
   // The row gutter: select / active / row actions. Unlabelled on purpose —
@@ -41,21 +115,31 @@ export const SECTIONS: SectionDef[] = [
   // column heading for the checkboxes.
   { id: "control", label: "", order: 5 },
   { id: "pii", label: "Employee PII", order: 10 },
-  { id: "employee", label: "Employee", order: 15 },
+  { id: "employee", label: "Position", order: 15 },
   { id: "contract", label: "Contract", order: 20 },
   { id: "seasonality", label: "Working Months", order: 30 },
   { id: "basicSalary", label: "Basic Salary", order: 40 },
   { id: "vacation", label: "Vacation", order: 50 },
 ];
 
-/** Job classification options (the workbook's Manager/Hourly/Supervisor/Casual). */
-const JOB_TYPE_OPTIONS = ["Manager", "Hourly", "Supervisor", "Casual"].map(
-  (value) => ({ value, label: value })
-);
+/** Job classification options. These name the *post* (grade/role band) only —
+ *  the pay basis (salaried vs hourly) is a separate axis, carried by `payType`.
+ *  "Hourly" used to live here, which conflated the two; it now belongs solely to
+ *  Pay Basis. Values are free-form strings and double as the merit/stat lookup
+ *  key (`cluster|jobTypeCode` in compile.ts), so any new classification needs a
+ *  matching stat-table row to price it. */
+const JOB_TYPE_OPTIONS = [
+  "Manager",
+  "Manager (Non Exempt)",
+  "Supervisor",
+  "Associate",
+  "Casual",
+  "Buyout Labour",
+].map((value) => ({ value, label: value }));
 
 const PAY_TYPE_OPTIONS = [
   { value: "SALARIED", label: "Salaried (30/360)" },
-  { value: "HOURLY", label: "Hourly (real days)" },
+  { value: "HOURLY", label: "Hourly" },
 ];
 
 type SeedOverrides = Partial<FieldDef> & Pick<FieldDef, "key" | "defaultLabel">;
@@ -141,15 +225,19 @@ const SEED: FieldDef[] = [
   }),
 
   // ── Employee (the post, not the person) ───────────────────────────
+  // The user picks a department by NAME (Dept Name is the dropdown); the code is
+  // derived. departmentCode therefore holds no dropdown of its own — it is the
+  // read-only mirror that `deptName`'s picker auto-fills (see columnFactory).
   sys("employee", "TEXT", "ENGINE", {
     key: "departmentCode",
     defaultLabel: "Department",
     locked: true,
-    dropdownSource: { kind: "departments" },
   }),
   sys("employee", "TEXT", "POSITION_EXTRA", {
     key: "deptName",
     defaultLabel: "Dept Name",
+    // Picking a name auto-fills `departmentCode` and renders it read-only.
+    dropdownSource: { kind: "departments", codeField: "departmentCode" },
   }),
   sys("employee", "ENUM", "ENGINE", {
     key: "jobTypeCode",
@@ -162,6 +250,42 @@ const SEED: FieldDef[] = [
   sys("employee", "TEXT", "PII_CORE", {
     key: "title",
     defaultLabel: "Job Title",
+  }),
+  // Pay basis and cluster describe the post's shape, not its contract mechanics,
+  // so they band with Position. Pay basis (salaried 30/360 vs hourly real days)
+  // still drives the engine's day-count; cluster still rolls positions up and
+  // pairs with Classification as the merit/stat lookup key.
+  sys("employee", "ENUM", "ENGINE", {
+    key: "payType",
+    defaultLabel: "Pay Basis",
+    locked: true,
+    dropdownSource: { kind: "static", options: PAY_TYPE_OPTIONS },
+    defaultValue: "SALARIED",
+  }),
+  sys("employee", "TEXT", "ENGINE", {
+    key: "cluster",
+    defaultLabel: "Cluster",
+    locked: true,
+  }),
+  // "Count" is the engine's headcount multiplier under a name that reads for
+  // budgeting: one row with Count = 5 is five identical positions, and every cost
+  // the engine derives is scaled by it (posHeadcount in compile.ts). Same `key`
+  // and `headcount` column as before — only the label and band moved — so nothing
+  // on the engine or write path changes.
+  sys("employee", "NUMBER", "ENGINE", {
+    key: "headcount",
+    defaultLabel: "Count",
+    locked: true,
+    validation: { min: 0 },
+    defaultValue: 1,
+  }),
+  // The account the headcount books to — sits right beside Count so the number
+  // and the account it posts under read as one pair (moved out of Basic Salary
+  // in v13). POSITION_EXTRA, so relocating it only changes its band + order.
+  sys("employee", "ACCOUNT_CODE", "POSITION_EXTRA", {
+    key: "headCountAccount",
+    defaultLabel: "Headcount",
+    dropdownSource: { kind: "accounts", filter: HEADCOUNT_ACCOUNT_FILTER },
   }),
 
   // ── Contract ──────────────────────────────────────────────────────
@@ -186,10 +310,13 @@ const SEED: FieldDef[] = [
     locked: true,
     validation: { min: 0, max: 24 },
   }),
-  sys("contract", "NUMBER", "POSITION_EXTRA", {
+  // Manhours Paid is derived, not entered: paid days (yearly days − days off)
+  // × daily contract hours. Read-only computed column (see rowModel COMPUTES).
+  sys("contract", "NUMBER", "COMPUTED", {
     key: "yearlyManhoursPaid",
     defaultLabel: "Manhours Paid",
-    validation: { min: 0 },
+    locked: true,
+    computeKey: "yearlyManhoursPaid",
   }),
   sys("contract", "NUMBER", "ENGINE", {
     key: "yearlyHoursWorked",
@@ -197,12 +324,13 @@ const SEED: FieldDef[] = [
     locked: true,
     validation: { min: 0 },
   }),
-  sys("contract", "NUMBER", "ENGINE", {
-    key: "headcount",
-    defaultLabel: "Headcount",
-    locked: true,
-    validation: { min: 0 },
-    defaultValue: 1,
+  // The account worked hours book to — sits right beside Manhours Worked so the
+  // hours and their posting account read as one pair (moved out of Basic Salary
+  // in v13). POSITION_EXTRA, so relocating it only changes its band + order.
+  sys("contract", "ACCOUNT_CODE", "POSITION_EXTRA", {
+    key: "workingHoursAccount",
+    defaultLabel: "Working Hours",
+    dropdownSource: { kind: "accounts", filter: HOURS_ACCOUNT_FILTER },
   }),
   sys("contract", "NUMBER", "ENGINE", {
     key: "fte",
@@ -210,18 +338,6 @@ const SEED: FieldDef[] = [
     locked: true,
     validation: { min: 0, decimals: 2 },
     defaultValue: 1,
-  }),
-  sys("contract", "TEXT", "ENGINE", {
-    key: "cluster",
-    defaultLabel: "Cluster",
-    locked: true,
-  }),
-  sys("contract", "ENUM", "ENGINE", {
-    key: "payType",
-    defaultLabel: "Pay Basis",
-    locked: true,
-    dropdownSource: { kind: "static", options: PAY_TYPE_OPTIONS },
-    defaultValue: "SALARIED",
   }),
 
   // ── Seasonality ───────────────────────────────────────────────────
@@ -237,9 +353,18 @@ const SEED: FieldDef[] = [
   }),
 
   // ── Basic Salary ──────────────────────────────────────────────────
+  // Two mutually-exclusive inputs: a fixed Monthly Basic, or an Hourly Rate that
+  // drives the base from hours worked. Only one holds a value per row; the grid
+  // locks the other (see rowModel.sanitizeRow + PositionsGrid.isCellEditable).
   sys("basicSalary", "NUMBER", "ENGINE", {
     key: "monthlyBaseSalary",
     defaultLabel: "Monthly Basic",
+    locked: true,
+    validation: { min: 0 },
+  }),
+  sys("basicSalary", "NUMBER", "ENGINE", {
+    key: "hourlyRate",
+    defaultLabel: "Hourly Rate",
     locked: true,
     validation: { min: 0 },
   }),
@@ -273,25 +398,13 @@ const SEED: FieldDef[] = [
     dropdownSource: { kind: "months" },
     defaultValue: 13,
   }),
-  sys("basicSalary", "ACCOUNT_CODE", "POSITION_EXTRA", {
-    key: "workingHoursAccount",
-    defaultLabel: "Working Hours",
-    dropdownSource: { kind: "accounts" },
-  }),
-  sys("basicSalary", "ACCOUNT_CODE", "POSITION_EXTRA", {
-    key: "headCountAccount",
-    defaultLabel: "Headcount",
-    dropdownSource: { kind: "accounts" },
-  }),
-  sys("basicSalary", "ACCOUNT_CODE", "POSITION_EXTRA", {
-    key: "fteAccount",
-    defaultLabel: "FTE",
-    dropdownSource: { kind: "accounts" },
-  }),
+  // Working Hours / Headcount accounts moved to sit beside their data columns
+  // (Contract / Position) in v13; the FTE account was dropped. Salary is the one
+  // account that belongs with the basic-salary figure, so it stays here.
   sys("basicSalary", "ACCOUNT_CODE", "POSITION_EXTRA", {
     key: "salaryAccountCode",
     defaultLabel: "Salary",
-    dropdownSource: { kind: "accounts" },
+    dropdownSource: { kind: "accounts", filter: SALARY_ACCOUNT_FILTER },
   }),
   sys("basicSalary", "NUMBER", "COMPUTED", {
     key: "budgetYearBasicSalary",
@@ -307,28 +420,19 @@ const SEED: FieldDef[] = [
     locked: true,
     validation: { min: 0, max: 366 },
   }),
-  sys("vacation", "NUMBER", "ENGINE", {
-    key: "dailyVacationCost",
-    defaultLabel: "Daily Cost",
-    locked: true,
-    validation: { min: 0 },
-  }),
-  sys("vacation", "NUMBER", "ENGINE", {
+  // Auto-calculated, not entered: the monthly entitlement is Yearly Days ÷ 12.
+  // Read-only COMPUTED, so it always shows the accrued amount; whether the
+  // accrual is actually booked is gated separately by the Accrual account below.
+  sys("vacation", "NUMBER", "COMPUTED", {
     key: "accrualDaysPerMonth",
     defaultLabel: "Accrual Days",
     locked: true,
-    validation: { min: 0, max: 31 },
-  }),
-  sys("vacation", "NUMBER", "ENGINE", {
-    key: "accrualCostPerDay",
-    defaultLabel: "Accrual Cost",
-    locked: true,
-    validation: { min: 0 },
+    computeKey: "accrualDaysPerMonth",
   }),
   sys("vacation", "ACCOUNT_CODE", "POSITION_EXTRA", {
     key: "accrualAccount",
     defaultLabel: "Accrual",
-    dropdownSource: { kind: "accounts" },
+    dropdownSource: { kind: "accounts", filter: VACATION_ACCOUNT_FILTER },
   }),
   ...monthFamily(
     "vacation",
@@ -345,11 +449,11 @@ const SEED: FieldDef[] = [
   sys("vacation", "ACCOUNT_CODE", "POSITION_EXTRA", {
     key: "benefitsAccountCode",
     defaultLabel: "Benefits",
-    dropdownSource: { kind: "accounts" },
+    dropdownSource: { kind: "accounts", filter: VACATION_ACCOUNT_FILTER },
   }),
   sys("vacation", "NUMBER", "COMPUTED", {
     key: "vacationEstimate",
-    defaultLabel: "Estimated Cost",
+    defaultLabel: "Vacation Cost",
     locked: true,
     computeKey: "vacationEstimate",
   }),

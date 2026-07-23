@@ -59,14 +59,54 @@ export type VectorName =
   | "additionalMonthlyCosts"
   | "vacationMonthlyWeights";
 
+/**
+ * Which accounts an account picker offers, out of the full account_maps cache.
+ *
+ * Deliberately a small, open-ended shape: today it is a set of base_account
+ * prefixes (headcount/working-hours book to A9…, salary/vacation to A5…), but
+ * it is the one place account eligibility is expressed, so narrowing a field to
+ * a tighter set later — an explicit allow-list, a level_* match, a rule keyed on
+ * the row — is a change here plus the matcher in `accountAllowed`, never a change
+ * at every call site. An absent/empty filter means "any account".
+ */
+export interface AccountFilter {
+  /** base_account must start with one of these prefixes (case-insensitive). */
+  startsWith?: string[];
+}
+
 /** Where a dropdown-gated field gets its options. `accounts`/`departments`
  *  resolve to reference data when it exists; until then the columnFactory
- *  degrades them to free text. */
+ *  degrades them to free text.
+ *
+ *  A `departments` picker searches and stores department NAMES (which already
+ *  carry the code). `codeField` names a sibling field (e.g. `departmentCode`)
+ *  that mirrors the picked department's code: selecting a name auto-fills that
+ *  field and the factory renders it read-only. Omit it for a name-only picker.
+ *
+ *  An `accounts` picker searches by description but stores the base_account
+ *  code. `filter` narrows which accounts it offers (see AccountFilter); omit it
+ *  to offer every account. */
 export type DropdownSource =
   | { kind: "static"; options: Array<{ value: string | number; label: string }> }
   | { kind: "months" }
-  | { kind: "accounts" }
-  | { kind: "departments" };
+  | { kind: "accounts"; filter?: AccountFilter | null }
+  | { kind: "departments"; codeField?: string };
+
+/**
+ * Does an account code pass a field's filter? The single matcher for account
+ * eligibility — the picker, and any future rule-based auto-selection, decide
+ * membership here so the definition never forks. No filter (or an empty one)
+ * admits every account.
+ */
+export function accountAllowed(
+  code: string,
+  filter?: AccountFilter | null
+): boolean {
+  const prefixes = filter?.startsWith;
+  if (!prefixes || prefixes.length === 0) return true;
+  const upper = code.toUpperCase();
+  return prefixes.some((prefix) => upper.startsWith(prefix.toUpperCase()));
+}
 
 export interface FieldValidation {
   required?: boolean;
@@ -128,16 +168,25 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
   headcount: "headcount",
   fte: "fte",
   monthlyBaseSalary: "monthly_base_salary",
+  hourlyRate: "hourly_rate",
   meritIncreasePct: "merit_increase_pct",
   manualYearlyIncrease: "manual_yearly_increase",
   increaseMonth: "increase_month",
   dailyContractHours: "daily_contract_hours",
   yearlyHoursWorked: "yearly_hours_worked",
   vacationDays: "vacation_days",
-  dailyVacationCost: "daily_vacation_cost",
-  accrualDaysPerMonth: "accrual_days_per_month",
-  accrualCostPerDay: "accrual_cost_per_day",
+  // accrualDaysPerMonth is no longer an engine scalar — it is a COMPUTED column
+  // (Yearly Days ÷ 12) and the engine value is derived at load time, gated by the
+  // accrual account (see loadScenarioInput). The DB column is left vestigial.
 };
+
+/** The Basic Salary band offers two mutually-exclusive inputs: a fixed Monthly
+ *  Basic amount or an Hourly Rate that derives the base from hours worked. Only
+ *  one may hold a value on a row — the other is locked read-only. These keys are
+ *  the single source of that pairing, shared by the grid (read-only gating +
+ *  muting) and rowModel (sanitize clears the counterpart). */
+export const BASIC_SALARY_MONTHLY_KEY = "monthlyBaseSalary";
+export const BASIC_SALARY_HOURLY_KEY = "hourlyRate";
 
 /** Vector engine fields: vector name -> `positions` JSON column. */
 export const VECTOR_COLUMNS: Readonly<Record<VectorName, string>> = {

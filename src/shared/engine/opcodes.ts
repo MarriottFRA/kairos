@@ -30,17 +30,44 @@
  *  BASE_SALARY   params: monthlyBase, addl[12]
  *                gross[m] = base·twm/twd·days[m]·seas[m]·inc[m]
  *                           + manualMonthly·seas[m]·[m≥M] + addl[m]·seas[m]
+ *                Also sets dayRate = base·twm/twd (per-working-day base pay,
+ *                pre-increase) for VACATION/ACCRUAL to value a day off.
  *                Writes gross[] to scratch AND the (still-gross) line.
- *  VACATION      params: vacationDays, dailyVacationCost, weights[12]
- *                vac[m] = vacDays·weight[m]·seas[m]·(dailyCost·12/twm)·inc[m]
+ *  BASE_SALARY_HOURLY  params: coeff (= hourlyRate·dailyContractHours), addl[12]
+ *                Alternate base derivation for hourly-paid staff. Spreads over
+ *                realDays (net productive days), not the pay-type day basis, and
+ *                skips the twm/twd normalization (coeff is an actual per-day pay):
+ *                gross[m] = coeff·realDays[m]·seas[m]·inc[m]
+ *                           + manualMonthly·seas[m]·[m≥M] + addl[m]·seas[m]
+ *                Sets dayRate = coeff (the hourly per-day pay). Emitted instead
+ *                of BASE_SALARY when a position has hourlyRate>0. Writes gross[]
+ *                identically, so VACATION/BASE_DEDUCT are unchanged.
+ *  VACATION      params: vacationDays, weights[12]
+ *                vac[m] = vacDays·weight[m]·seas[m]·dayRate·inc[m]
+ *                dayRate is the per-working-day base pay set by the base op, so a
+ *                vacation day costs exactly what a worked day costs on the base
+ *                line — and inc[m] makes it pricier when weighted post-increase.
  *                Scratch only — no line.
  *  BASE_DEDUCT   line[m] -= vac[m]  (nets vacation out of the base line;
  *                gross scratch stays intact for downstream bases)
- *  ACCRUAL       params: accrualDaysPerMonth, accrualCostPerDay
- *                line[m] = days·cost·seas[m]·inc[m] − vac[m]   (0 if days = 0)
+ *  ACCRUAL       params: accrualDaysPerMonth
+ *                line[m] = days·dayRate·seas[m]·inc[m] − vac[m]   (0 if days = 0)
+ *  BANK_HOLIDAY  params: combinedMult (= staffFraction·premiumMultiplier, or 0
+ *                for staff whose base already pays the holiday — non-hourly)
+ *                line[m] = combinedMult·dayRate·holidayDays[m]·seas[m]·inc[m]
+ *                (0 if combinedMult = 0 or seas = 0). arg0 bit0: increase-aware.
+ *                Values a worked public holiday at the same per-working-day base
+ *                pay as a vacation/accrual day; holidayDays is the plan-level
+ *                per-month bank-holiday count. Scratch-free — reads dayRate/inc.
  *  ACC_CLEAR     acc[m] = 0
  *  ACC_ADD_GROSS acc[m] += gross[m]   (the base-salary series, pre-deduction)
  *  ACC_ADD_LINE  arg0 = source line index; acc[m] += values[line][m]
+ *  ACC_ADD_DAYS  arg0 = 0: acc[m] += daysPerMonth[p][m]·seas[m] (the position's
+ *                pay-type day basis); arg0 = 1: acc[m] += realDays[m]·seas[m]
+ *                (productive-days calendar). The CALENDAR base selector —
+ *                "multiplier of days in month" blocks.
+ *  ACC_ADD_VAC   acc[m] += vac[m] (the vacation-cost scratch set by VACATION).
+ *                The VACATION base selector; topo-depends on BASE_SALARY.
  *  PCT_OF_ACC    params: rate; line[m] = rate·acc[m]
  *  WEIGHT_BY_ACC params: yearly; line[m] = yearly·acc[m]/Σacc  (0 if Σacc = 0)
  *  FLAT_ACTIVE   params: yearly; line[m] = yearly/twm·seas[m]  (0 months with seas 0)
@@ -49,6 +76,10 @@
  *                arg0 bit0: multiply by inc[m]
  *  DIRECT        params: v[12]; line[m] = v[m]·seas[m]
  *                arg0 bit0: multiply by inc[m]
+ *  DIRECT_ABS    params: v[12]; line[m] = v[m]
+ *                Absolute pass-through — NO seasonality, NO increase, NOT
+ *                headcount-scaled. Used for KPI-driven blocks, whose values are
+ *                already resolved to absolute monthly figures at load time.
  *  SOCIAL_SEC    params: monthlyCap, yearlyCap (Infinity = uncapped),
  *                bracketCount, then SS_MAX_BRACKETS × (upTo, rate) pairs
  *                (upTo = Infinity for the unbounded bracket and for padding).
@@ -81,6 +112,11 @@ export const Op = {
   STAT_HC: 14,
   STAT_FTE: 15,
   STAT_HOURS: 16,
+  BASE_SALARY_HOURLY: 17,
+  BANK_HOLIDAY: 18,
+  DIRECT_ABS: 19,
+  ACC_ADD_DAYS: 20,
+  ACC_ADD_VAC: 21,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];
@@ -108,4 +144,5 @@ export const SCRATCH_TWD = 49; //    total working days (position's day basis)
 export const SCRATCH_TWD2 = 50; //   total working days (real-days basis)
 export const SCRATCH_MANUAL = 51; // manualMonthly (manual increase per active month)
 export const SCRATCH_INCMONTH = 52; // increaseMonth, 0-based (12 = none)
-export const SCRATCH_SIZE = 53;
+export const SCRATCH_DAYRATE = 53; // per-working-day base pay, pre-increase (set by a base op)
+export const SCRATCH_SIZE = 54;

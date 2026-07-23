@@ -41,9 +41,10 @@ export function makeScenario(): Scenario {
   return { id: SCENARIO_ID, ou: "0410", year: 2027, label: "Budget 2027", ...SYNC };
 }
 
-/** Flat 20 productive days per month unless overridden — keeps math hand-checkable. */
-export function makeCalendar(realDays?: number[]): CalendarContext {
-  return makeCalendarContext(realDays ?? new Array(MONTHS).fill(20));
+/** Flat 20 productive days per month unless overridden — keeps math hand-checkable.
+ *  `holidayDays` defaults to zero (no bank-holiday cost). */
+export function makeCalendar(realDays?: number[], holidayDays?: number[]): CalendarContext {
+  return makeCalendarContext(realDays ?? new Array(MONTHS).fill(20), holidayDays);
 }
 
 /** Builder override shape: everything optional except a plain-string id. */
@@ -75,6 +76,7 @@ export function makePosition(overrides: WithId<Position>): Position {
     fte: 1,
     seasonality: new Array(MONTHS).fill(1),
     monthlyBaseSalary: 1200,
+    hourlyRate: 0,
     additionalMonthlyCosts: new Array(MONTHS).fill(0),
     meritIncreasePct: 0,
     manualYearlyIncrease: 0,
@@ -82,10 +84,8 @@ export function makePosition(overrides: WithId<Position>): Position {
     dailyContractHours: 8,
     yearlyHoursWorked: 1800,
     vacationDays: 0,
-    dailyVacationCost: 0,
     vacationMonthlyWeights: new Array(MONTHS).fill(1 / 12),
     accrualDaysPerMonth: 0,
-    accrualCostPerDay: 0,
     ...SYNC,
     ...overrides,
     id: posId(overrides.id),
@@ -170,6 +170,16 @@ export function standardDefinitions(): CostComponentDefinition[] {
   return [
     makeDef({ id: "def-base", kind: "BASE_SALARY", label: "Base Salary", accountCode: "610000", sortOrder: 0 }),
     makeDef({ id: "def-accrual", kind: "HOLIDAY_ACCRUAL", label: "Holiday Accrual", accountCode: "611000", sortOrder: 1 }),
+    makeDef({
+      id: "def-bankhol",
+      kind: "BANK_HOLIDAY",
+      label: "Bank Holiday Premium",
+      accountCode: "612000",
+      sortOrder: 12,
+      increaseAware: true,
+      bankHolidayStaffFraction: 0.5,
+      bankHolidayPremiumMultiplier: 2,
+    }),
     makeDef({ id: "def-pension", spreadMethod: "PERCENT_OF", label: "Pension", accountCode: "620000", sortOrder: 2 }),
     makeDef({ id: "def-indemnity", spreadMethod: "WEIGHTED_BY_BASE", label: "Indemnity", accountCode: "621000", sortOrder: 3 }),
     makeDef({ id: "def-housing", spreadMethod: "FLAT_PER_ACTIVE_MONTH", label: "Housing", accountCode: "622000", sortOrder: 4 }),
@@ -191,6 +201,42 @@ export function standardDefinitions(): CostComponentDefinition[] {
     makeDef({ id: "def-hc", kind: "STAT", statKind: "HEADCOUNT", label: "Headcount", accountCode: "972000", sortOrder: 9 }),
     makeDef({ id: "def-fte", kind: "STAT", statKind: "FTE", label: "FTE", accountCode: "972540", sortOrder: 10 }),
     makeDef({ id: "def-hours", kind: "STAT", statKind: "HOURS", label: "Hours Worked", accountCode: "971000", sortOrder: 11 }),
+    // Blocks-feature shapes: the FLAT_MONTHLY / VACATION_WEIGHTED methods and
+    // the CALENDAR / VACATION / STAT-line base selectors.
+    makeDef({ id: "def-flatmonthly", spreadMethod: "FLAT_MONTHLY", label: "Uniforms", accountCode: "626000", sortOrder: 13, increaseAware: true }),
+    makeDef({ id: "def-vacweighted", spreadMethod: "VACATION_WEIGHTED", label: "Vacation Bonus", accountCode: "627000", sortOrder: 14 }),
+    makeDef({
+      id: "def-multdays",
+      spreadMethod: "PERCENT_OF",
+      label: "Per Pay-Day Levy",
+      accountCode: "628000",
+      sortOrder: 15,
+      baseSelector: { kind: "CALENDAR", series: "PAY_DAYS" },
+    }),
+    makeDef({
+      id: "def-multrealdays",
+      spreadMethod: "PERCENT_OF",
+      label: "Per Real-Day Levy",
+      accountCode: "628100",
+      sortOrder: 16,
+      baseSelector: { kind: "CALENDAR", series: "REAL_DAYS" },
+    }),
+    makeDef({
+      id: "def-multvac",
+      spreadMethod: "PERCENT_OF",
+      label: "Vacation Levy",
+      accountCode: "628200",
+      sortOrder: 17,
+      baseSelector: { kind: "VACATION" },
+    }),
+    makeDef({
+      id: "def-multhours",
+      spreadMethod: "PERCENT_OF",
+      label: "Hours Levy",
+      accountCode: "628300",
+      sortOrder: 18,
+      baseSelector: { kind: "COMPONENTS", componentIds: [defId("def-hours")] },
+    }),
   ];
 }
 
@@ -224,6 +270,10 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
     );
     if (!seasonality.some((s) => s !== 0)) seasonality[5] = 1; // keep at least one active month
     const weights = Array.from({ length: MONTHS }, () => Math.round(rand() * 100) / 100);
+    // ~30% of positions drive their base from an hourly rate instead of a fixed
+    // monthly amount (the two inputs are mutually exclusive), so the parity /
+    // invariant / emission / disassemble suites cover the BASE_SALARY_HOURLY op.
+    const hourly = rand() < 0.3;
 
     positions.push(
       makePosition({
@@ -235,7 +285,8 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
         headcount: 1 + Math.floor(rand() * 3),
         fte: Math.round(rand() * 200) / 100,
         seasonality,
-        monthlyBaseSalary: Math.round(rand() * 5000 * 100) / 100,
+        monthlyBaseSalary: hourly ? 0 : Math.round(rand() * 5000 * 100) / 100,
+        hourlyRate: hourly ? Math.round(rand() * 50 * 100) / 100 : 0,
         additionalMonthlyCosts: Array.from({ length: MONTHS }, () =>
           rand() < 0.8 ? 0 : Math.round(rand() * 500 * 100) / 100
         ),
@@ -245,10 +296,8 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
         dailyContractHours: 8,
         yearlyHoursWorked: Math.round(rand() * 2000),
         vacationDays: Math.floor(rand() * 30),
-        dailyVacationCost: Math.round(rand() * 200 * 100) / 100,
         vacationMonthlyWeights: weights,
         accrualDaysPerMonth: rand() < 0.4 ? 0 : Math.round(rand() * 3 * 100) / 100,
-        accrualCostPerDay: Math.round(rand() * 200 * 100) / 100,
       })
     );
 
@@ -265,16 +314,27 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
       makeValue(id, "def-overtime", {
         qty: Math.round(rand() * 200),
         unitRate: Math.round(rand() * 40 * 100) / 100,
-      })
+      }),
+      makeValue(id, "def-flatmonthly", { yearlyValue: Math.round(rand() * 400 * 100) / 100 }),
+      makeValue(id, "def-vacweighted", { yearlyValue: Math.round(rand() * 2000 * 100) / 100 }),
+      makeValue(id, "def-multdays", { rate: Math.round(rand() * 30 * 100) / 100 }),
+      makeValue(id, "def-multrealdays", { rate: Math.round(rand() * 30 * 100) / 100 }),
+      makeValue(id, "def-multvac", { rate: Math.round(rand() * 100) / 100 }),
+      makeValue(id, "def-multhours", { rate: Math.round(rand() * 5 * 100) / 100 })
     );
   }
 
   const realDays = Array.from({ length: MONTHS }, () => 18 + Math.floor(rand() * 5));
+  // ~half the months carry 1–2 bank holidays, so the BANK_HOLIDAY op is exercised
+  // with nonzero counts (and hourly vs salaried positions) in the parity suite.
+  const holidayDays = Array.from({ length: MONTHS }, () =>
+    rand() < 0.5 ? 0 : 1 + Math.floor(rand() * 2)
+  );
   return makeInput({
     definitions,
     ssSchemes: [standardScheme()],
     positions,
     componentValues,
-    calendar: makeCalendar(realDays),
+    calendar: makeCalendar(realDays, holidayDays),
   });
 }

@@ -6,6 +6,8 @@
  */
 
 import {
+  AccountOption,
+  DepartmentOption,
   MAPPING_TABLES_CHANNELS,
   MappingSyncResult,
   MappingTablesStatus,
@@ -35,4 +37,30 @@ export async function rebuildMappingTables(): Promise<MappingSyncResult> {
 export async function getMappingTablesStatus(): Promise<MappingTablesStatus> {
   const response = await ipc().sendIpcRequest(MAPPING_TABLES_CHANNELS.status);
   return response.data as MappingTablesStatus;
+}
+
+/**
+ * Department options (code + name) for the positions dropdown, read from the
+ * local cache. Returns [] when the mapping tables have never been synced — the
+ * grid degrades that field to free text rather than blocking.
+ */
+export async function loadDepartments(): Promise<DepartmentOption[]> {
+  const response = await ipc().sendIpcRequest(
+    MAPPING_TABLES_CHANNELS.listDepartments
+  );
+  return (response.data as DepartmentOption[]) ?? [];
+}
+
+/**
+ * Account options (code + description) for the account dropdowns, read from the
+ * local cache. Returns the whole account_maps table — each account field
+ * narrows it to its own subset (A9…, A5…) in the renderer. Returns [] when the
+ * mapping tables have never been synced — the grid degrades account fields to
+ * free text rather than blocking.
+ */
+export async function loadAccounts(): Promise<AccountOption[]> {
+  const response = await ipc().sendIpcRequest(
+    MAPPING_TABLES_CHANNELS.listAccounts
+  );
+  return (response.data as AccountOption[]) ?? [];
 }

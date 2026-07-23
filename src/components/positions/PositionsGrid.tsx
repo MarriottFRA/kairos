@@ -30,13 +30,24 @@ import {
   GridColDef,
   GridInitialState,
   GridRenderCellParams,
+  GridRowId,
   GridRowSelectionModel,
+  MuiEvent,
   useGridApiRef,
 } from "@mui/x-data-grid-premium";
-import { FieldCatalog, SectionId } from "../../shared/positions/fields";
+import {
+  BASIC_SALARY_HOURLY_KEY,
+  BASIC_SALARY_MONTHLY_KEY,
+  FieldCatalog,
+  SectionId,
+} from "../../shared/positions/fields";
+import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { BlockDto } from "../../shared/blocks/ipc";
+import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
 import { buildColumnGroupingModel, buildColumns } from "./columnFactory";
+import { buildBlockColumns, buildBlockGroupingEntries } from "./blockColumns";
 
 export const ROW_HEIGHT = 36;
 /** Two lines: the short name (up to 2 rows) over the muted unit tag. */
@@ -47,6 +58,17 @@ export const GROUP_HEADER_HEIGHT = 34;
 export interface PositionsGridProps {
   rows: PositionRow[];
   catalog: FieldCatalog;
+  /** Options for the Department type-ahead; empty = free-text fallback. */
+  departments: DepartmentOption[];
+  /** Whole account_maps cache for the account type-aheads; empty = free-text
+   *  fallback. Each account field narrows it to its own subset (A9…, A5…). */
+  accounts: AccountOption[];
+  /** Engine-simulated vacation cost per row id — feeds the Vacation Cost column. */
+  vacationCostById: ReadonlyMap<string, number>;
+  /** The hotel's blocks — each renders as a column band after the sections. */
+  blocks: BlockDto[];
+  /** Live-sim results feeding every block's Total column; null while loading. */
+  blockResults: BlockResultsById | null;
   masked: boolean;
   groupByDept: boolean;
   /** False (the default) filters the grid down to budgeted positions. */
@@ -71,6 +93,8 @@ export interface PositionsGridProps {
   onRemoveField: (key: string) => void;
   /** The gear on the banner — opens the "Recently removed" surface. */
   onManageColumns: () => void;
+  /** The cog on a block band — opens the block's config dialog. */
+  onEditBlock: (block: BlockDto) => void;
 }
 
 /** A "Remove column" entry the default column menu renders only for user
@@ -161,6 +185,11 @@ function StatusCell({ status }: { status: RowSaveStatus | undefined }) {
 export default function PositionsGrid({
   rows,
   catalog,
+  departments,
+  accounts,
+  vacationCostById,
+  blocks,
+  blockResults,
   masked,
   groupByDept,
   showInactive,
@@ -179,6 +208,7 @@ export default function PositionsGrid({
   onAddField,
   onRemoveField,
   onManageColumns,
+  onEditBlock,
 }: PositionsGridProps) {
   const numberFormat = useMemo(() => new Intl.NumberFormat(), []);
 
@@ -271,16 +301,23 @@ export default function PositionsGrid({
 
     // The gutter's members lead the array too, so unpinning keeps them together.
     const [controlColumns, dataColumns] = partition(
-      buildColumns(catalog, { masked, numberFormat }),
+      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById }),
       (column) => controlKeys.has(column.field)
     );
 
-    return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns];
-  }, [catalog, controlKeys, masked, numberFormat, statusByRow, onDuplicate, onDelete]);
+    // Block bands trail the catalog sections — user-defined calculations after
+    // the built-in data, in the user's own order.
+    const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
+
+    return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
+  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, blocks, blockResults, statusByRow, onDuplicate, onDelete]);
 
   const columnGroupingModel = useMemo(
-    () => buildColumnGroupingModel(catalog, onAddField, onManageColumns),
-    [catalog, onAddField, onManageColumns]
+    () => [
+      ...buildColumnGroupingModel(catalog, onAddField, onManageColumns),
+      ...buildBlockGroupingEntries(blocks, onEditBlock),
+    ],
+    [catalog, onAddField, onManageColumns, blocks, onEditBlock]
   );
 
   // Masked PII cells are read-only: blind edits and blind pastes into hidden
@@ -288,9 +325,72 @@ export default function PositionsGrid({
   const isCellEditable = useCallback(
     (params: GridCellParams) => {
       if (masked && maskableKeys.has(params.field)) return false;
+      // Basic salary: Pay Basis decides which base input is live, so a row only
+      // ever drives its base from one field. HOURLY locks Monthly Basic; SALARIED
+      // locks Hourly Rate. Flip the Pay Basis toggle to switch which is editable.
+      const isHourly = params.row?.payType === "HOURLY";
+      if (params.field === BASIC_SALARY_MONTHLY_KEY && isHourly) return false;
+      if (params.field === BASIC_SALARY_HOURLY_KEY && !isHourly) return false;
       return params.colDef.editable !== false;
     },
     [masked, maskableKeys]
+  );
+
+  // The read-only Department (code) cell is a mirror of the Dept Name pick, so
+  // trying to edit it hands you the picker where the choice actually happens:
+  // code field -> its `departments` picker field (deptName).
+  const editRedirect = useMemo(() => {
+    const map = new Map<string, string>();
+    // Only when the picker exists — with no reference data both fields are plain
+    // text, so there is nowhere better to send the edit.
+    if (departments.length === 0) return map;
+    for (const def of catalog.fields) {
+      const source = def.dropdownSource;
+      if (source?.kind === "departments" && source.codeField) {
+        map.set(source.codeField, def.key);
+      }
+    }
+    return map;
+  }, [catalog, departments]);
+
+  const openPicker = useCallback(
+    (id: GridRowId, field: string) => {
+      // Defer a frame so the redirect runs after the grid finishes its own
+      // click/key handling for the source cell.
+      requestAnimationFrame(() => {
+        try {
+          apiRef.current?.startCellEditMode({ id, field });
+          apiRef.current?.setCellFocus(id, field);
+        } catch {
+          /* focus is best-effort */
+        }
+      });
+    },
+    [apiRef]
+  );
+
+  const handleCellDoubleClick = useCallback(
+    (params: GridCellParams) => {
+      const target = editRedirect.get(params.field);
+      if (target) openPicker(params.id, target);
+    },
+    [editRedirect, openPicker]
+  );
+
+  const handleCellKeyDown = useCallback(
+    (params: GridCellParams, event: MuiEvent<React.KeyboardEvent>) => {
+      const target = editRedirect.get(params.field);
+      if (!target) return;
+      // Leave shortcuts (Ctrl/⌘+C to copy the code, etc.) to the grid.
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      // Enter or the first printable key on the code cell jumps into the picker,
+      // matching how the grid's own type-to-edit works on editable cells.
+      if (event.key === "Enter" || event.key.length === 1) {
+        event.defaultMuiPrevented = true;
+        openPicker(params.id, target);
+      }
+    },
+    [editRedirect, openPicker]
   );
 
   // v9 reports selection as {type, ids}: an "exclude" model means everything
@@ -359,6 +459,8 @@ export default function PositionsGrid({
       columnHeaderHeight={HEADER_HEIGHT}
       columnGroupHeaderHeight={GROUP_HEADER_HEIGHT}
       isCellEditable={isCellEditable}
+      onCellDoubleClick={handleCellDoubleClick}
+      onCellKeyDown={handleCellKeyDown}
       processRowUpdate={onRowUpdate}
       onProcessRowUpdateError={onRowUpdateError}
       onClipboardPasteStart={onPasteStart}
@@ -461,6 +563,14 @@ export default function PositionsGrid({
         },
         "& .pos-col--vacation": {
           bgcolor: (theme) => alpha(theme.palette.success.main, 0.06),
+        },
+        // Blocks get their own hue outside the section palette (violet), so
+        // user-defined calculation bands read as such at a glance.
+        "& .pos-band--blocks": {
+          bgcolor: alpha("#7e57c2", 0.24),
+        },
+        "& .pos-col--blocks": {
+          bgcolor: alpha("#7e57c2", 0.07),
         },
         // Editable cells read as inputs (same affordance as the calendar grid).
         "& .MuiDataGrid-cell--editable": {

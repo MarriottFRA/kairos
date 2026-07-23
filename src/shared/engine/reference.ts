@@ -2,10 +2,16 @@
  * Naive reference implementation of the spread math — the executable spec.
  * -----------------------------------------------------------
  * Deliberately written with plain objects, plain loops and no shared state,
- * mirroring the legacy VBA section by section. It is NOT used at runtime:
- * tests assert that the compiled VM produces bit-identical results to this
- * file on both hand-written and randomized inputs, which keeps the VM's
- * offset arithmetic honest and doubles as living documentation of the math.
+ * mirroring the legacy VBA section by section. The full spread is exercised
+ * only by tests: they assert the compiled VM produces bit-identical results to
+ * this file on hand-written and randomized inputs, keeping the VM's offset
+ * arithmetic honest and doubling as living documentation of the math.
+ *
+ * The one runtime consumer is `referenceVacation` below — the Positions grid's
+ * simulated Vacation Cost column reads it to value a position's leave without
+ * running the whole component graph. It is the SAME valuation the budget run
+ * applies (the VM deducts this vacation into the base line), kept honest by the
+ * same parity tests, so the grid and the budget can never disagree.
  *
  * If a semantic question ever comes up, THIS file is the answer; the VM is
  * merely a fast encoding of it.
@@ -37,6 +43,9 @@ interface DerivedTotals {
   incMonth: number;
   incMul: number[];
   manualMonthly: number;
+  /** Per-working-day base pay, pre-increase — what one vacation/accrual day is
+   *  worth. Monthly: base·twm/twd; hourly: rate·contractHours (the coeff). */
+  dayRate: number;
 }
 
 function derive(position: Position, calendar: CalendarContext, days: number[]): DerivedTotals {
@@ -65,19 +74,45 @@ function derive(position: Position, calendar: CalendarContext, days: number[]): 
   const manualMonthly =
     activeFromIncrease === 0 ? 0 : position.manualYearlyIncrease / activeFromIncrease;
 
-  return { twm, twd, twd2, incMonth, incMul, manualMonthly };
+  // Per-working-day base pay a vacation/accrual day is valued at. Hourly staff
+  // use the raw per-day coeff; monthly staff use the seasonally-normalized rate
+  // twd = 0 only when the position never works (then no vacation is emitted).
+  const dayRate =
+    position.hourlyRate > 0
+      ? position.hourlyRate * position.dailyContractHours
+      : twd > 0
+        ? (position.monthlyBaseSalary * twm) / twd
+        : 0;
+
+  return { twm, twd, twd2, incMonth, incMul, manualMonthly, dayRate };
 }
 
-function grossBaseSalary(position: Position, days: number[], d: DerivedTotals): number[] {
+function grossBaseSalary(
+  position: Position,
+  calendar: CalendarContext,
+  days: number[],
+  d: DerivedTotals
+): number[] {
   const seas = position.seasonality;
+  // Two derivation modes (mutually exclusive inputs). Hourly: the base is
+  // rate × contract hours × the month's net productive days — an actual
+  // hours-worked figure, so it spreads over realDays and skips the twm/twd
+  // day-normalization the monthly path uses. Vacation is netted downstream
+  // (BASE_DEDUCT) in both modes, unchanged.
+  const hourly = position.hourlyRate > 0;
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
     if (seas[m] === 0) {
       out.push(0);
       continue;
     }
-    const daySpread =
-      (position.monthlyBaseSalary * d.twm / d.twd) * days[m] * seas[m] * d.incMul[m];
+    const daySpread = hourly
+      ? position.hourlyRate *
+        position.dailyContractHours *
+        calendar.realDays[m] *
+        seas[m] *
+        d.incMul[m]
+      : (position.monthlyBaseSalary * d.twm / d.twd) * days[m] * seas[m] * d.incMul[m];
     const manual = m >= d.incMonth ? d.manualMonthly * seas[m] : 0;
     out.push(daySpread + manual + position.additionalMonthlyCosts[m] * seas[m]);
   }
@@ -86,21 +121,29 @@ function grossBaseSalary(position: Position, days: number[], d: DerivedTotals): 
 
 function vacationCost(position: Position, d: DerivedTotals): number[] {
   const seas = position.seasonality;
-  // Seasonality already shrinks the year, so the daily rate is normalized back
-  // to a full-year footing before the weights apply (VBA Section 2).
-  const adjustedDailyPay =
-    d.twm > 0 ? (position.dailyVacationCost / d.twm) * 12 : position.dailyVacationCost;
+  const weights = position.vacationMonthlyWeights;
+  // The weights are treated as relative proportions: they are normalized by their
+  // own total so the year's leave always sums to `vacationDays`, whatever the raw
+  // weights add up to (the grid reddens a total ≠ 1 but the math self-corrects).
+  // Total 1 divides exactly, so a tidy sum-to-1 set is unchanged. Total 0 means no
+  // weighted month, so no vacation is placed.
+  let weightTotal = 0;
+  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
+  // A vacation day costs one working day of base pay (d.dayRate), weighted into
+  // months by the vacation weights and priced with the merit factor of the month
+  // it falls in — so leave weighted after the increase is dearer than before it.
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
-    if (seas[m] === 0) {
+    if (seas[m] === 0 || weightTotal === 0) {
       out.push(0);
       continue;
     }
     out.push(
       position.vacationDays *
-        position.vacationMonthlyWeights[m] *
+        weights[m] /
+        weightTotal *
         seas[m] *
-        adjustedDailyPay *
+        d.dayRate *
         d.incMul[m]
     );
   }
@@ -117,10 +160,40 @@ function holidayAccrual(position: Position, d: DerivedTotals, vacation: number[]
     }
     out.push(
       position.accrualDaysPerMonth *
-        position.accrualCostPerDay *
+        d.dayRate *
         seas[m] *
         d.incMul[m] -
         vacation[m]
+    );
+  }
+  return out;
+}
+
+function bankHoliday(
+  position: Position,
+  calendar: CalendarContext,
+  d: DerivedTotals,
+  combinedMult: number,
+  increaseAware: boolean
+): number[] {
+  const seas = position.seasonality;
+  // A worked public holiday costs one working day of base pay (d.dayRate), scaled
+  // by how many staff work it × the premium rate (combinedMult), for each holiday
+  // in the month. Hourly-wage staff only — for everyone else combinedMult is 0
+  // (their base already pays the day), so the line is zero. Priced with the merit
+  // factor of the month it falls in when the component is increase-aware.
+  const out: number[] = [];
+  for (let m = 0; m < MONTHS; m++) {
+    if (combinedMult === 0 || seas[m] === 0) {
+      out.push(0);
+      continue;
+    }
+    out.push(
+      combinedMult *
+        d.dayRate *
+        calendar.holidayDays[m] *
+        seas[m] *
+        (increaseAware ? d.incMul[m] : 1)
     );
   }
   return out;
@@ -157,9 +230,14 @@ function socialSecurity(scheme: SocialSecurityScheme, base: number[]): number[] 
 
 function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTotals): number[] {
   const seas = position.seasonality;
+  const weights = position.vacationMonthlyWeights;
   const vacationHours = position.vacationDays * position.dailyContractHours;
   // Vacation hours are added back to the yearly total, spread by days, then
-  // taken out again following the vacation weights (VBA Section 22).
+  // taken out again following the vacation weights (VBA Section 22). The weights
+  // are normalized by their total (as in vacationCost), so drifted weights remove
+  // exactly the added-back hours; total 0 removes none.
+  let weightTotal = 0;
+  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
   const totalHours = position.yearlyHoursWorked + vacationHours;
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
@@ -168,10 +246,27 @@ function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTo
       continue;
     }
     const spread = (totalHours / d.twd2) * calendar.realDays[m] * seas[m];
-    const vacOut = vacationHours * position.vacationMonthlyWeights[m] * seas[m];
+    const vacOut =
+      weightTotal === 0 ? 0 : vacationHours * weights[m] / weightTotal * seas[m];
     out.push(spread - vacOut);
   }
   return out;
+}
+
+/**
+ * Per-position vacation cost, month by month — the grid's simulated Vacation
+ * Cost column. Needs only the position and the calendar (day basis + net days),
+ * not the component graph, so it is far cheaper than a full referencePosition().
+ * Identical to the vacation the budget run deducts from the base line.
+ */
+export function referenceVacation(
+  position: Position,
+  calendar: CalendarContext
+): number[] {
+  const days = Array.from(
+    position.payType === "HOURLY" ? calendar.realDays : calendar.flatDays
+  );
+  return vacationCost(position, derive(position, calendar, days));
 }
 
 /**
@@ -192,7 +287,7 @@ export function referencePosition(
   );
   const d = derive(position, calendar, days);
 
-  const gross = grossBaseSalary(position, days, d);
+  const gross = grossBaseSalary(position, calendar, days, d);
   const vacation = vacationCost(position, d);
 
   const valueByDef = new Map<string, ComponentValue>();
@@ -208,6 +303,20 @@ export function referencePosition(
     const base = new Array(MONTHS).fill(0);
     if (!selector || selector.kind === "BASE_SALARY") {
       for (let m = 0; m < MONTHS; m++) base[m] = gross[m];
+      return base;
+    }
+    if (selector.kind === "CALENDAR") {
+      // Day-count base: PAY_DAYS is the position's own pay-type basis (the
+      // `days` array), REAL_DAYS always the productive-days calendar. Both ×
+      // seasonality, so inactive months contribute nothing.
+      const series = selector.series === "REAL_DAYS" ? calendar.realDays : days;
+      for (let m = 0; m < MONTHS; m++) base[m] = series[m] * seas[m];
+      return base;
+    }
+    if (selector.kind === "VACATION") {
+      // The vacation-cost series — the same values BASE_DEDUCT nets out of
+      // the salary line (seasonality and merit increase already applied).
+      for (let m = 0; m < MONTHS; m++) base[m] = vacation[m];
       return base;
     }
     for (const id of selector.componentIds) {
@@ -231,6 +340,17 @@ export function referencePosition(
       }
       case "HOLIDAY_ACCRUAL": {
         out = holidayAccrual(position, d, vacation);
+        break;
+      }
+      case "BANK_HOLIDAY": {
+        // Hourly-wage staff only (hourlyRate > 0): their base literally excludes
+        // the holiday day, so working it is fully additional. For everyone else
+        // the multiplier collapses to 0 and the line is zero.
+        const combinedMult =
+          position.hourlyRate > 0
+            ? (def.bankHolidayStaffFraction ?? 0) * (def.bankHolidayPremiumMultiplier ?? 0)
+            : 0;
+        out = bankHoliday(position, calendar, d, combinedMult, def.increaseAware);
         break;
       }
       case "SOCIAL_SECURITY": {
@@ -303,6 +423,40 @@ export function referencePosition(
             }
             break;
           }
+          case "FLAT_MONTHLY": {
+            // A single per-month amount (carried in the yearlyValue slot)
+            // booked each active month — total = amount × totalWorkingMonths.
+            const amount = value?.yearlyValue ?? 0;
+            for (let m = 0; m < MONTHS; m++) {
+              out[m] = amount * seas[m] * (applyIncrease ? d.incMul[m] : 1);
+            }
+            break;
+          }
+          case "VACATION_WEIGHTED": {
+            // Yearly value distributed by the position's vacation weights,
+            // normalized by their own total exactly like vacationCost — so a
+            // drifted weight set still books exactly the yearly value.
+            const yearly = value?.yearlyValue ?? 0;
+            const weights = position.vacationMonthlyWeights;
+            let weightTotal = 0;
+            for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
+            if (yearly !== 0 && weightTotal !== 0) {
+              for (let m = 0; m < MONTHS; m++) {
+                out[m] =
+                  yearly * weights[m] / weightTotal * seas[m] *
+                  (applyIncrease ? d.incMul[m] : 1);
+              }
+            }
+            break;
+          }
+          case "DIRECT_ABS": {
+            // Absolute pass-through — no seasonality, no increase. The KPI
+            // series (× per-position multiplier) is already resolved to
+            // per-month figures at load time.
+            const monthly = value?.monthlyValues ?? new Array(MONTHS).fill(0);
+            for (let m = 0; m < MONTHS; m++) out[m] = monthly[m];
+            break;
+          }
           default:
             throw new Error(`reference: unsupported spread method ${def.spreadMethod}`);
         }
@@ -317,6 +471,21 @@ export function referencePosition(
   };
 
   for (const def of definitions) computeLine(def);
+
+  // Count multiplier — mirror of execute.ts. The row represents `headcount`
+  // identical positions: compute every line as a single unit first (so the
+  // social-security caps apply per person), then book it C times over. The
+  // HEADCOUNT stat already carries the count, so it stays as-is.
+  const count = position.headcount;
+  if (count !== 1) {
+    for (const def of definitions) {
+      if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
+      // KPI-driven lines are absolute (whole-line amount), not per-head.
+      if (def.spreadMethod === "DIRECT_ABS") continue;
+      const series = lines.get(def.id);
+      if (series) for (let m = 0; m < MONTHS; m++) series[m] *= count;
+    }
+  }
 
   return { lines, grossBase: gross, vacation };
 }

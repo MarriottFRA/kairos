@@ -13,6 +13,9 @@ import {
 } from "./shared/positionDefaults";
 import { POSITIONS_STRUCTURE_TABLES_SQL } from "./main/positions/schema";
 import { MAPPING_TABLES_SQL } from "./main/mappingTables/schema";
+import { BUDGET_IMPORT_SQL } from "./main/budgetImport/schema";
+import { KPI_DRIVERS_SQL } from "./main/kpiDrivers/schema";
+import { applyBlocksStructureV12 } from "./main/blocks/schema";
 import {
   LOCAL_DB_PATH,
   ensureDataDir,
@@ -52,12 +55,24 @@ db.pragma("foreign_keys = ON");
 //       (hotel OU, year)
 //   5 - mapping reference tables (account_maps, department_maps,
 //       account_department_combos) + mapping_tables_meta, cached from the backend
+//   6 - bank-holiday premium config columns on calendar_years
+//   7 - budget import tables (budget_imports, budget_values), pulled from a
+//       hotel's Excel BGT Spread File
+//   8 - budget_imports.imported_by (who committed the pull), for DBs that built
+//       v7 before the column was part of the create
+//   9 - KPI drivers (kpi_drivers + dept-pattern/account child tables +
+//       kpi_driver_values precalc cache), aggregated from budget_values
+//  10 - cost_component_definitions.kpi_driver_id (marks a SPREAD block as
+//       KPI-driven, resolved to DIRECT_ABS at engine load)
+//  11 - kpi_drivers.description (optional free-text note, searchable in the UI)
+//  12 - blocks feature: block_configs (user-facing block configurations) +
+//       cost_component_definitions.block_id / base_ref columns
 //
 // Versions <= 2 predate the migration runner and are created wholesale by the
 // baseline exec in initializeDatabase() (idempotent IF NOT EXISTS). Later
 // versions are stepwise entries in MIGRATIONS, each run in its own transaction
 // and stamped as it lands.
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 12;
 
 type LocalDb = InstanceType<typeof Database>;
 
@@ -85,6 +100,73 @@ const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
   },
   5: (handle) => {
     handle.exec(MAPPING_TABLES_SQL);
+  },
+  // Bank-holiday premium config, one set per hotel-year, stored on the calendar
+  // head. Off by default with sensible starting knobs the home page reveals when
+  // it is switched on; an empty account keeps the feature effectively inert.
+  6: (handle) => {
+    handle.exec(`
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_enabled INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_staff_fraction REAL NOT NULL DEFAULT 0.5;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_premium_multiplier REAL NOT NULL DEFAULT 2;
+      ALTER TABLE calendar_years ADD COLUMN bank_holiday_account TEXT NOT NULL DEFAULT '';
+    `);
+  },
+  // Budget data pulled from a hotel's Excel BGT Spread File (plaintext, per OU).
+  7: (handle) => {
+    handle.exec(BUDGET_IMPORT_SQL);
+  },
+  // Add budget_imports.imported_by for DBs that created v7 before the column
+  // existed. ADD COLUMN isn't IF NOT EXISTS, so guard on the current columns —
+  // a fresh v7 already has it (from the create) and this becomes a no-op.
+  8: (handle) => {
+    const hasColumn = (
+      handle.prepare("PRAGMA table_info(budget_imports)").all() as Array<{
+        name: string;
+      }>
+    ).some((col) => col.name === "imported_by");
+    if (!hasColumn) {
+      handle.exec("ALTER TABLE budget_imports ADD COLUMN imported_by TEXT");
+    }
+  },
+  // KPI drivers: user-defined + precalc cache, aggregated from budget_values.
+  9: (handle) => {
+    handle.exec(KPI_DRIVERS_SQL);
+  },
+  // Mark a SPREAD component as KPI-driven. ADD COLUMN isn't IF NOT EXISTS, so
+  // guard on the current columns — a fresh v3 (created after the column was
+  // added to the baseline) already has it and this becomes a no-op.
+  10: (handle) => {
+    const hasColumn = (
+      handle
+        .prepare("PRAGMA table_info(cost_component_definitions)")
+        .all() as Array<{ name: string }>
+    ).some((col) => col.name === "kpi_driver_id");
+    if (!hasColumn) {
+      handle.exec(
+        "ALTER TABLE cost_component_definitions ADD COLUMN kpi_driver_id TEXT"
+      );
+    }
+  },
+  // Optional free-text description on a KPI driver. ADD COLUMN isn't IF NOT
+  // EXISTS, so guard on the current columns — a fresh v9 (created after the
+  // column was added to KPI_DRIVERS_SQL) already has it and this is a no-op.
+  11: (handle) => {
+    const hasColumn = (
+      handle.prepare("PRAGMA table_info(kpi_drivers)").all() as Array<{
+        name: string;
+      }>
+    ).some((col) => col.name === "description");
+    if (!hasColumn) {
+      handle.exec(
+        "ALTER TABLE kpi_drivers ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+      );
+    }
+  },
+  // Blocks: user-facing block configurations that compile into cost-component
+  // definitions (block_id back-ref + base_ref JSON for extended base kinds).
+  12: (handle) => {
+    applyBlocksStructureV12(handle);
   },
 };
 
@@ -404,8 +486,22 @@ export async function getCalendarYear(
   year: number
 ): Promise<CalendarYear | null> {
   const head = db
-    .prepare("SELECT weekend_mask, updated_at FROM calendar_years WHERE ou = ? AND year = ?")
-    .get(ou, year) as { weekend_mask: number; updated_at: string } | undefined;
+    .prepare(
+      `SELECT weekend_mask, updated_at,
+              bank_holiday_enabled, bank_holiday_staff_fraction,
+              bank_holiday_premium_multiplier, bank_holiday_account
+         FROM calendar_years WHERE ou = ? AND year = ?`
+    )
+    .get(ou, year) as
+    | {
+        weekend_mask: number;
+        updated_at: string;
+        bank_holiday_enabled: number;
+        bank_holiday_staff_fraction: number;
+        bank_holiday_premium_multiplier: number;
+        bank_holiday_account: string;
+      }
+    | undefined;
 
   if (!head) return null;
 
@@ -432,7 +528,13 @@ export async function getCalendarYear(
       calendarDays: row.calendar_days,
       publicHolidays: row.public_holidays,
       weekendDays: row.weekend_days,
-    }))
+    })),
+    {
+      bankHolidayEnabled: !!head.bank_holiday_enabled,
+      bankHolidayStaffFraction: head.bank_holiday_staff_fraction,
+      bankHolidayPremiumMultiplier: head.bank_holiday_premium_multiplier,
+      bankHolidayAccount: head.bank_holiday_account,
+    }
   );
 
   return { ...calendar, updatedAt: head.updated_at ?? null };
@@ -445,15 +547,23 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
     ou,
     year,
     calendar.weekendMask ?? DEFAULT_WEEKEND_MASK,
-    calendar.months ?? []
+    calendar.months ?? [],
+    calendar
   );
 
   const upsertHead = db.prepare(`
-    INSERT INTO calendar_years (ou, year, weekend_mask, updated_at)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO calendar_years
+      (ou, year, weekend_mask, updated_at,
+       bank_holiday_enabled, bank_holiday_staff_fraction,
+       bank_holiday_premium_multiplier, bank_holiday_account)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
     ON CONFLICT(ou, year) DO UPDATE SET
       weekend_mask = excluded.weekend_mask,
-      updated_at = CURRENT_TIMESTAMP
+      updated_at = CURRENT_TIMESTAMP,
+      bank_holiday_enabled = excluded.bank_holiday_enabled,
+      bank_holiday_staff_fraction = excluded.bank_holiday_staff_fraction,
+      bank_holiday_premium_multiplier = excluded.bank_holiday_premium_multiplier,
+      bank_holiday_account = excluded.bank_holiday_account
   `);
   const upsertMonth = db.prepare(`
     INSERT INTO calendar_months
@@ -467,7 +577,15 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
 
   try {
     db.transaction(() => {
-      upsertHead.run(ou, year, normalized.weekendMask);
+      upsertHead.run(
+        ou,
+        year,
+        normalized.weekendMask,
+        normalized.bankHolidayEnabled ? 1 : 0,
+        normalized.bankHolidayStaffFraction,
+        normalized.bankHolidayPremiumMultiplier,
+        normalized.bankHolidayAccount
+      );
       for (const row of normalized.months) {
         upsertMonth.run(
           ou,

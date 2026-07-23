@@ -39,6 +39,11 @@ export const POSITIONS_STRUCTURE_TABLES_SQL = `
       base_selector_kind TEXT
         CHECK (base_selector_kind IN ('BASE_SALARY','COMPONENTS')),
       ss_scheme_id TEXT,
+      -- When set, this SPREAD def is KPI-driven: spread_method is 'DIRECT_ABS'
+      -- and the engine loader folds the KPI's precalculated series (× the
+      -- per-position multiplier in component_values.rate) into absolute monthly
+      -- values before compile. See src/main/kpiDrivers.
+      kpi_driver_id TEXT,
       updated_at TEXT NOT NULL,
       deleted_at TEXT
   );
@@ -132,6 +137,9 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       fte                      REAL NOT NULL DEFAULT 1,
       seasonality              TEXT NOT NULL DEFAULT '[1,1,1,1,1,1,1,1,1,1,1,1]',
       monthly_base_salary      REAL NOT NULL DEFAULT 0,
+      -- Alternate, mutually-exclusive basic-salary input: when > 0 the engine
+      -- derives the base from rate × hours worked (see engine reference.ts).
+      hourly_rate              REAL NOT NULL DEFAULT 0,
       additional_monthly_costs TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
       merit_increase_pct       REAL NOT NULL DEFAULT 0,
       manual_yearly_increase   REAL NOT NULL DEFAULT 0,
@@ -139,10 +147,8 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       daily_contract_hours     REAL NOT NULL DEFAULT 0,
       yearly_hours_worked      REAL NOT NULL DEFAULT 0,
       vacation_days            REAL NOT NULL DEFAULT 0,
-      daily_vacation_cost      REAL NOT NULL DEFAULT 0,
       vacation_monthly_weights TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
       accrual_days_per_month   REAL NOT NULL DEFAULT 0,
-      accrual_cost_per_day     REAL NOT NULL DEFAULT 0,
       extra_values             TEXT NOT NULL DEFAULT '{}',
       updated_at               TEXT NOT NULL,
       deleted_at               TEXT
@@ -181,6 +187,10 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       monthly_values   TEXT,
       qty              REAL,
       unit_rate        REAL,
+      -- Per-row account overrides for "unlocked" blocks (NULL = the block's
+      -- default account). stats_account_code is the dual-block count line's.
+      account_code       TEXT,
+      stats_account_code TEXT,
       updated_at       TEXT NOT NULL,
       deleted_at       TEXT,
       PRIMARY KEY (position_id, component_def_id)
@@ -200,6 +210,41 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       deleted_at      TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_buyout_scope ON buyout_rows (ou, scenario_id);
+`;
+
+/**
+ * Persisted engine output (encrypted store, secure v10). One run per
+ * (ou, scenario) — Recalculate clears and rewrites both tables in a single
+ * transaction (the budget-import / KPI-cache overwrite idiom). Lines are the
+ * per-(position, component) grain from SimulationResult.positionLines();
+ * blank-account lines (calculation-only blocks) are never written. The
+ * fingerprint captures every input source so staleness is a cheap compare.
+ */
+export const ENGINE_OUTPUTS_SQL = `
+  CREATE TABLE IF NOT EXISTS engine_runs (
+      ou             TEXT NOT NULL,
+      scenario_id    TEXT NOT NULL,
+      fingerprint    TEXT NOT NULL,
+      computed_at    TEXT NOT NULL,
+      line_count     INTEGER NOT NULL DEFAULT 0,
+      position_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (ou, scenario_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS engine_output_lines (
+      ou               TEXT NOT NULL,
+      scenario_id      TEXT NOT NULL,
+      position_id      TEXT NOT NULL,
+      component_def_id TEXT NOT NULL,
+      label            TEXT NOT NULL DEFAULT '',
+      dept             TEXT NOT NULL DEFAULT '',
+      account          TEXT NOT NULL DEFAULT '',
+      monthly_values   TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
+      total            REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (ou, scenario_id, position_id, component_def_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_engine_output_scope
+    ON engine_output_lines (ou, scenario_id);
 `;
 
 /**
@@ -235,4 +280,79 @@ export function applyValueStoreV3(
   handle.exec(
     `CREATE INDEX IF NOT EXISTS idx_positions_lineage ON positions (ou, lineage_id)`
   );
+}
+
+/**
+ * Add the Hourly Rate alternate basic-salary input column (seed v10).
+ *
+ * Ships as its own migration rather than an addition to applyValueStoreV3:
+ * files that already ran v3 (lineage/active) would never re-run it, so folding
+ * the column in there left existing stores without it. New installs get the
+ * column straight from POSITIONS_VALUE_TABLES_SQL; this backfills the rest.
+ * Idempotent — ALTER TABLE ADD COLUMN is not `IF NOT EXISTS`, so guard on the
+ * column check.
+ */
+export function applyValueStoreV4(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("hourly_rate")) {
+    handle.exec(
+      `ALTER TABLE positions ADD COLUMN hourly_rate REAL NOT NULL DEFAULT 0`
+    );
+  }
+}
+
+/**
+ * Drop the daily_vacation_cost / accrual_cost_per_day inputs (seed v11).
+ *
+ * A vacation or accrual day is now valued by the engine at the position's
+ * derived per-working-day base pay (see engine reference.ts), so these stored
+ * rates are gone. New installs never get the columns (removed from the DDL);
+ * this drops them from upgraded stores. Idempotent — guard on the column check,
+ * as DROP COLUMN throws when the column is already absent.
+ */
+export function applyValueStoreV5(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (present.has("daily_vacation_cost")) {
+    handle.exec(`ALTER TABLE positions DROP COLUMN daily_vacation_cost`);
+  }
+  if (present.has("accrual_cost_per_day")) {
+    handle.exec(`ALTER TABLE positions DROP COLUMN accrual_cost_per_day`);
+  }
+}
+
+/**
+ * Per-row account overrides on component_values (blocks feature, secure v9).
+ * NULL = the block's configured default; a value = this row's own account
+ * ("unlocked" blocks). Fresh installs get both columns from the DDL above;
+ * this backfills upgraded stores. Idempotent — guard on the column check.
+ */
+export function applyValueStoreV9(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(component_values)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("account_code")) {
+    handle.exec(`ALTER TABLE component_values ADD COLUMN account_code TEXT`);
+  }
+  if (!present.has("stats_account_code")) {
+    handle.exec(`ALTER TABLE component_values ADD COLUMN stats_account_code TEXT`);
+  }
 }

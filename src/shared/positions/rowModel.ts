@@ -17,7 +17,17 @@
  */
 
 import { uuidv7 } from "../engine/ids";
+import { referenceVacation } from "../engine/reference";
 import {
+  CalendarContext,
+  PayType,
+  Position,
+  PositionId,
+  ScenarioId,
+} from "../engine/types";
+import {
+  BASIC_SALARY_HOURLY_KEY,
+  BASIC_SALARY_MONTHLY_KEY,
   ENGINE_SCALAR_COLUMNS,
   FieldCatalog,
   FieldDef,
@@ -198,6 +208,16 @@ export function sanitizeRow(
     out.payType = "SALARIED";
   }
 
+  // Pay Basis is authoritative over which base input is live. SALARIED keeps
+  // Monthly Basic and zeros Hourly Rate; HOURLY the reverse — so toggling the
+  // basis unlocks one field and clears the other, and only one is ever stored.
+  // The engine keys off hourlyRate>0, which this keeps consistent with the basis.
+  if (out.payType === "HOURLY") {
+    out[BASIC_SALARY_MONTHLY_KEY] = 0;
+  } else {
+    out[BASIC_SALARY_HOURLY_KEY] = 0;
+  }
+
   return out;
 }
 
@@ -240,6 +260,75 @@ export function toCreate(row: PositionRow, catalog: FieldCatalog): PositionCreat
 }
 
 // ---------------------------------------------------------------------------
+// Engine bridge — feed live grid rows through the real spread math
+// ---------------------------------------------------------------------------
+
+/** Accruals are generated only for a position with an accrual account set —
+ *  its presence is the on/off switch (the account also routes the booking). */
+function accrualEnabled(row: PositionRow): boolean {
+  return typeof row.accrualAccount === "string" && row.accrualAccount.trim() !== "";
+}
+
+/**
+ * Map a flat grid row to the engine's Position shape. Only the budgetable
+ * fields carry through; identity/sync fields the engine ignores are stubbed.
+ * Used to run the same vacation valuation the budget applies against rows the
+ * user is still editing, without a round-trip to the store.
+ */
+export function rowToEnginePosition(row: PositionRow, scenarioId: string): Position {
+  return {
+    id: row.id as PositionId,
+    scenarioId: scenarioId as ScenarioId,
+    departmentCode: typeof row.departmentCode === "string" ? row.departmentCode : "",
+    jobTypeCode: typeof row.jobTypeCode === "string" ? row.jobTypeCode : "",
+    cluster: typeof row.cluster === "string" ? row.cluster : "",
+    payType: (row.payType === "HOURLY" ? "HOURLY" : "SALARIED") as PayType,
+    headcount: toNumber(row.headcount, 0),
+    fte: toNumber(row.fte, 0),
+    seasonality: rowVector(row, "seasonality"),
+    monthlyBaseSalary: toNumber(row.monthlyBaseSalary, 0),
+    hourlyRate: toNumber(row.hourlyRate, 0),
+    additionalMonthlyCosts: rowVector(row, "additionalMonthlyCosts"),
+    meritIncreasePct: toNumber(row.meritIncreasePct, 0),
+    manualYearlyIncrease: toNumber(row.manualYearlyIncrease, 0),
+    increaseMonth: toNumber(row.increaseMonth, 13),
+    dailyContractHours: toNumber(row.dailyContractHours, 0),
+    yearlyHoursWorked: toNumber(row.yearlyHoursWorked, 0),
+    vacationDays: toNumber(row.vacationDays, 0),
+    vacationMonthlyWeights: rowVector(row, "vacationMonthlyWeights"),
+    // Accrual is auto-calculated (Yearly Days ÷ 12) and only generated when the
+    // position has an accrual account; with none, feed 0 so the engine's
+    // accrualDays===0 guard suppresses the line. Mirror in loadScenarioInput.
+    accrualDaysPerMonth: accrualEnabled(row) ? toNumber(row.vacationDays, 0) / 12 : 0,
+    updatedAt: "",
+    deletedAt: null,
+  };
+}
+
+/**
+ * Full-year simulated vacation cost per row id, using the engine's own
+ * valuation (reference.ts, mirrored bit-for-bit by the VM the budget runs).
+ * Recompute whenever rows or the calendar change; the grid's Vacation Cost
+ * column reads straight from this map. `null` calendar (still loading) yields an
+ * empty map, so the column shows blank until the day basis is known.
+ */
+export function vacationCostById(
+  rows: PositionRow[],
+  calendar: CalendarContext | null,
+  scenarioId: string
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!calendar) return out;
+  for (const row of rows) {
+    const months = referenceVacation(rowToEnginePosition(row, scenarioId), calendar);
+    let total = 0;
+    for (const value of months) total += value;
+    out.set(row.id, total);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Computed columns
 // ---------------------------------------------------------------------------
 
@@ -253,16 +342,45 @@ function sumVector(row: PositionRow, vector: VectorName): number {
   return total;
 }
 
+/** Hours paid across the year: paid days (yearly days − days off) × daily hours. */
+function yearlyManhoursPaidOf(row: PositionRow): number {
+  return (
+    (toNumber(row.contractYearlyDays, 0) - toNumber(row.contractDaysOff, 0)) *
+    toNumber(row.dailyContractHours, 0)
+  );
+}
+
+/**
+ * Effective monthly base used by the preview computes. Fixed Monthly Basic, or —
+ * when an Hourly Rate drives the row — an equivalent per-active-month figure
+ * (rate × yearly manhours ÷ working months) so Full Year / Budget Year previews
+ * don't read 0 in hourly mode. This is a row-only approximation; the engine's
+ * realDays-weighted result (reference.ts) is authoritative.
+ */
+function effectiveMonthlyBase(row: PositionRow, seasTotal: number): number {
+  const hourly = toNumber(row[BASIC_SALARY_HOURLY_KEY], 0);
+  if (hourly > 0) {
+    return seasTotal > 0 ? (hourly * yearlyManhoursPaidOf(row)) / seasTotal : 0;
+  }
+  return toNumber(row[BASIC_SALARY_MONTHLY_KEY], 0);
+}
+
 export const COMPUTES: Record<string, ComputeFn> = {
   totalWorkingMonths: (row) => sumVector(row, "seasonality"),
 
   vacationWeightsTotal: (row) => sumVector(row, "vacationMonthlyWeights"),
 
+  /** Monthly holiday-accrual entitlement: Yearly Days ÷ 12. Read-only — the
+   *  amount always shows, but whether it is booked is gated by the Accrual
+   *  account (see rowToEnginePosition / loadScenarioInput). */
+  accrualDaysPerMonth: (row) => toNumber(row.vacationDays, 0) / 12,
+
   /** Gross yearly wage before increases: base × working months + seasonal
-   *  additional costs (matches Σ grossBase with no increase applied). */
+   *  additional costs (matches Σ grossBase with no increase applied). In hourly
+   *  mode the base is derived from rate × manhours (see effectiveMonthlyBase). */
   fullYearWage: (row) => {
-    const base = toNumber(row.monthlyBaseSalary, 0);
-    let total = base * sumVector(row, "seasonality");
+    const seasTotal = sumVector(row, "seasonality");
+    let total = effectiveMonthlyBase(row, seasTotal) * seasTotal;
     for (let m = 1; m <= MONTHS; m++) {
       total +=
         toNumber(row[vectorKey("additionalMonthlyCosts", m)], 0) *
@@ -274,7 +392,7 @@ export const COMPUTES: Record<string, ComputeFn> = {
   /** Full year wage with the merit % applied from increaseMonth onward plus
    *  the manual yearly increase (flat-month approximation of the engine). */
   budgetYearBasicSalary: (row) => {
-    const base = toNumber(row.monthlyBaseSalary, 0);
+    const base = effectiveMonthlyBase(row, sumVector(row, "seasonality"));
     const merit = toNumber(row.meritIncreasePct, 0);
     const rawMonth = toNumber(row.increaseMonth, 13);
     const incFrom = rawMonth >= 1 && rawMonth <= 12 ? rawMonth : 13;
@@ -294,8 +412,14 @@ export const COMPUTES: Record<string, ComputeFn> = {
     return total;
   },
 
-  vacationEstimate: (row) =>
-    toNumber(row.vacationDays, 0) * toNumber(row.dailyVacationCost, 0),
+  // vacationEstimate is NOT a row-only compute — its value is the engine's
+  // simulated vacation cost, supplied per row id via vacationCostById() and
+  // wired in columnFactory. Kept out of COMPUTES so no stale approximation can
+  // shadow the authoritative number.
+
+  /** Hours paid across the year: paid days (yearly days − days off) × daily
+   *  contract hours. Read-only — replaces the old free-entry column. */
+  yearlyManhoursPaid: (row) => yearlyManhoursPaidOf(row),
 };
 
 // ---------------------------------------------------------------------------

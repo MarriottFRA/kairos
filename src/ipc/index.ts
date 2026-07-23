@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -96,6 +96,34 @@ export function initializeIpc(deps: {
   const positionsHandlers = createPositionsHandlers();
   const ouGate = ouScopeMiddleware();
   Object.entries(positionsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Budget-import handlers (pull a hotel's Excel budget file into the
+  // plaintext local store). OU-gated — a pull can only land in its own hotel.
+  const budgetImportHandlers = createBudgetImportHandlers();
+  Object.entries(budgetImportHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register KPI-driver handlers (define/persist/precompute reusable budget
+  // aggregates in the plaintext local store). OU-gated like budget import.
+  const kpiDriversHandlers = createKpiDriversHandlers();
+  Object.entries(kpiDriversHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Manual-input handlers (hand-entered cost lines in the encrypted
+  // secure store). OU-gated; the secure DB must be unlocked (post sign-in).
+  const manualInputHandlers = createManualInputHandlers();
+  Object.entries(manualInputHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Blocks handlers (user-facing block configs that compile into
+  // cost-component definitions, plaintext local store). OU-gated.
+  const blocksHandlers = createBlocksHandlers();
+  Object.entries(blocksHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 

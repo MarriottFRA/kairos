@@ -57,14 +57,23 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
       case Op.BASE_SALARY:
         detail = `monthlyBase=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}`;
         break;
+      case Op.BASE_SALARY_HOURLY:
+        detail = `coeff=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}`;
+        break;
       case Op.VACATION:
-        detail = `vacationDays=${fmt(pool[pp])} dailyCost=${fmt(pool[pp + 1])} weights=${fmtVector(pool, pp + 2, MONTHS)}`;
+        detail = `vacationDays=${fmt(pool[pp])} weights=${fmtVector(pool, pp + 1, MONTHS)}`;
         break;
       case Op.ACCRUAL:
-        detail = `daysPerMonth=${fmt(pool[pp])} costPerDay=${fmt(pool[pp + 1])}`;
+        detail = `daysPerMonth=${fmt(pool[pp])}`;
+        break;
+      case Op.BANK_HOLIDAY:
+        detail = `combinedMult=${fmt(pool[pp])}${plan.arg0[i] & 1 ? " +increase" : ""}`;
         break;
       case Op.ACC_ADD_LINE:
         detail = `src=${describeLine(plan.arg0[i])}`;
+        break;
+      case Op.ACC_ADD_DAYS:
+        detail = `series=${plan.arg0[i] === 1 ? "realDays" : "payBasisDays"}`;
         break;
       case Op.PCT_OF_ACC:
         detail = `rate=${fmt(pool[pp])}`;
@@ -76,6 +85,9 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         break;
       case Op.DIRECT:
         detail = `monthly=${fmtVector(pool, pp, MONTHS)}${plan.arg0[i] & 1 ? " +increase" : ""}`;
+        break;
+      case Op.DIRECT_ABS:
+        detail = `abs=${fmtVector(pool, pp, MONTHS)}`;
         break;
       case Op.SOCIAL_SEC: {
         const count = pool[pp + 2];

@@ -61,8 +61,19 @@ export interface SyncMeta {
  *  FLAT_PER_DAY           yearly / totalWorkingDays × daysPerMonth[m] ×
  *                         seasonality[m] (transportation, food)
  *  DIRECT_MONTHLY         the user's 12 values × seasonality[m]
+ *  DIRECT_ABS             the 12 values verbatim — no seasonality, no increase,
+ *                         no headcount scaling. Internal only: the loader emits
+ *                         it for KPI-driven blocks after resolving the KPI
+ *                         series (already absolute per month) × the per-position
+ *                         multiplier. Never chosen in the UI.
  *  QTY_TIMES_RATE         qty × unitRate = yearly value, then spread like
  *                         FLAT_PER_ACTIVE_MONTH (overtime hours × cost/hour)
+ *  FLAT_MONTHLY           the user's single per-month amount × seasonality[m]
+ *                         (a "fixed monthly amount" block; total = amount ×
+ *                         totalWorkingMonths). Lowered to DIRECT at compile.
+ *  VACATION_WEIGHTED      yearly value distributed by the position's vacation
+ *                         monthly weights (normalized), × seasonality[m].
+ *                         Lowered to DIRECT at compile.
  *  REVENUE_WEIGHTED       reserved — rejected by the compiler until revenue
  *                         data exists in the app
  */
@@ -72,7 +83,10 @@ export type SpreadMethod =
   | "FLAT_PER_ACTIVE_MONTH"
   | "FLAT_PER_DAY"
   | "DIRECT_MONTHLY"
+  | "DIRECT_ABS"
   | "QTY_TIMES_RATE"
+  | "FLAT_MONTHLY"
+  | "VACATION_WEIGHTED"
   | "REVENUE_WEIGHTED";
 
 /**
@@ -82,6 +96,12 @@ export type SpreadMethod =
  *                   bases keep using the GROSS values.
  *  HOLIDAY_ACCRUAL  optional vacation-accrual line: accrualDays × costPerDay
  *                   × seasonality (increase-aware) − vacation cost.
+ *  BANK_HOLIDAY     optional public-holiday premium line: the extra cost of the
+ *                   staff who actually work each bank holiday, valued at the
+ *                   per-working-day base pay. Hourly-wage staff only (their base
+ *                   already excludes the holiday day), so a worked holiday is
+ *                   pure additional cost. Global toggle, at most one per scenario
+ *                   (see bankHolidayStaffFraction / bankHolidayPremiumMultiplier).
  *  SPREAD           a configurable lego (see SpreadMethod).
  *  SOCIAL_SECURITY  progressive bracket contribution over a configurable base.
  *  STAT             non-currency line: headcount / FTE / hours worked.
@@ -89,6 +109,7 @@ export type SpreadMethod =
 export type ComponentKind =
   | "BASE_SALARY"
   | "HOLIDAY_ACCRUAL"
+  | "BANK_HOLIDAY"
   | "SPREAD"
   | "SOCIAL_SECURITY"
   | "STAT";
@@ -104,10 +125,20 @@ export type StatKind = "HEADCOUNT" | "FTE" | "HOURS";
  * replacement for the workbook's 20 hardcoded CN_A* booleans. Referencing the
  * BASE_SALARY component id inside COMPONENTS also resolves to the gross
  * series.
+ *
+ * CALENDAR resolves to a day-count series: PAY_DAYS is the position's own
+ * pay-type day basis (realDays for hourly, flat 30s for salaried) and
+ * REAL_DAYS is the productive-days calendar regardless of pay type — both ×
+ * seasonality, so inactive months contribute nothing. VACATION resolves to
+ * the position's vacation-cost series (the same values BASE_DEDUCT nets out
+ * of the salary line). These two power "multiplier of days / vacation cost"
+ * blocks.
  */
 export type BaseSelector =
   | { kind: "BASE_SALARY" }
-  | { kind: "COMPONENTS"; componentIds: ComponentDefId[] };
+  | { kind: "COMPONENTS"; componentIds: ComponentDefId[] }
+  | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" }
+  | { kind: "VACATION" };
 
 export interface CostComponentDefinition extends SyncMeta {
   id: ComponentDefId;
@@ -135,8 +166,23 @@ export interface CostComponentDefinition extends SyncMeta {
   sortOrder: number;
   /** For PERCENT_OF / WEIGHTED_BY_BASE / SOCIAL_SECURITY. Defaults to base salary. */
   baseSelector?: BaseSelector;
+  /**
+   * When set, this SPREAD def is KPI-driven: at engine load the KPI's
+   * precalculated series (× the per-position multiplier in ComponentValue.rate)
+   * is resolved into monthlyValues and the def is rewritten to spreadMethod
+   * "DIRECT_ABS" before compile — so the VM/compiler never read this field.
+   * Stored as a plain string to keep the engine free of KPI-module coupling.
+   */
+  kpiDriverId?: string;
   /** Required when kind === "SOCIAL_SECURITY". */
   ssSchemeId?: SsSchemeId;
+  /** Fraction of a position's headcount that actually works each bank holiday
+   *  (0..1). Required when kind === "BANK_HOLIDAY". */
+  bankHolidayStaffFraction?: number;
+  /** Pay-rate multiplier for a worked bank holiday (e.g. 1.5, 2). The premium is
+   *  the full multiplier — hourly base excludes the holiday day, so the whole
+   *  amount is additional. Required when kind === "BANK_HOLIDAY". */
+  bankHolidayPremiumMultiplier?: number;
 }
 
 export interface SsBracket {
@@ -180,6 +226,11 @@ export interface Position extends SyncMeta {
   /** Fractional activity per month, 0..1. Drives every spread. */
   seasonality: number[];
   monthlyBaseSalary: number;
+  /** Hourly pay rate. When > 0 the base salary is derived from
+   *  rate × dailyContractHours × realDays[m] (net productive days) instead of
+   *  monthlyBaseSalary. The two are mutually exclusive inputs — only one is
+   *  entered per position; the UI locks the other. */
+  hourlyRate: number;
   /** Extra salary cost per month, added on top of the day-spread base. */
   additionalMonthlyCosts: number[];
   /** Merit/other % increase applied from increaseMonth onward (0.05 = 5%). */
@@ -193,14 +244,14 @@ export interface Position extends SyncMeta {
   /** Contract yearly man-hours worked (the HOURS stat input). */
   yearlyHoursWorked: number;
   vacationDays: number;
-  /** Cost of one vacation day. */
-  dailyVacationCost: number;
   /** Distribution of vacation across the year, used as-is (the UI keeps the
-   *  twelve weights summing to 1, like the workbook's Total Weights column). */
+   *  twelve weights summing to 1, like the workbook's Total Weights column).
+   *  A vacation day is valued by the engine at the position's per-working-day
+   *  base pay (base·twm/twd, or the hourly coeff), so no daily rate is stored. */
   vacationMonthlyWeights: number[];
-  /** Vacation accrual: days accrued per month × cost per day. */
+  /** Vacation accrual: days accrued per month, valued at the same derived
+   *  per-working-day base pay as vacation. */
   accrualDaysPerMonth: number;
-  accrualCostPerDay: number;
 }
 
 /** The user-entered amount wiring one SPREAD component to one position.
@@ -218,6 +269,13 @@ export interface ComponentValue extends SyncMeta {
   /** QTY_TIMES_RATE (yearly qty × unit rate). */
   qty?: number;
   unitRate?: number;
+  /** Per-line account override: when defined, this line's dept×account key
+   *  uses it instead of the definition's account. Loaders populate it only
+   *  for "unlocked" blocks; values never change, only the aggregation key. */
+  accountCode?: string;
+  /** Resolution-only (never read by the compiler): the dual-block stat line's
+   *  per-row account, consumed by resolveDualBlockValues before compile. */
+  statsAccountCode?: string;
 }
 
 /** Manual dept×account row that bypasses the position engine entirely
@@ -249,6 +307,10 @@ export interface CalendarContext {
   realDays: Float64Array;
   /** Flat 30-day months (salaried 30/360 basis). */
   flatDays: Float64Array;
+  /** Public/bank-holiday count per month — the number subtracted out of
+   *  realDays, kept here so the BANK_HOLIDAY component can value it. Zero-filled
+   *  when the calendar carries no holidays. */
+  holidayDays: Float64Array;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +334,7 @@ export type CompileErrorCode =
   | "MISSING_BASE"
   | "MULTIPLE_BASE"
   | "MULTIPLE_ACCRUAL"
+  | "MULTIPLE_BANK_HOLIDAY"
   | "MISSING_SCHEME"
   | "MISSING_SPREAD_METHOD"
   | "MISSING_STAT_KIND"

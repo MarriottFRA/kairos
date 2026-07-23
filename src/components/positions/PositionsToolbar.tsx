@@ -6,6 +6,7 @@
 
 import AddIcon from "@mui/icons-material/Add";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DashboardCustomizeOutlinedIcon from "@mui/icons-material/DashboardCustomizeOutlined";
 import DownloadIcon from "@mui/icons-material/Download";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
 import SearchIcon from "@mui/icons-material/Search";
@@ -41,6 +42,7 @@ export interface PositionsToolbarProps {
   queueState: QueueState;
   pendingRows: number;
   onAddPosition: () => void;
+  onAddBlock: () => void;
   onToggleMask: () => void;
   onToggleGroup: () => void;
   onToggleInactive: () => void;
@@ -118,6 +120,7 @@ export default function PositionsToolbar({
   queueState,
   pendingRows,
   onAddPosition,
+  onAddBlock,
   onToggleMask,
   onToggleGroup,
   onToggleInactive,
@@ -142,6 +145,20 @@ export default function PositionsToolbar({
       >
         Add position
       </Button>
+
+      <Tooltip title="Add a calculation block — a new set of columns that generates costs or statistics for every position">
+        <span>
+          <Button
+            variant="outlined"
+            startIcon={<DashboardCustomizeOutlinedIcon />}
+            onClick={onAddBlock}
+            disabled={disabled}
+            sx={{ height: CONTROL_HEIGHT, px: 2 }}
+          >
+            Add block
+          </Button>
+        </span>
+      </Tooltip>
 
       <Tooltip
         title={

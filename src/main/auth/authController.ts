@@ -638,7 +638,7 @@ export class AuthController {
   private async unlockSecureDbSafe(deviceId: string): Promise<void> {
     if (isSecureDatabaseUnlocked()) return;
     try {
-      const serverHalf = await fetchServerKeyHalf(deviceId);
+      const serverHalf = await fetchServerKeyHalf(this.deps.apiClient, deviceId);
       unlockSecureDatabase(serverHalf);
       console.info("[AuthController] Secure database unlocked");
     } catch (error) {

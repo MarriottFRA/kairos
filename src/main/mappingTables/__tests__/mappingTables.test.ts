@@ -13,6 +13,8 @@ import {
   getCounts,
   getStatus,
   getStoredVersion,
+  listAccounts,
+  listDepartments,
   replaceAllTables,
 } from "../repo";
 import { syncMappingTables } from "../sync";
@@ -119,6 +121,59 @@ describe("mapping-tables repo", () => {
     });
     expect(getStoredVersion(db)).toBeNull();
     expect(getStatus(db).lastSyncedAt).toBeNull();
+  });
+
+  it("lists departments as code + name, name-sorted, code fallback for null", () => {
+    replaceAllTables(
+      db,
+      {
+        ...sampleData("v1"),
+        departmentMaps: [
+          { base_department: "FO", department_description_detail_level_max: "Front Office" },
+          { base_department: "HK", department_description_detail_level_max: "Housekeeping" },
+          { base_department: "ZZ", department_description_detail_level_max: null },
+        ],
+      },
+      NOW
+    );
+
+    expect(listDepartments(db)).toEqual([
+      { code: "FO", name: "Front Office" },
+      { code: "HK", name: "Housekeeping" },
+      // Null description falls back to the code as its own label, and sorts by
+      // that fallback ("ZZ" after the named two).
+      { code: "ZZ", name: "ZZ" },
+    ]);
+  });
+
+  it("returns no departments before the first sync", () => {
+    expect(listDepartments(db)).toEqual([]);
+  });
+
+  it("lists accounts as code + description, code-sorted, code fallback for null", () => {
+    replaceAllTables(
+      db,
+      {
+        ...sampleData("v1"),
+        accountMaps: [
+          { base_account: "A9200", account_description_detail_level_max: "Headcount" },
+          { base_account: "A5100", account_description_detail_level_max: "Salaries" },
+          { base_account: "A5900", account_description_detail_level_max: null },
+        ],
+      },
+      NOW
+    );
+
+    // Sorted by code (GL order), null description falls back to the code.
+    expect(listAccounts(db)).toEqual([
+      { code: "A5100", name: "Salaries" },
+      { code: "A5900", name: "A5900" },
+      { code: "A9200", name: "Headcount" },
+    ]);
+  });
+
+  it("returns no accounts before the first sync", () => {
+    expect(listAccounts(db)).toEqual([]);
   });
 });
 

@@ -42,8 +42,20 @@ const OVERRIDES: Readonly<
   hiringDate: { hint: "Start date. Drives pro-rating in the first budget year." },
   departmentCode: { unit: "code", hint: "Department the position is budgeted under." },
   deptName: { short: "Dept Name", unit: "text" },
-  jobTypeCode: { unit: "category", hint: "Manager / Supervisor / Hourly / Casual." },
+  jobTypeCode: {
+    unit: "grade",
+    hint: "Post classification (grade) — Manager, Supervisor, Associate, Casual, etc. Pay basis is separate (see Pay Basis).",
+  },
   title: { unit: "text", hint: "Job title as it appears on the contract." },
+  payType: {
+    unit: "basis",
+    hint: "Salaried uses a 30/360 month; Hourly uses real calendar days.",
+  },
+  cluster: { unit: "group", hint: "Reporting cluster used to roll positions up." },
+  headcount: {
+    unit: "count",
+    hint: "Number of identical positions on this line — every cost is multiplied by it.",
+  },
 
   // ── Contract ──────────────────────────────────────────────────────
   contractYearlyDays: {
@@ -63,20 +75,14 @@ const OVERRIDES: Readonly<
     hint: "Contracted hours in a working day. Feeds the payroll engine.",
   },
   yearlyManhoursPaid: {
-    unit: "hrs / yr",
-    hint: "Hours paid across the year, including holidays and vacation.",
+    unit: "= derived",
+    hint: "Derived: (Yearly Days − Days Off) × Daily Hours. Read-only.",
   },
   yearlyHoursWorked: {
     unit: "hrs / yr",
     hint: "Hours actually worked across the year. Feeds the payroll engine.",
   },
-  headcount: { unit: "count", hint: "Number of people on this position line." },
   fte: { unit: "ratio", hint: "Full-time equivalent — 1.00 is a full-time position." },
-  cluster: { unit: "group", hint: "Reporting cluster used to roll positions up." },
-  payType: {
-    unit: "basis",
-    hint: "Salaried uses a 30/360 month; Hourly uses real calendar days.",
-  },
 
   // ── Working months ────────────────────────────────────────────────
   totalWorkingMonths: {
@@ -87,7 +93,15 @@ const OVERRIDES: Readonly<
   // ── Basic salary ──────────────────────────────────────────────────
   monthlyBaseSalary: {
     unit: "amount / mo",
-    hint: "Gross monthly basic salary before increases and additional costs.",
+    hint:
+      "Gross monthly basic salary before increases and additional costs. " +
+      "Leave empty to pay by the hour instead (see Hourly Rate) — only one applies.",
+  },
+  hourlyRate: {
+    unit: "rate / hr",
+    hint:
+      "Hourly pay rate. When set, it derives the basic salary from hours worked " +
+      "(rate × daily hours × productive days) and locks Monthly Basic — only one applies.",
   },
   fullYearWage: {
     unit: "= derived",
@@ -115,25 +129,17 @@ const OVERRIDES: Readonly<
     unit: "days / yr",
     hint: "Vacation entitlement per year under the contract.",
   },
-  dailyVacationCost: {
-    unit: "amount / day",
-    hint: "Cost of one vacation day for this position.",
-  },
   accrualDaysPerMonth: {
     unit: "days / mo",
-    hint: "Vacation days accrued each month.",
-  },
-  accrualCostPerDay: {
-    unit: "amount / day",
-    hint: "Cost booked per accrued vacation day.",
+    hint: "Vacation days accrued each month. Valued by the engine at this position's daily base pay.",
   },
   vacationWeightsTotal: {
     unit: "must = 1",
     hint: "Derived: the twelve vacation weights must add up to 1.00. Read-only.",
   },
   vacationEstimate: {
-    unit: "= derived",
-    hint: "Derived: estimated vacation cost for the budget year. Read-only.",
+    unit: "= simulated",
+    hint: "Simulated: full-year vacation cost from the engine — days valued at daily base pay, weighted across the year and priced against the merit increase. Read-only.",
   },
 };
 

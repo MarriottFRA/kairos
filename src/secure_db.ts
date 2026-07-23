@@ -4,8 +4,13 @@ import Database from "better-sqlite3-multiple-ciphers";
 import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
   applyValueStoreV3,
+  applyValueStoreV4,
+  applyValueStoreV5,
+  applyValueStoreV9,
+  ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "./main/positions/schema";
+import { MANUAL_INPUT_TABLES_SQL } from "./main/manualInput/schema";
 import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 // Kairos secure store: the encrypted-at-rest database for feature data.
@@ -44,11 +49,23 @@ const securePath = SECURE_DB_PATH;
 //       buyout_rows)
 //   3 - positions.lineage_id + positions.active (cross-year identity and the
 //       retained-but-not-budgeted toggle)
+//   4 - positions.hourly_rate (alternate basic-salary input, seed v10)
+//   5 - drop positions.daily_vacation_cost + accrual_cost_per_day (now derived
+//       from base pay by the engine, seed v11)
+//   6 - manual_input_rows (hand-entered cost lines: hours/amount per month)
+//   7 - manual_input_rows: split spread_target/spread_base into separate
+//       spread_base_hours + spread_base_amount columns
+//   8 - manual_input_rows: reframe "hours" as generic "stats" (hours_json ->
+//       stats_json, spread_base_hours -> spread_base_stats) + add stats_account
+//   9 - component_values.account_code + stats_account_code (per-row account
+//       overrides for "unlocked" blocks)
+//  10 - persisted engine output (engine_runs + engine_output_lines), written
+//       by the explicit Recalculate and read by the Results page
 //
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 10;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -188,6 +205,47 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   },
   3: (handle) => {
     applyValueStoreV3(handle);
+  },
+  4: (handle) => {
+    applyValueStoreV4(handle);
+  },
+  5: (handle) => {
+    applyValueStoreV5(handle);
+  },
+  6: (handle) => {
+    handle.exec(MANUAL_INPUT_TABLES_SQL);
+  },
+  // The spread helper gained a separate Hours base and Amount base in place of
+  // the old single base + hours/amount target toggle. Carry the existing base
+  // into whichever side its target pointed at, then drop the old columns.
+  7: (handle) => {
+    handle.exec(`
+      ALTER TABLE manual_input_rows ADD COLUMN spread_base_hours REAL;
+      ALTER TABLE manual_input_rows ADD COLUMN spread_base_amount REAL;
+      UPDATE manual_input_rows
+        SET spread_base_hours  = CASE WHEN spread_target = 'amount' THEN NULL ELSE spread_base END,
+            spread_base_amount = CASE WHEN spread_target = 'amount' THEN spread_base ELSE NULL END;
+      ALTER TABLE manual_input_rows DROP COLUMN spread_target;
+      ALTER TABLE manual_input_rows DROP COLUMN spread_base;
+    `);
+  },
+  // The units side generalised from "hours" to "stats" (hours is one kind of
+  // stat), and gained its own statistical account alongside the cost account.
+  // Rename the existing columns in place (data preserved) and add stats_account.
+  8: (handle) => {
+    handle.exec(`
+      ALTER TABLE manual_input_rows RENAME COLUMN hours_json TO stats_json;
+      ALTER TABLE manual_input_rows RENAME COLUMN spread_base_hours TO spread_base_stats;
+      ALTER TABLE manual_input_rows ADD COLUMN stats_account TEXT NOT NULL DEFAULT '';
+    `);
+  },
+  // Per-row account overrides for "unlocked" blocks (blocks feature).
+  9: (handle) => {
+    applyValueStoreV9(handle);
+  },
+  // Persisted engine output — Recalculate overwrites, the Results page reads.
+  10: (handle) => {
+    handle.exec(ENGINE_OUTPUTS_SQL);
   },
 };
 

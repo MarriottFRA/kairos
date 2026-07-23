@@ -1,0 +1,224 @@
+/**
+ * Manual-input repository — encrypted secure store access.
+ *
+ * CRUD over hand-entered cost lines in manual_input_rows. Every function takes
+ * the Database handle explicitly (in-memory DB in tests), and clock/UUID values
+ * are passed in so the repo stays deterministic — matching kpiDrivers/repo.ts.
+ * OU scoping is bound into every WHERE/INSERT via scopeOf(); any `ou` on a row
+ * payload is ignored. The 12-month vectors are stored as JSON text.
+ */
+
+import type Database from "better-sqlite3-multiple-ciphers";
+import { normalizeOu } from "../positions/ouScope";
+import {
+  ManualInputRow,
+  ManualInputRowId,
+  MANUAL_INPUT_NO_INCREASE_MONTH,
+  normalizeMonthVector,
+  SpreadMode,
+} from "../../shared/manualInput/ipc";
+
+type SecureDb = InstanceType<typeof Database>;
+
+interface DbRow {
+  id: string;
+  ou: string;
+  description: string;
+  department: string;
+  department_code: string;
+  cost_account: string;
+  stats_account: string;
+  rate: number | null;
+  stats_json: string;
+  amounts_json: string;
+  spread_mode: string | null;
+  spread_base_stats: number | null;
+  spread_base_amount: number | null;
+  increase_pct: number;
+  increase_month: number;
+  sort_order: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+function scopeOf(ou: string): string {
+  return normalizeOu(ou) ?? ou;
+}
+
+/** Parse a stored JSON month vector into a well-formed length-12 array. */
+function parseVector(json: string): number[] {
+  try {
+    return normalizeMonthVector(JSON.parse(json));
+  } catch {
+    return normalizeMonthVector(null);
+  }
+}
+
+function toRow(row: DbRow): ManualInputRow {
+  return {
+    id: row.id as ManualInputRowId,
+    ou: row.ou,
+    description: row.description,
+    department: row.department,
+    departmentCode: row.department_code,
+    costAccount: row.cost_account,
+    statsAccount: row.stats_account,
+    rate: row.rate ?? null,
+    stats: parseVector(row.stats_json),
+    amounts: parseVector(row.amounts_json),
+    spreadMode: (row.spread_mode as SpreadMode | null) ?? null,
+    spreadBaseStats: row.spread_base_stats ?? null,
+    spreadBaseAmount: row.spread_base_amount ?? null,
+    increasePct: Number(row.increase_pct) || 0,
+    increaseMonth: Number(row.increase_month) || MANUAL_INPUT_NO_INCREASE_MONTH,
+    sortOrder: row.sort_order,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** All rows for an OU, in sort order. */
+export function listRows(db: SecureDb, ou: string): ManualInputRow[] {
+  const scoped = scopeOf(ou);
+  const rows = db
+    .prepare(
+      "SELECT * FROM manual_input_rows WHERE ou = ? AND deleted_at IS NULL ORDER BY sort_order, created_at, id"
+    )
+    .all(scoped) as DbRow[];
+  return rows.map(toRow);
+}
+
+/** The next sort_order for a new row in this OU. */
+export function nextSortOrder(db: SecureDb, ou: string): number {
+  const scoped = scopeOf(ou);
+  const row = db
+    .prepare(
+      "SELECT COALESCE(MAX(sort_order), -1) AS max FROM manual_input_rows WHERE ou = ? AND deleted_at IS NULL"
+    )
+    .get(scoped) as { max: number };
+  return (row?.max ?? -1) + 1;
+}
+
+/** A finite spread mode or null. */
+function normSpreadMode(value: unknown): SpreadMode | null {
+  return value === "flat" || value === "daysInMonth" ? value : null;
+}
+
+/** A finite spread base value, or null when blank/non-numeric. */
+function toBaseOrNull(value: number | null | undefined): number | null {
+  return value === null || value === undefined || !Number.isFinite(Number(value))
+    ? null
+    : Number(value);
+}
+
+/**
+ * Create or update a row. Timestamps/ids are passed in so this stays
+ * deterministic. `sortOrder` is used only on insert (an update leaves the stored
+ * order untouched via the ON CONFLICT set). When a rate is present the amounts
+ * are derived downstream, so `amounts` is stored verbatim but never trusted for
+ * rate-driven rows.
+ */
+export function saveRow(
+  db: SecureDb,
+  row: {
+    id: string;
+    ou: string;
+    description: string;
+    department: string;
+    departmentCode: string;
+    costAccount: string;
+    statsAccount: string;
+    rate: number | null;
+    stats: number[];
+    amounts: number[];
+    spreadMode: SpreadMode | null;
+    spreadBaseStats: number | null;
+    spreadBaseAmount: number | null;
+    increasePct: number;
+    increaseMonth: number;
+    sortOrder: number;
+    createdBy: string | null;
+    now: string;
+  }
+): void {
+  const scoped = scopeOf(row.ou);
+  const rate =
+    row.rate === null || row.rate === undefined || !Number.isFinite(Number(row.rate))
+      ? null
+      : Number(row.rate);
+  const spreadBaseStats = toBaseOrNull(row.spreadBaseStats);
+  const spreadBaseAmount = toBaseOrNull(row.spreadBaseAmount);
+  const increaseMonth =
+    Number.isFinite(Number(row.increaseMonth)) &&
+    Number(row.increaseMonth) >= 1 &&
+    Number(row.increaseMonth) <= 12
+      ? Number(row.increaseMonth)
+      : MANUAL_INPUT_NO_INCREASE_MONTH;
+
+  const upsert = db.prepare(`
+    INSERT INTO manual_input_rows
+      (id, ou, description, department, department_code, cost_account, stats_account, rate,
+       stats_json, amounts_json, spread_mode, spread_base_stats, spread_base_amount,
+       increase_pct, increase_month, sort_order, created_by, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    ON CONFLICT(id) DO UPDATE SET
+      description        = excluded.description,
+      department         = excluded.department,
+      department_code    = excluded.department_code,
+      cost_account       = excluded.cost_account,
+      stats_account      = excluded.stats_account,
+      rate               = excluded.rate,
+      stats_json         = excluded.stats_json,
+      amounts_json       = excluded.amounts_json,
+      spread_mode        = excluded.spread_mode,
+      spread_base_stats  = excluded.spread_base_stats,
+      spread_base_amount = excluded.spread_base_amount,
+      increase_pct       = excluded.increase_pct,
+      increase_month     = excluded.increase_month,
+      updated_at         = excluded.updated_at,
+      deleted_at         = NULL
+  `);
+
+  db.transaction(() => {
+    upsert.run(
+      row.id,
+      scoped,
+      String(row.description ?? ""),
+      String(row.department ?? ""),
+      String(row.departmentCode ?? ""),
+      String(row.costAccount ?? ""),
+      String(row.statsAccount ?? ""),
+      rate,
+      JSON.stringify(normalizeMonthVector(row.stats)),
+      JSON.stringify(normalizeMonthVector(row.amounts)),
+      normSpreadMode(row.spreadMode),
+      spreadBaseStats,
+      spreadBaseAmount,
+      Number(row.increasePct) || 0,
+      increaseMonth,
+      row.sortOrder,
+      row.createdBy,
+      row.now,
+      row.now
+    );
+  })();
+}
+
+/** Soft-delete one or more rows for an OU. */
+export function deleteRows(
+  db: SecureDb,
+  ou: string,
+  ids: string[],
+  params: { now: string }
+): void {
+  const scoped = scopeOf(ou);
+  const stmt = db.prepare(
+    "UPDATE manual_input_rows SET deleted_at = ?, updated_at = ? WHERE id = ? AND ou = ?"
+  );
+  db.transaction(() => {
+    for (const id of ids) stmt.run(params.now, params.now, id, scoped);
+  })();
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../compile";
 import { CompileErrorCode, SsSchemeId } from "../types";
-import { defId, makeDef, makeInput, makePosition, makeScheme, standardDefinitions, standardScheme } from "./fixtures";
+import { defId, makeDef, makeInput, makePosition, makeScheme, makeValue, standardDefinitions, standardScheme } from "./fixtures";
 
 function errorCodes(result: ReturnType<typeof compile>): CompileErrorCode[] {
   return "errors" in result ? result.errors.map((error) => error.code) : [];
@@ -51,15 +51,18 @@ describe("compile validation", () => {
   });
 
   it("rejects unknown and non-referenceable base components", () => {
+    // STAT lines became base-referenceable with the blocks feature
+    // ("multiplier of hours"), so the non-referenceable case is now
+    // HOLIDAY_ACCRUAL (a scratch-coupled line no % base may include).
     const result = compile(
       makeInput({
         definitions: [
           makeDef({ id: "b", kind: "BASE_SALARY" }),
-          makeDef({ id: "hc", kind: "STAT", statKind: "HEADCOUNT" }),
+          makeDef({ id: "accr", kind: "HOLIDAY_ACCRUAL" }),
           makeDef({
             id: "pct",
             spreadMethod: "PERCENT_OF",
-            baseSelector: { kind: "COMPONENTS", componentIds: [defId("ghost"), defId("hc")] },
+            baseSelector: { kind: "COMPONENTS", componentIds: [defId("ghost"), defId("accr")] },
           }),
         ],
         positions: [makePosition({ id: "p1" })],
@@ -67,6 +70,45 @@ describe("compile validation", () => {
     );
     expect(errorCodes(result)).toContain("MISSING_DEF");
     expect(errorCodes(result)).toContain("INVALID_BASE_REF");
+  });
+
+  it("interns a per-row account override into the line's aggregation key", () => {
+    const result = compile(
+      makeInput({
+        definitions: [
+          makeDef({ id: "b", kind: "BASE_SALARY", accountCode: "610000" }),
+          makeDef({ id: "housing", spreadMethod: "FLAT_PER_ACTIVE_MONTH", accountCode: "622000" }),
+        ],
+        positions: [makePosition({ id: "p1" }), makePosition({ id: "p2" })],
+        componentValues: [
+          makeValue("p1", "housing", { yearlyValue: 1200, accountCode: "629999" }),
+          makeValue("p2", "housing", { yearlyValue: 1200 }),
+        ],
+      })
+    );
+    expect("plan" in result).toBe(true);
+    if (!("plan" in result)) return;
+    const keys = result.plan.aggKeys.map((key) => `${key.dept}|${key.account}`);
+    expect(keys).toContain("1010|629999"); // p1's override
+    expect(keys).toContain("1010|622000"); // p2 on the definition's account
+  });
+
+  it("accepts STAT lines as base components", () => {
+    const result = compile(
+      makeInput({
+        definitions: [
+          makeDef({ id: "b", kind: "BASE_SALARY" }),
+          makeDef({ id: "hrs", kind: "STAT", statKind: "HOURS" }),
+          makeDef({
+            id: "pct",
+            spreadMethod: "PERCENT_OF",
+            baseSelector: { kind: "COMPONENTS", componentIds: [defId("hrs")] },
+          }),
+        ],
+        positions: [makePosition({ id: "p1" })],
+      })
+    );
+    expect("errors" in result).toBe(false);
   });
 
   it("rejects malformed social security schemes", () => {

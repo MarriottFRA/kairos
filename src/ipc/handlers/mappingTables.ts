@@ -13,9 +13,16 @@
 import { IpcHandler, IpcResult } from "../types";
 import { ApiClient } from "../../main/auth/apiClient";
 import { localDbHandle } from "../../local_db";
-import { clearAllTables, getStatus } from "../../main/mappingTables/repo";
+import {
+  clearAllTables,
+  getStatus,
+  listAccounts,
+  listDepartments,
+} from "../../main/mappingTables/repo";
 import { syncMappingTables } from "../../main/mappingTables/sync";
 import {
+  AccountOption,
+  DepartmentOption,
   MAPPING_TABLES_CHANNELS,
   MappingSyncResult,
   MappingTablesStatus,
@@ -88,9 +95,34 @@ export function createMappingTablesHandlers(
     }
   };
 
+  /** Department options (code + name) for the positions dropdown — no network. */
+  const departments: IpcHandler<
+    unknown,
+    IpcResult<DepartmentOption[]>
+  > = async () => {
+    try {
+      return ok(listDepartments(localDbHandle()));
+    } catch (error) {
+      console.error("Listing departments failed:", error);
+      return fail(error, [] as DepartmentOption[]);
+    }
+  };
+
+  /** Account options (code + description) for the account dropdowns — no network. */
+  const accounts: IpcHandler<unknown, IpcResult<AccountOption[]>> = async () => {
+    try {
+      return ok(listAccounts(localDbHandle()));
+    } catch (error) {
+      console.error("Listing accounts failed:", error);
+      return fail(error, [] as AccountOption[]);
+    }
+  };
+
   return {
     [MAPPING_TABLES_CHANNELS.sync]: sync,
     [MAPPING_TABLES_CHANNELS.rebuild]: rebuild,
     [MAPPING_TABLES_CHANNELS.status]: status,
+    [MAPPING_TABLES_CHANNELS.listDepartments]: departments,
+    [MAPPING_TABLES_CHANNELS.listAccounts]: accounts,
   };
 }

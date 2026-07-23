@@ -17,6 +17,7 @@
  */
 
 import {
+  ComponentValuePatch,
   PositionCreate,
   PositionsBatchWriteRequest,
   SECURE_DB_LOCKED,
@@ -38,8 +39,20 @@ interface PendingWork {
   creates: Map<string, PositionCreate>;
   positionPatches: Map<string, Record<string, unknown>>;
   piiPatches: Map<string, Record<string, unknown>>;
+  /** Block inputs, keyed `positionId|componentDefId` for field-level LWW.
+   *  Kept in their own lane even for draft rows — the repo applies creates
+   *  before component patches inside one transaction. */
+  componentPatches: Map<string, ComponentValuePatch["fields"]>;
   deletes: Set<string>;
   restores: Set<string>;
+}
+
+function componentKey(positionId: string, componentDefId: string): string {
+  return `${positionId}|${componentDefId}`;
+}
+
+function positionIdOfComponentKey(key: string): string {
+  return key.slice(0, key.indexOf("|"));
 }
 
 const DEBOUNCE_MS = 500;
@@ -52,6 +65,7 @@ function emptyWork(): PendingWork {
     creates: new Map(),
     positionPatches: new Map(),
     piiPatches: new Map(),
+    componentPatches: new Map(),
     deletes: new Set(),
     restores: new Set(),
   };
@@ -62,6 +76,7 @@ function workIsEmpty(work: PendingWork): boolean {
     work.creates.size === 0 &&
     work.positionPatches.size === 0 &&
     work.piiPatches.size === 0 &&
+    work.componentPatches.size === 0 &&
     work.deletes.size === 0 &&
     work.restores.size === 0
   );
@@ -133,21 +148,48 @@ export class PositionsWriteQueue {
     this.schedule();
   }
 
+  /** Block-input edit for one (position, block definition). Field-level LWW
+   *  like position patches; rides the same flush/status machinery. */
+  enqueueComponentPatch(
+    positionId: string,
+    componentDefId: string,
+    fields: ComponentValuePatch["fields"]
+  ): void {
+    if (this.pending.deletes.has(positionId)) return;
+    const key = componentKey(positionId, componentDefId);
+    this.pending.componentPatches.set(key, {
+      ...this.pending.componentPatches.get(key),
+      ...fields,
+    });
+    this.markDirty(positionId);
+    this.schedule();
+  }
+
   enqueueDelete(rowId: string): void {
     // A never-persisted draft just evaporates.
     if (this.pending.creates.delete(rowId)) {
       this.pending.positionPatches.delete(rowId);
       this.pending.piiPatches.delete(rowId);
+      this.dropComponentPatches(rowId);
       this.clearStatus(rowId);
       this.emit();
       return;
     }
     this.pending.positionPatches.delete(rowId);
     this.pending.piiPatches.delete(rowId);
+    this.dropComponentPatches(rowId);
     this.pending.restores.delete(rowId);
     this.pending.deletes.add(rowId);
     this.markDirty(rowId);
     this.schedule();
+  }
+
+  private dropComponentPatches(rowId: string): void {
+    for (const key of [...this.pending.componentPatches.keys()]) {
+      if (positionIdOfComponentKey(key) === rowId) {
+        this.pending.componentPatches.delete(key);
+      }
+    }
   }
 
   enqueueRestore(rowId: string): void {
@@ -236,6 +278,13 @@ export class PositionsWriteQueue {
         positionId,
         fields,
       })),
+      componentValuePatches: [...work.componentPatches.entries()].map(
+        ([key, fields]) => ({
+          positionId: positionIdOfComponentKey(key),
+          componentDefId: key.slice(key.indexOf("|") + 1),
+          fields,
+        })
+      ),
       softDeleteIds: [...work.deletes],
       restoreIds: [...work.restores],
     };
@@ -316,6 +365,14 @@ export class PositionsWriteQueue {
         );
       }
     }
+    for (const [key, fields] of work.componentPatches) {
+      if (this.pending.deletes.has(positionIdOfComponentKey(key))) continue;
+      // Failed fields go back UNDER newer pending edits (newer wins).
+      this.pending.componentPatches.set(key, {
+        ...fields,
+        ...this.pending.componentPatches.get(key),
+      });
+    }
     for (const id of work.deletes) {
       if (!this.pending.restores.has(id)) this.pending.deletes.add(id);
     }
@@ -339,19 +396,26 @@ export class PositionsWriteQueue {
       ...work.creates.keys(),
       ...work.positionPatches.keys(),
       ...work.piiPatches.keys(),
+      ...[...work.componentPatches.keys()].map(positionIdOfComponentKey),
       ...work.deletes,
       ...work.restores,
     ]);
   }
 
   private rowIsPending(rowId: string): boolean {
-    return (
+    if (
       this.pending.creates.has(rowId) ||
       this.pending.positionPatches.has(rowId) ||
       this.pending.piiPatches.has(rowId) ||
       this.pending.deletes.has(rowId) ||
       this.pending.restores.has(rowId)
-    );
+    ) {
+      return true;
+    }
+    for (const key of this.pending.componentPatches.keys()) {
+      if (positionIdOfComponentKey(key) === rowId) return true;
+    }
+    return false;
   }
 
   private markDirty(rowId: string): void {

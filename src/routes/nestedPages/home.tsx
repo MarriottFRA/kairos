@@ -21,15 +21,14 @@ import {
   CardContent,
   Chip,
   CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
+  Collapse,
   Divider,
   IconButton,
+  InputAdornment,
   MenuItem,
   Snackbar,
   Stack,
+  Switch,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
@@ -49,6 +48,8 @@ import {
 } from "@mui/x-data-grid-premium";
 import {
   CalendarYear,
+  DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
+  DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
   DEFAULT_WEEKEND_MASK,
   MONTH_LABELS,
   WEEKDAY_LABELS,
@@ -60,6 +61,9 @@ import {
   reseedWeekends,
 } from "../../shared/calendar";
 import { loadCalendar, listCalendarYears, saveCalendar } from "../../services/calendarService";
+import { loadAccounts } from "../../services/mappingTablesService";
+import { AccountOption } from "../../shared/mappingTables/types";
+import AccountAutocomplete from "../../components/common/AccountAutocomplete";
 import {
   loadPositionDefaults,
   savePositionDefaults,
@@ -84,6 +88,12 @@ import {
 const CONTROL_HEIGHT = 36;
 const LABEL_HEIGHT = 18;
 const ROW_HEIGHT = 44;
+
+// The bank holiday premium books to an A5… account, same rule the Positions
+// grid's salary/vacation account fields use (see fieldSeed AccountFilter). A
+// module constant so the reference is stable across renders — a first, broad
+// pass to be narrowed later.
+const BANK_HOLIDAY_ACCOUNT_FILTER = { startsWith: ["A5"] };
 
 // Row ids double as the metric key, so a cell edit maps straight onto the model.
 type MetricId = "calendarDays" | "publicHolidays" | "weekendDays" | "netProductiveDays";
@@ -135,6 +145,21 @@ function toGridRows(calendar: CalendarYear): CalendarGridRow[] {
         id === "netProductiveDays" ? netProductiveDays(month) : month[id];
     }
     return row;
+  });
+}
+
+/**
+ * Canonical snapshot of the whole calendar for the dirty check: the twelve
+ * months plus the bank-holiday premium config that lives on the calendar head.
+ * Both feed the Save button, so both belong in the signature.
+ */
+function calendarSignature(calendar: CalendarYear): string {
+  return JSON.stringify({
+    months: calendar.months,
+    bankHolidayEnabled: !!calendar.bankHolidayEnabled,
+    bankHolidayStaffFraction: calendar.bankHolidayStaffFraction ?? null,
+    bankHolidayPremiumMultiplier: calendar.bankHolidayPremiumMultiplier ?? null,
+    bankHolidayAccount: (calendar.bankHolidayAccount ?? "").trim(),
   });
 }
 
@@ -307,46 +332,49 @@ export default function Home() {
   // below); this is the raw editable model.
   const [defaults, setDefaults] = useState<PositionDefaults | null>(null);
   const [savedDefaultsSig, setSavedDefaultsSig] = useState<string | null>(null);
-  const [devKeyInfo, setDevKeyInfo] = useState<string | null>(null);
   // JSON snapshot of what is in the database, for the dirty check.
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedYears, setSavedYears] = useState<number[]>([]);
+  // Account options (the whole account_maps cache) for the bank-holiday premium
+  // account picker; narrowed to A5… by the field's filter. Empty until synced,
+  // which degrades the field to free text rather than blocking.
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Load the calendar whenever the hotel or year changes.
-  useEffect(() => {
-    if (!selectedHotelOu) {
-      setCalendar(null);
-      setSavedSnapshot(null);
-      setDefaults(null);
-      setSavedDefaultsSig(null);
-      return;
-    }
+  // Load the saved calendar + defaults for the current hotel/year from the
+  // store. Shared by the initial load effect and the Reset button, which is
+  // just a reload — it discards unsaved edits by fetching the saved state again.
+  const loadData = useCallback(
+    async (signal?: { cancelled: boolean }) => {
+      if (!selectedHotelOu) {
+        setCalendar(null);
+        setSavedSnapshot(null);
+        setDefaults(null);
+        setSavedDefaultsSig(null);
+        return;
+      }
 
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-
-    (async () => {
+      setLoading(true);
+      setError(null);
       try {
         const [{ calendar: loaded, saved }, years, loadedDefaults] = await Promise.all([
           loadCalendar(selectedHotelOu, year),
           listCalendarYears(selectedHotelOu),
           loadPositionDefaults(selectedHotelOu, year),
         ]);
-        if (cancelled) return;
+        if (signal?.cancelled) return;
         setCalendar(loaded);
-        setSavedSnapshot(saved ? JSON.stringify(loaded.months) : null);
+        setSavedSnapshot(saved ? calendarSignature(loaded) : null);
         setSavedYears(years);
         setDefaults(loadedDefaults.defaults);
         setSavedDefaultsSig(
           loadedDefaults.saved ? defaultsSignature(loadedDefaults.defaults) : null
         );
       } catch (err) {
-        if (cancelled) return;
+        if (signal?.cancelled) return;
         console.error("Failed to load calendar:", err);
         setError(err instanceof Error ? err.message : "Failed to load calendar");
         setCalendar(buildDefaultCalendar(selectedHotelOu, year));
@@ -354,14 +382,39 @@ export default function Home() {
         setDefaults(buildDefaultPositionDefaults(selectedHotelOu, year));
         setSavedDefaultsSig(null);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!signal?.cancelled) setLoading(false);
+      }
+    },
+    [selectedHotelOu, year]
+  );
+
+  // Load the calendar whenever the hotel or year changes.
+  useEffect(() => {
+    const signal = { cancelled: false };
+    void loadData(signal);
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [loadData]);
+
+  // Account reference data (global, not OU-scoped): loaded once for the bank
+  // holiday premium account picker. Best-effort — a never-synced cache resolves
+  // to [], which degrades the field to free text.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const options = await loadAccounts();
+        if (!cancelled) setAccounts(options);
+      } catch (err) {
+        console.error("Failed to load accounts:", err);
+        if (!cancelled) setAccounts([]);
       }
     })();
-
     return () => {
       cancelled = true;
     };
-  }, [selectedHotelOu, year]);
+  }, []);
 
   // Linked defaults resolved against the *live* calendar model, so previews
   // update as the user edits holidays/weekends before saving. Also what gets
@@ -372,7 +425,7 @@ export default function Home() {
   );
 
   const calendarDirty = useMemo(
-    () => !!calendar && JSON.stringify(calendar.months) !== savedSnapshot,
+    () => !!calendar && calendarSignature(calendar) !== savedSnapshot,
     [calendar, savedSnapshot]
   );
 
@@ -475,12 +528,47 @@ export default function Home() {
     [calendar]
   );
 
-  const handleReset = useCallback(() => {
-    if (!selectedHotelOu) return;
-    setCalendar(
-      buildDefaultCalendar(selectedHotelOu, year, calendar?.weekendMask ?? DEFAULT_WEEKEND_MASK)
+  // ── Bank-holiday premium (lives on the calendar head) ──
+  const handleToggleBankHoliday = useCallback((enabled: boolean) => {
+    setCalendar((current) =>
+      current
+        ? {
+            ...current,
+            bankHolidayEnabled: enabled,
+            // Seed sensible knobs the first time it is switched on, so the
+            // revealed inputs are never blank.
+            bankHolidayStaffFraction:
+              current.bankHolidayStaffFraction ?? DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
+            bankHolidayPremiumMultiplier:
+              current.bankHolidayPremiumMultiplier ?? DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
+          }
+        : current
     );
-  }, [selectedHotelOu, year, calendar]);
+  }, []);
+
+  const handleBankHolidayStaffPct = useCallback((pct: number) => {
+    const fraction = Math.min(1, Math.max(0, (Number(pct) || 0) / 100));
+    setCalendar((current) =>
+      current ? { ...current, bankHolidayStaffFraction: fraction } : current
+    );
+  }, []);
+
+  const handleBankHolidayMultiplier = useCallback((value: number) => {
+    setCalendar((current) =>
+      current
+        ? { ...current, bankHolidayPremiumMultiplier: Math.max(0, Number(value) || 0) }
+        : current
+    );
+  }, []);
+
+  const handleBankHolidayAccount = useCallback((value: string) => {
+    setCalendar((current) => (current ? { ...current, bankHolidayAccount: value } : current));
+  }, []);
+
+  // Discard unsaved edits by reloading the saved state from the store.
+  const handleReset = useCallback(() => {
+    void loadData();
+  }, [loadData]);
 
   // ── Safe defaults ──
   const handleWeeklyHoursChange = useCallback((value: number) => {
@@ -535,7 +623,7 @@ export default function Home() {
     try {
       const persisted = await saveCalendar(calendar);
       setCalendar(persisted);
-      setSavedSnapshot(JSON.stringify(persisted.months));
+      setSavedSnapshot(calendarSignature(persisted));
       setSavedYears((years) =>
         years.includes(persisted.year) ? years : [...years, persisted.year].sort((a, b) => b - a)
       );
@@ -558,31 +646,26 @@ export default function Home() {
     }
   }, [calendar, defaults]);
 
-  /** TEMP / DEV ONLY: fetch the secure-DB key so the encrypted file can be
-   *  opened in an external SQLite tool. The channel throws in packaged builds. */
-  const handleRevealDevKey = useCallback(async () => {
-    try {
-      const api = (window as any)?.ipcApi;
-      const response = await api.sendIpcRequest("app:dev-secure-db-key");
-      const { keyHex, cipher } = (response?.data ?? response) as {
-        keyHex: string;
-        cipher: string;
-      };
-      setDevKeyInfo(
-        `-- Open %LOCALAPPDATA%\\Kairos\\kairos_secure.db with:\n` +
-          `PRAGMA cipher = '${cipher}';\nPRAGMA key = '${keyHex}';`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Key reveal failed");
-    }
-  }, []);
-
   const weekendPattern = useMemo(() => {
     const mask = calendar?.weekendMask ?? DEFAULT_WEEKEND_MASK;
     return WEEKDAY_LABELS.map((_, day) => day).filter((day) => isWeekendDay(mask, day));
   }, [calendar]);
 
   const totals = calendar ? calendarTotals(calendar) : null;
+
+  // Bank-holiday premium display state. Percent is the friendly unit; the model
+  // stores a 0..1 fraction. `combined` (fraction × premium) is how many days of
+  // pay one holiday costs per hourly employee — the number the preview quotes.
+  const bankHolidayEnabled = !!calendar?.bankHolidayEnabled;
+  const bankHolidayStaffPct = Math.round(
+    (calendar?.bankHolidayStaffFraction ?? DEFAULT_BANK_HOLIDAY_STAFF_FRACTION) * 100
+  );
+  const bankHolidayMultiplier =
+    calendar?.bankHolidayPremiumMultiplier ?? DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER;
+  const bankHolidayAccount = calendar?.bankHolidayAccount ?? "";
+  const bankHolidayCombined =
+    (calendar?.bankHolidayStaffFraction ?? 0) * (calendar?.bankHolidayPremiumMultiplier ?? 0);
+  const bankHolidayAccountMissing = bankHolidayEnabled && !bankHolidayAccount.trim();
 
   return (
     <Box sx={{ p: 3, maxWidth: 1600, mx: "auto" }}>
@@ -711,20 +794,11 @@ export default function Home() {
                 sx={{ height: 28, fontWeight: 600 }}
               />
               <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-              {/* TEMP dev-only helper — remove before release. */}
-              <Button
-                variant="outlined"
-                color="warning"
-                onClick={() => void handleRevealDevKey()}
-                sx={{ height: CONTROL_HEIGHT, px: 2 }}
-              >
-                DB key (dev)
-              </Button>
               <Button
                 variant="outlined"
                 startIcon={<RestartAltIcon />}
                 onClick={handleReset}
-                disabled={!calendar || saving}
+                disabled={!calendar || !dirty || saving}
                 sx={{ height: CONTROL_HEIGHT, px: 2 }}
               >
                 Reset
@@ -798,6 +872,140 @@ export default function Home() {
             a Public Holidays or Weekends cell to edit it.
           </Typography>
 
+          {/* ── Bank holiday premium ── */}
+          <Divider sx={{ my: 3 }} />
+
+          <Stack
+            direction="row"
+            spacing={2}
+            sx={{ justifyContent: "space-between", alignItems: "flex-start" }}
+          >
+            <Box>
+              <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 0.25 }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                  Bank holiday premium
+                </Typography>
+                <Chip
+                  size="small"
+                  label="Hourly staff only"
+                  sx={{ height: 20, fontSize: 11, fontWeight: 600 }}
+                />
+              </Stack>
+              <Typography variant="body2" sx={{ color: "text.secondary", maxWidth: 640 }}>
+                Add the extra cost of the staff who actually work each public holiday.
+                Salaried pay already covers the day, so only hourly-paid staff are affected.
+              </Typography>
+            </Box>
+            <Switch
+              checked={bankHolidayEnabled}
+              onChange={(event) => handleToggleBankHoliday(event.target.checked)}
+              disabled={!calendar}
+              slotProps={{ input: { "aria-label": "Enable bank holiday premium" } }}
+            />
+          </Stack>
+
+          <Collapse in={bankHolidayEnabled} unmountOnExit>
+            <Box
+              sx={{
+                mt: 2,
+                p: 2,
+                border: 1,
+                borderColor: "divider",
+                borderRadius: 2,
+                bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04),
+              }}
+            >
+              <Stack
+                direction={{ xs: "column", sm: "row" }}
+                spacing={2.5}
+                sx={{ alignItems: { sm: "flex-start" } }}
+              >
+                <Field
+                  label="Staff working"
+                  hint="Roughly what share of a position's hourly staff actually work a public holiday — a skeleton crew, not everyone."
+                >
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={bankHolidayStaffPct}
+                    onChange={(event) => handleBankHolidayStaffPct(Number(event.target.value))}
+                    slotProps={{
+                      htmlInput: { min: 0, max: 100, step: 5 },
+                      input: {
+                        endAdornment: <InputAdornment position="end">%</InputAdornment>,
+                      },
+                    }}
+                    sx={{ width: 128, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
+                  />
+                </Field>
+
+                <Field
+                  label="Pay rate"
+                  hint="Pay multiplier for a worked holiday — e.g. 1.5× (time and a half) or 2× (double time)."
+                >
+                  <TextField
+                    type="number"
+                    size="small"
+                    value={bankHolidayMultiplier}
+                    onChange={(event) => handleBankHolidayMultiplier(Number(event.target.value))}
+                    slotProps={{
+                      htmlInput: { min: 0, step: 0.5 },
+                      input: {
+                        startAdornment: <InputAdornment position="start">×</InputAdornment>,
+                      },
+                    }}
+                    sx={{ width: 120, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
+                  />
+                </Field>
+
+                <Field
+                  label="Post to account"
+                  hint="The GL account the premium is booked to, using each position's own department. Search by description; the account code is stored."
+                >
+                  <AccountAutocomplete
+                    options={accounts}
+                    filter={BANK_HOLIDAY_ACCOUNT_FILTER}
+                    value={bankHolidayAccount}
+                    onChange={handleBankHolidayAccount}
+                    placeholder="Search account…"
+                    error={bankHolidayAccountMissing}
+                    helperText={bankHolidayAccountMissing ? "Add an account to book the cost" : " "}
+                    sx={{ width: 220 }}
+                  />
+                </Field>
+              </Stack>
+
+              <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: "flex-start" }}>
+                <InfoOutlinedIcon sx={{ fontSize: 16, color: "primary.main", mt: "3px" }} />
+                <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                  {bankHolidayCombined > 0 ? (
+                    <>
+                      Each public holiday adds about{" "}
+                      <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
+                        {formatDefault(bankHolidayCombined)}×
+                      </Box>{" "}
+                      a day&rsquo;s pay per hourly employee
+                      {totals && totals.publicHolidays > 0 ? (
+                        <>
+                          {" "}— roughly{" "}
+                          <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
+                            {formatDefault(bankHolidayCombined * totals.publicHolidays)} days
+                          </Box>{" "}
+                          of extra pay each across the {totals.publicHolidays} bank holiday
+                          {totals.publicHolidays === 1 ? "" : "s"} recorded this year.
+                        </>
+                      ) : (
+                        <>. Record public holidays in the grid above to see the yearly cost.</>
+                      )}
+                    </>
+                  ) : (
+                    "Set a staff share and pay rate above to price the premium."
+                  )}
+                </Typography>
+              </Stack>
+            </Box>
+          </Collapse>
+
           {/* ── Safe defaults for new positions ── */}
           <Divider sx={{ my: 3 }} />
 
@@ -854,43 +1062,6 @@ export default function Home() {
         message={toast ?? ""}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
       />
-
-      {/* TEMP dev-only dialog showing the secure-DB key for external review. */}
-      <Dialog open={!!devKeyInfo} onClose={() => setDevKeyInfo(null)} maxWidth="sm" fullWidth>
-        <DialogTitle>Secure database key (development)</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" sx={{ color: "text.secondary", mb: 1.5 }}>
-            Paste these pragmas into a SQLite tool that supports SQLite3
-            Multiple Ciphers to open the encrypted database. Dev builds only —
-            this button does not work in a packaged app.
-          </Typography>
-          <Box
-            component="pre"
-            sx={{
-              fontFamily: "'IBM Plex Mono', monospace",
-              fontSize: "0.8125rem",
-              bgcolor: "action.hover",
-              borderRadius: 1,
-              p: 1.5,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-              userSelect: "all",
-            }}
-          >
-            {devKeyInfo}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => {
-              if (devKeyInfo) void navigator.clipboard.writeText(devKeyInfo);
-            }}
-          >
-            Copy
-          </Button>
-          <Button onClick={() => setDevKeyInfo(null)}>Close</Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

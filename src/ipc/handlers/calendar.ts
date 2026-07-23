@@ -79,7 +79,10 @@ export class CalendarHandlers {
         ou,
         year,
         Number(request?.weekendMask),
-        Array.isArray(request?.months) ? request.months : []
+        Array.isArray(request?.months) ? request.months : [],
+        // The request is the full CalendarYear; the bank-holiday premium config
+        // rides on the head and normalizeBankHoliday coerces it into shape.
+        request
       );
 
       await saveCalendarYear(calendar);

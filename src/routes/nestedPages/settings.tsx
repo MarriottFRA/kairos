@@ -59,6 +59,27 @@ export default function Settings() {
     text: string;
   } | null>(null);
 
+  // DEV ONLY: the revealed secure-DB key, fed to the db:browse export so
+  // kairos_secure.db can be opened in DB Browser. Gated on import.meta.env.DEV so
+  // this whole block — state, handler, and the card below — is dead-code-
+  // eliminated from production.
+  const [devKeyHex, setDevKeyHex] = useState<string | null>(null);
+  const [devKeyError, setDevKeyError] = useState<string | null>(null);
+
+  const handleRevealDevKey = async () => {
+    setDevKeyError(null);
+    try {
+      const envelope: any = await window.ipcApi.sendIpcRequest(
+        "app:dev-secure-db-key"
+      );
+      const { keyHex } = (envelope?.data ?? envelope) as { keyHex: string };
+      setDevKeyHex(keyHex);
+    } catch (err: any) {
+      // Thrown when locked ("sign in first") or in a packaged build.
+      setDevKeyError(err?.message || "Could not reveal the secure DB key");
+    }
+  };
+
   const loadHotels = async () => {
     try {
       setLoadingHotels(true);
@@ -478,6 +499,92 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      {import.meta.env.DEV && (
+        <Card
+          variant="outlined"
+          sx={{ mt: 2, borderRadius: 2, borderStyle: "dashed", opacity: 0.9 }}
+        >
+          <CardContent>
+            <Typography
+              variant="overline"
+              sx={{ color: "text.secondary", fontWeight: 700 }}
+            >
+              Developer · dev build only
+            </Typography>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+              Secure database key
+            </Typography>
+            <Divider sx={{ mb: 2 }} />
+
+            <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+              Reveals the derived key for <code>kairos_secure.db</code>, assembled
+              from this session's local + server halves. Feed it to{" "}
+              <code>db:browse</code>, which writes a throwaway SQLCipher copy you
+              can open in DB Browser for SQLite (the live store's ChaCha20 scheme
+              cannot be opened there directly). One-way and deleted on exit — no
+              plaintext ever hits disk. You must be signed in; this control does
+              not exist in packaged builds.
+            </Typography>
+
+            <Button
+              variant="outlined"
+              color="warning"
+              onClick={handleRevealDevKey}
+              sx={{ textTransform: "none" }}
+            >
+              {devKeyHex ? "Re-reveal key" : "Reveal secure DB key"}
+            </Button>
+
+            {devKeyError && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {devKeyError}
+              </Alert>
+            )}
+
+            {devKeyHex && (
+              <Box sx={{ mt: 2 }}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}
+                >
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                    Run this from the repo root:
+                  </Typography>
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      void navigator.clipboard.writeText(
+                        `npm run db:browse -- --key ${devKeyHex}`
+                      )
+                    }
+                    sx={{ textTransform: "none" }}
+                  >
+                    Copy command
+                  </Button>
+                </Stack>
+                <Box
+                  component="pre"
+                  sx={{
+                    fontFamily: "'IBM Plex Mono', monospace",
+                    fontSize: "0.8125rem",
+                    bgcolor: "action.hover",
+                    borderRadius: 1,
+                    p: 1.5,
+                    m: 0,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    userSelect: "all",
+                  }}
+                >
+                  {`npm run db:browse -- --key ${devKeyHex}`}
+                </Box>
+              </Box>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Box sx={{ mt: 4, textAlign: "center", pb: 2 }}>
         <Typography variant="caption" sx={{

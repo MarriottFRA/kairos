@@ -28,7 +28,11 @@ import Profile from "./routes/nestedPages/profile";
 import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
+import BudgetSync from "./routes/nestedPages/budgetSync";
+import KpiDrivers from "./routes/nestedPages/kpiDrivers";
+import ManualInput from "./routes/nestedPages/manualInput";
 import Positions from "./routes/nestedPages/positions";
+import Results from "./routes/nestedPages/results";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // define the route
@@ -64,9 +68,29 @@ const router = createHashRouter([
         handle: { title: "Home" },
       },
       {
+        path: "budget-pull",
+        element: <BudgetSync />,
+        handle: { title: "Budget Pull" },
+      },
+      {
+        path: "kpi-drivers",
+        element: <KpiDrivers />,
+        handle: { title: "KPI Drivers" },
+      },
+      {
+        path: "manual-input",
+        element: <ManualInput />,
+        handle: { title: "Manual Input" },
+      },
+      {
         path: "positions",
         element: <Positions />,
         handle: { title: "Positions" },
+      },
+      {
+        path: "results",
+        element: <Results />,
+        handle: { title: "Results" },
       },
       {
         path: "profile",

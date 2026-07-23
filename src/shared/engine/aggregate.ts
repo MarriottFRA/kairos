@@ -39,7 +39,10 @@ export function aggregate(
   const positionCount = plan.positionIds.length;
   for (let p = 0; p < positionCount; p++) {
     const row = plan.positionStatRow[p];
+    // posHeadcount is the Count multiplier — the number of identical positions on
+    // the row — so it is already the total people. FTE is stored per position, so
+    // it scales by the same Count to give the row's total FTE.
     statHeadcount[row] += plan.posHeadcount[p];
-    statFte[row] += plan.posFte[p];
+    statFte[row] += plan.posFte[p] * plan.posHeadcount[p];
   }
 }

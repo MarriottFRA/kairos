@@ -13,7 +13,9 @@ import type Database from "better-sqlite3-multiple-ciphers";
 import {
   AccountDepartmentCombo,
   AccountMap,
+  AccountOption,
   DepartmentMap,
+  DepartmentOption,
   MAP_LEVEL_KEYS,
   MappingTableCounts,
   MappingTablesStatus,
@@ -85,6 +87,46 @@ export function getCounts(db: LocalDb): MappingTableCounts {
     departmentMaps: count("department_maps"),
     combos: count("account_department_combos"),
   };
+}
+
+/**
+ * Departments as picker options: the code plus its name, sorted by name so the
+ * dropdown reads alphabetically. Rows with no description fall back to the code
+ * as their label (a synced-but-unnamed department is still selectable). Only the
+ * two columns the picker needs cross the IPC boundary — never the wide level_*
+ * hierarchy.
+ */
+export function listDepartments(db: LocalDb): DepartmentOption[] {
+  const rows = db
+    .prepare(
+      `SELECT base_department AS code,
+              department_description_detail_level_max AS name
+         FROM department_maps
+        ORDER BY COALESCE(department_description_detail_level_max, base_department)
+                 COLLATE NOCASE`
+    )
+    .all() as Array<{ code: string; name: string | null }>;
+  return rows.map((row) => ({ code: row.code, name: row.name ?? row.code }));
+}
+
+/**
+ * Accounts as picker options: the code (base_account) plus its description. The
+ * whole table crosses once — the renderer narrows it per field (A9…, A5…, etc)
+ * — so this returns every account, sorted by code so the dropdown reads in GL
+ * order. Rows with no description fall back to the code as their label. Only the
+ * two columns the picker needs cross the IPC boundary — never the wide level_*
+ * hierarchy.
+ */
+export function listAccounts(db: LocalDb): AccountOption[] {
+  const rows = db
+    .prepare(
+      `SELECT base_account AS code,
+              account_description_detail_level_max AS name
+         FROM account_maps
+        ORDER BY base_account COLLATE NOCASE`
+    )
+    .all() as Array<{ code: string; name: string | null }>;
+  return rows.map((row) => ({ code: row.code, name: row.name ?? row.code }));
 }
 
 /** Cache metadata + counts for the settings status line. */

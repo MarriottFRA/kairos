@@ -173,7 +173,15 @@ function rowToFieldDef(row: FieldCatalogRow): FieldDef {
  * Idempotently push the SYSTEM seed into this OU's catalog. Missing fields are
  * inserted; existing SYSTEM fields with an older seed_version get their
  * system-owned attributes refreshed while the user-owned ones (custom_label,
- * sort_order, visible, deleted_at) are preserved. USER fields are untouched.
+ * visible, deleted_at) are preserved. USER fields are untouched.
+ *
+ * sort_order is re-seeded on a version bump too: the seed array IS the source of
+ * truth for system-column order, and there is no user-facing column reorder, so
+ * a seed that relocates a field between sections (e.g. Pay Basis / Cluster into
+ * Position) has to be able to carry that field's position with it — otherwise
+ * the moved field keeps its old order and its section band draws twice (see
+ * sortOrderAtEndOfSection). USER fields (only addable to the pii band, whose
+ * system orders don't move) keep their own sort_order and stay contiguous.
  */
 export function ensureFieldCatalogSeed(db: Db, scope: OuScope): void {
   const existing = new Map(
@@ -197,14 +205,27 @@ export function ensureFieldCatalogSeed(db: Db, scope: OuScope): void {
   const refresh = prepared(
     db,
     `UPDATE field_catalog SET
-       section = ?, data_type = ?, storage = ?, locked = ?, default_label = ?,
-       editable = ?, maskable = ?, vector = ?, month_index = ?, compute_key = ?,
-       dropdown_source = ?, validation = ?, default_value = ?, seed_version = ?,
-       updated_at = ?
+       section = ?, sort_order = ?, data_type = ?, storage = ?, locked = ?,
+       default_label = ?, editable = ?, maskable = ?, vector = ?, month_index = ?,
+       compute_key = ?, dropdown_source = ?, validation = ?, default_value = ?,
+       seed_version = ?, updated_at = ?
      WHERE ou = ? AND field_key = ?`
   );
+  const dropField = prepared(
+    db,
+    `DELETE FROM field_catalog WHERE ou = ? AND field_key = ? AND origin = 'SYSTEM'`
+  );
+
+  // System fields retired from the seed (e.g. dailyVacationCost in v11) must be
+  // pruned from catalogs seeded earlier — refresh only touches keys still in the
+  // seed, so a stale row would otherwise linger as a column with no DB backing.
+  const seedKeys = new Set(SYSTEM_FIELD_SEED.map((field) => field.key));
 
   db.transaction(() => {
+    for (const storedKey of existing.keys()) {
+      if (!seedKeys.has(storedKey)) dropField.run(scope.ou, storedKey);
+    }
+
     for (const field of SYSTEM_FIELD_SEED) {
       const json = {
         dropdown: field.dropdownSource ? JSON.stringify(field.dropdownSource) : null,
@@ -238,6 +259,7 @@ export function ensureFieldCatalogSeed(db: Db, scope: OuScope): void {
       } else if (storedVersion < SEED_VERSION) {
         refresh.run(
           field.section,
+          field.sortOrder,
           field.dataType,
           field.storage,
           field.locked ? 1 : 0,
@@ -458,7 +480,7 @@ export function getComponentDefinitions(
     db,
     `SELECT id, ou, kind, spread_method, stat_kind, label, account_code,
             department_mode, fixed_department, increase_aware, sort_order,
-            base_selector_kind, ss_scheme_id, updated_at
+            base_selector_kind, ss_scheme_id, kpi_driver_id, base_ref, updated_at
        FROM cost_component_definitions
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY sort_order, id`
@@ -489,6 +511,14 @@ export function getComponentDefinitions(
         kind: "COMPONENTS",
         componentIds: (refsByDef.get(row.id as string) ?? []) as ComponentDefId[],
       };
+    } else if (typeof row.base_ref === "string" && row.base_ref) {
+      // Extended base kinds (blocks feature) ride as JSON — the legacy CHECK
+      // on base_selector_kind cannot be widened in SQLite. Unknown kinds are
+      // dropped rather than surfaced as a selector the compiler can't run.
+      const parsed = JSON.parse(row.base_ref) as { kind?: string } & Record<string, unknown>;
+      if (parsed.kind === "CALENDAR" || parsed.kind === "VACATION") {
+        baseSelector = parsed as BaseSelector;
+      }
     }
     return {
       id: row.id as ComponentDefId,
@@ -505,6 +535,7 @@ export function getComponentDefinitions(
       sortOrder: row.sort_order as number,
       baseSelector,
       ssSchemeId: (row.ss_scheme_id as SsSchemeId) ?? undefined,
+      kpiDriverId: (row.kpi_driver_id as string) ?? undefined,
       updatedAt: row.updated_at as string,
       deletedAt: null,
     };

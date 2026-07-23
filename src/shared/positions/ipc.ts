@@ -35,6 +35,7 @@ export interface PositionRecord {
   fte: number;
   seasonality: number[];
   monthlyBaseSalary: number;
+  hourlyRate: number;
   additionalMonthlyCosts: number[];
   meritIncreasePct: number;
   manualYearlyIncrease: number;
@@ -42,10 +43,8 @@ export interface PositionRecord {
   dailyContractHours: number;
   yearlyHoursWorked: number;
   vacationDays: number;
-  dailyVacationCost: number;
   vacationMonthlyWeights: number[];
   accrualDaysPerMonth: number;
-  accrualCostPerDay: number;
   /** Catalog-keyed values for POSITION_EXTRA fields. */
   extraValues: Record<string, unknown>;
   updatedAt: string;
@@ -72,6 +71,11 @@ export interface ComponentValueRecord {
   monthlyValues: number[] | null;
   qty: number | null;
   unitRate: number | null;
+  /** Per-row account override for an "unlocked" block; null = the block's
+   *  configured default. Empty string = calculation-only for this row. */
+  accountCode: string | null;
+  /** The dual-block count line's per-row override (unlocked stats account). */
+  statsAccountCode: string | null;
   updatedAt: string;
 }
 
@@ -185,12 +189,35 @@ export interface PositionCreate {
   pii?: Record<string, unknown>;
 }
 
+/** Sparse update to one (position, block definition) input row. Only the
+ *  value slots the block's spread method reads are ever sent; monthlyValues
+ *  arrives as a whole number[12] (the vector-promotion convention). */
+export interface ComponentValuePatch {
+  positionId: string;
+  componentDefId: string;
+  fields: Partial<
+    Pick<
+      ComponentValueRecord,
+      | "rate"
+      | "yearlyValue"
+      | "monthlyValues"
+      | "qty"
+      | "unitRate"
+      | "accountCode"
+      | "statsAccountCode"
+    >
+  >;
+}
+
 export interface PositionsBatchWriteRequest extends ScenarioScopedRequest {
   creates?: PositionCreate[];
   /** Sparse per-position patches, catalog-keyed. Vector fields arrive as whole
    *  number[12] arrays under the vector name (e.g. "seasonality"). */
   positionPatches?: Array<{ id: string; fields: Record<string, unknown> }>;
   piiPatches?: Array<{ positionId: string; fields: Record<string, unknown> }>;
+  /** Per-row block inputs (component_values). Applied after creates in the
+   *  same transaction, so a patch for a just-created row lands cleanly. */
+  componentValuePatches?: ComponentValuePatch[];
   softDeleteIds?: string[];
   /** Undo a soft delete (the snackbar Undo path). */
   restoreIds?: string[];
@@ -200,6 +227,36 @@ export interface PositionsBatchWriteResponse {
   /** One ISO stamp for the whole batch; the renderer adopts it per row. */
   updatedAt: string;
   applied: number;
+}
+
+// ---------------------------------------------------------------------------
+// Persisted engine output (Recalculate → Results page)
+// ---------------------------------------------------------------------------
+
+export interface OutputRunDto {
+  computedAt: string;
+  lineCount: number;
+  positionCount: number;
+}
+
+/** One dept×account result row (position lines aggregated in the repo). */
+export interface OutputAggRowDto {
+  dept: string;
+  account: string;
+  /** Statistics account (starts with "9" — count/hours lines, not currency). */
+  isStats: boolean;
+  /** Jan..Dec. */
+  months: number[];
+  total: number;
+}
+
+export interface OutputsResponse {
+  /** Null = never calculated for this (hotel, scenario). */
+  run: OutputRunDto | null;
+  /** True when any input changed since the run (positions, blocks, calendar,
+   *  KPI recalc, budget pull) — the "Recalculate to refresh" chip. */
+  stale: boolean;
+  rows: OutputAggRowDto[];
 }
 
 /** Error sentinel the renderer branches on when the encrypted DB is locked. */
@@ -218,4 +275,8 @@ export const POSITIONS_CHANNELS = {
   piiGet: "positions:pii-get",
   batchWrite: "positions:batch-write",
   scenarioInput: "positions:scenario-input",
+  /** Run the engine over the persisted scenario and overwrite the outputs. */
+  recalc: "positions:recalc",
+  /** The persisted outputs + staleness for the Results page. */
+  outputsGet: "positions:outputs-get",
 } as const;

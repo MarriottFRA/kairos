@@ -53,15 +53,9 @@ async function fetchLatestRelease(): Promise<{ version: string; releaseNotes: st
  * Create app-related IPC handlers
  */
 export function createAppHandlers(): Record<string, IpcHandler> {
-  return {
+  const handlers: Record<string, IpcHandler> = {
     'app:get-version': async () => {
       return { version: app.getVersion() };
-    },
-
-    // TEMP / DEV ONLY: reveal the secure-DB key for external review of
-    // kairos_secure.db. Throws in packaged builds (see secure_db.ts).
-    'app:dev-secure-db-key': async () => {
-      return revealSecureDbKeyForDev();
     },
 
     'app:check-for-updates': async () => {
@@ -122,6 +116,18 @@ export function createAppHandlers(): Record<string, IpcHandler> {
       return { success: true };
     },
   };
+
+  // DEV ONLY: reveal the derived secure-DB key so a signed-in developer can open
+  // kairos_secure.db in an external SQLite tool. The channel is not registered at
+  // all in a packaged build, so production ships no key-reveal path over IPC; the
+  // reveal helper itself is double-guarded on app.isPackaged regardless. Surfaced
+  // behind a buried, dev-only control in Settings — it reuses the live session's
+  // key with no re-auth, and returns nothing unless the secure DB is unlocked.
+  if (isDev) {
+    handlers['app:dev-secure-db-key'] = async () => revealSecureDbKeyForDev();
+  }
+
+  return handlers;
 }
 
 /**

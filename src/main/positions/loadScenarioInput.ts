@@ -28,9 +28,16 @@ import type {
   ScenarioId,
   ScenarioInput,
 } from "../../shared/engine/types";
+import {
+  buildBankHolidayDefinition,
+  injectKpiSeries,
+  resolveBlockValues,
+} from "../../shared/positions/engineInput";
+import { listBlocks } from "../blocks/repo";
 import { OuScope } from "./ouScope";
 import { prepared } from "./stmtCache";
 import { getComponentDefinitions, getSsSchemes } from "./structureRepo";
+import { getSeries } from "../kpiDrivers/repo";
 import { loadScenarioValues } from "./positionsRepo";
 
 type Db = InstanceType<typeof Database>;
@@ -41,6 +48,18 @@ export type CalendarGetter = (
   ou: string,
   year: number
 ) => Promise<CalendarYear | null>;
+
+/** The accrual account (a POSITION_EXTRA key) is the on/off switch for holiday
+ *  accrual generation — set means "book it", empty means "don't". */
+function accrualAccountSet(extraValues: Record<string, unknown>): boolean {
+  const account = extraValues.accrualAccount;
+  return typeof account === "string" && account.trim() !== "";
+}
+
+// buildBankHolidayDefinition and the KPI/dual-block value resolution moved to
+// src/shared/positions/engineInput.ts — one implementation shared with the
+// renderer live simulation so the two can never diverge. This module keeps
+// only the DB reads and feeds them in.
 
 export async function loadScenarioInput(
   structureDb: Db,
@@ -96,6 +115,7 @@ export async function loadScenarioInput(
       fte: record.fte,
       seasonality: record.seasonality,
       monthlyBaseSalary: record.monthlyBaseSalary,
+      hourlyRate: record.hourlyRate,
       additionalMonthlyCosts: record.additionalMonthlyCosts,
       meritIncreasePct: record.meritIncreasePct,
       manualYearlyIncrease: record.manualYearlyIncrease,
@@ -103,10 +123,13 @@ export async function loadScenarioInput(
       dailyContractHours: record.dailyContractHours,
       yearlyHoursWorked: record.yearlyHoursWorked,
       vacationDays: record.vacationDays,
-      dailyVacationCost: record.dailyVacationCost,
       vacationMonthlyWeights: record.vacationMonthlyWeights,
-      accrualDaysPerMonth: record.accrualDaysPerMonth,
-      accrualCostPerDay: record.accrualCostPerDay,
+      // Accrual is auto-calculated (Yearly Days ÷ 12) and generated only when the
+      // position carries an accrual account; with none, feed 0 so the engine's
+      // accrualDays===0 guard suppresses the line. Mirrors rowToEnginePosition.
+      accrualDaysPerMonth: accrualAccountSet(record.extraValues)
+        ? record.vacationDays / 12
+        : 0,
       updatedAt: record.updatedAt,
       deletedAt: null,
     }));
@@ -120,6 +143,8 @@ export async function loadScenarioInput(
       monthlyValues: record.monthlyValues ?? undefined,
       qty: record.qty ?? undefined,
       unitRate: record.unitRate ?? undefined,
+      accountCode: record.accountCode ?? undefined,
+      statsAccountCode: record.statsAccountCode ?? undefined,
       updatedAt: record.updatedAt,
       deletedAt: null,
     })
@@ -135,13 +160,36 @@ export async function loadScenarioInput(
     deletedAt: null,
   }));
 
+  // The user's components, plus the synthetic bank-holiday premium when the
+  // calendar has it switched on (see buildBankHolidayDefinition).
+  const definitions = [...getComponentDefinitions(structureDb, scope)];
+  const bankHolidayDef = buildBankHolidayDefinition(scope.ou, calendarYear);
+  if (bankHolidayDef) definitions.push(bankHolidayDef);
+
+  // Resolve KPI-driven blocks to absolute monthly values (the KPI precalc cache
+  // lives in the same plaintext store as the structure). Positions carry the
+  // per-position multiplier as ComponentValue.rate. Then synthesize the
+  // yearly slots dual "Count × Rate" blocks read (shared resolution).
+  injectKpiSeries(definitions, positions, componentValues, (driverId) =>
+    getSeries(structureDb, scope.ou, driverId)
+  );
+  const resolvedValues = resolveBlockValues(
+    definitions,
+    componentValues,
+    listBlocks(structureDb, scope).map((block) => ({
+      costDefId: block.costDefId,
+      accountLocked: block.accountLocked,
+      statsAccountLocked: block.statsAccountLocked,
+    }))
+  );
+
   return {
     scenario,
     calendar,
-    definitions: getComponentDefinitions(structureDb, scope),
+    definitions,
     ssSchemes: getSsSchemes(structureDb, scope),
     positions,
-    componentValues,
+    componentValues: resolvedValues,
     buyouts,
   };
 }

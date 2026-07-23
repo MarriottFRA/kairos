@@ -42,6 +42,34 @@ export interface MappingTablesData {
   version: string;
 }
 
+/**
+ * A single department for a picker: the code the user selects (base_department)
+ * and its human name (department_description_detail_level_max). Flattened from a
+ * DepartmentMap row so the renderer never receives the wide level_* hierarchy.
+ */
+export interface DepartmentOption {
+  code: string;
+  name: string;
+}
+
+/**
+ * A single account for a picker: the code that gets stored (base_account) and
+ * its human description (account_description_detail_level_max — the "detail
+ * level max" the user browses by). Flattened from an AccountMap row so the
+ * renderer never receives the wide level_* hierarchy.
+ *
+ * Unlike a department (where the NAME is stored), an account picker stores the
+ * `code` — a picked account writes its base_account into the cell, while the
+ * user searches by the description. Which subset of accounts a given field
+ * offers is decided by the field's `AccountFilter` (see fields.ts), applied in
+ * the renderer over this full list; the whole account_maps table crosses IPC
+ * once and every account field filters the same cache.
+ */
+export interface AccountOption {
+  code: string;
+  name: string;
+}
+
 /** One account_department_combos row from GET /mapping-tables/combos. */
 export interface AccountDepartmentCombo {
   id: number;
@@ -98,4 +126,8 @@ export const MAPPING_TABLES_CHANNELS = {
   rebuild: "mapping-tables:rebuild",
   /** Read local cache metadata + row counts (no network). */
   status: "mapping-tables:status",
+  /** List departments (code + name) for the positions dropdown. */
+  listDepartments: "mapping-tables:list-departments",
+  /** List accounts (code + description) for the account dropdowns. */
+  listAccounts: "mapping-tables:list-accounts",
 } as const;
