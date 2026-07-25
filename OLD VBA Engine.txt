@@ -1625,3 +1625,135 @@ Sub ExportZero2BST()
     
 End Sub
 
+Option Explicit
+Sub Full_Alloc_Recalc()
+    ' ----------------------------------------------------------------
+    ' Procedure Name: Full_Alloc_Recalc
+    ' Purpose: Recalculate the spread % by departments
+    ' Procedure Kind: Sub
+    ' Procedure Access: Public
+    ' Author: Richard Porins (rpori625)
+    ' Date: 29/07/2020
+    ' ----------------------------------------------------------------
+    Dim UserSettingCalculation As Variant
+    Calculate
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    UserSettingCalculation = CalculationSetting
+    Application.Calculation = xlCalculationManual
+    'declare variables
+    Dim rawData As Variant, lastRow As Double, wksh As Worksheet, wksh_source As Worksheet, BaseArray() As Variant, i As Double, x As Double, UniqueArray As Variant, CalculatedArray() As Variant
+    Dim SortedArray As Variant, SortedUniqueArray As Variant, CurrentDep As String, CurrentRow As Double, xCalc As Double, Temp As Boolean
+    
+    Dim Total As Double
+
+    Set wksh = GetSheet_BaseName(ThisWorkbook, "Allocations")
+    Set wksh_source = GetSheet_BaseName(ThisWorkbook, "AssociateDetails")
+    
+    wksh.Range("A10:K9999").Clear
+    
+    lastRow = wksh_source.Cells(wksh_source.Rows.count, 5).End(xlUp).Row
+    rawData = wksh_source.Range("A4:CX" & lastRow).Value2
+
+    ReDim BaseArray(1 To UBound(rawData))
+
+    For i = 1 To UBound(rawData)
+        BaseArray(i) = rawData(i, 5)
+    Next i
+    UniqueArray = CollectionGlitch(BaseArray)
+
+    If UniqueArray(UBound(rawData)) = "" Then
+        For i = 1 To UBound(rawData)
+            If UniqueArray(i) = "" Then
+                ReDim Preserve UniqueArray(1 To i - 1)
+                ReDim CalculatedArray(1 To i - 1, 0 To 7)
+                Exit For
+            Else
+            End If
+        Next i
+    Else
+        ReDim Preserve UniqueArray(1 To UBound(rawData))
+        ReDim CalculatedArray(1 To UBound(rawData), 0 To 7)
+    End If
+    
+    SortedArray = QuickSortTable(rawData, -1, -1, 4)
+    SortedUniqueArray = QuickSortList(UniqueArray, -1, -1)
+    
+    CurrentDep = ""
+    CurrentRow = 0
+    
+    
+    
+    For i = 1 To UBound(SortedArray)
+        If CurrentDep = SortedArray(i, 4) Then
+        Else
+            CurrentDep = SortedArray(i, 4)
+            CurrentRow = CurrentRow + 1
+            CalculatedArray(CurrentRow, 0) = SortedArray(i, 4)
+        End If
+            
+        CalculatedArray(CurrentRow, 1) = CalculatedArray(CurrentRow, 1) + SortedArray(i, 14) 'HC
+        CalculatedArray(CurrentRow, 2) = CalculatedArray(CurrentRow, 2) + SortedArray(i, 15) 'FTE
+        CalculatedArray(CurrentRow, 3) = CalculatedArray(CurrentRow, 3) + SortedArray(i, 51) 'BaseSalary
+        CalculatedArray(CurrentRow, 4) = CalculatedArray(CurrentRow, 4) + SortedArray(i, 13) 'Hours Worked
+        CalculatedArray(CurrentRow, 5) = CalculatedArray(CurrentRow, 5) + SortedArray(i, 12) 'Hours Paid
+        CalculatedArray(CurrentRow, 6) = CalculatedArray(CurrentRow, 6) + SortedArray(i, 8) 'Contract Days
+        CalculatedArray(CurrentRow, 7) = 1
+
+    Next i
+
+    For i = 1 To 5
+        If wksh.Cells(7, (i * 2)).Value2 = "Active" Then
+            xCalc = ReturnCaseValue(wksh.Cells(9, (i * 2) + 1).Value2)
+            Total = 0
+            For x = 1 To UBound(CalculatedArray)
+                wksh.Cells(x + 9, 1).NumberFormat = "@"
+                wksh.Cells(x + 9, 1) = CalculatedArray(x, 0)
+                If wksh.Cells(6, (i * 2) + 1) = CalculatedArray(x, 0) Then
+                    wksh.Cells(x + 9, (i * 2) + 1) = 0
+                Else
+                    wksh.Cells(x + 9, (i * 2) + 1) = CalculatedArray(x, xCalc)
+                    Total = Total + CalculatedArray(x, xCalc)
+                End If
+            Next x
+            For x = 1 To UBound(CalculatedArray)
+                wksh.Cells(x + 9, (i * 2)) = wksh.Cells(x + 9, (i * 2) + 1) / Total * 100
+            Next x
+    
+            Temp = FormatRange(wksh.Range(wksh.Cells(10, 1), wksh.Cells(9 + UBound(CalculatedArray), 11)))
+            Temp = FormatRange(wksh.Range(wksh.Cells(10, 2), wksh.Cells(9 + UBound(CalculatedArray), 3)))
+            Temp = FormatRange(wksh.Range(wksh.Cells(10, 6), wksh.Cells(9 + UBound(CalculatedArray), 7)))
+            Temp = FormatRange(wksh.Range(wksh.Cells(10, 8), wksh.Cells(9 + UBound(CalculatedArray), 9)))
+    
+        Else
+        End If
+    Next i
+    
+    Application.Calculation = CalculationSetting
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+
+End Sub
+
+Function ReturnCaseValue(x As String) As Double
+
+    Select Case x
+        Case "Base Salary(estimate)"
+            ReturnCaseValue = 3
+        Case "Head Count"
+            ReturnCaseValue = 1
+        Case "FTE Count"
+            ReturnCaseValue = 2
+        Case "Flat Spread"
+            ReturnCaseValue = 7
+        Case "Hours Worked"
+            ReturnCaseValue = 4
+        Case "Hours Paid"
+            ReturnCaseValue = 5
+        Case "Contract Days"
+            ReturnCaseValue = 6
+    End Select
+
+End Function

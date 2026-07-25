@@ -91,11 +91,17 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         break;
       case Op.SOCIAL_SEC: {
         const count = pool[pp + 2];
+        const mode = pool[pp + 3] === 1 ? "perPeriod" : "cumulative";
+        const startMonth = pool[pp + 4];
+        const openingBase = pool[pp + 5];
         const brackets: string[] = [];
         for (let b = 0; b < Math.min(count, SS_MAX_BRACKETS); b++) {
-          brackets.push(`≤${fmt(pool[pp + 3 + 2 * b])}@${fmt(pool[pp + 4 + 2 * b])}`);
+          brackets.push(`≤${fmt(pool[pp + 6 + 2 * b])}@${fmt(pool[pp + 7 + 2 * b])}`);
         }
-        detail = `monthlyCap=${fmt(pool[pp])} yearlyCap=${fmt(pool[pp + 1])} brackets=[${brackets.join(", ")}]`;
+        detail =
+          `monthlyCap=${fmt(pool[pp])} yearlyCap=${fmt(pool[pp + 1])} ` +
+          `${mode} startMonth=${fmt(startMonth)} opening=${fmt(openingBase)} ` +
+          `brackets=[${brackets.join(", ")}]`;
         break;
       }
       case Op.STAT_HC:

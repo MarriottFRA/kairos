@@ -199,9 +199,15 @@ function bankHoliday(
   return out;
 }
 
-function socialSecurity(scheme: SocialSecurityScheme, base: number[]): number[] {
+function socialSecurity(
+  scheme: SocialSecurityScheme,
+  base: number[],
+  openingBase: number
+): number[] {
   const monthlyCap = scheme.monthlyCap ?? Infinity;
   const yearlyCap = scheme.yearlyCap ?? Infinity;
+  const perPeriod = scheme.accumulationMode === "PER_PERIOD";
+  const resetIdx = (scheme.taxYearStartMonth ?? 1) - 1; // 0-based tax-year start
 
   // Total contribution on a cumulative base of x.
   const tax = (x: number): number => {
@@ -218,8 +224,19 @@ function socialSecurity(scheme: SocialSecurityScheme, base: number[]): number[] 
   };
 
   const out: number[] = [];
-  let cumPrev = 0;
+  if (perPeriod) {
+    // Each month stands alone: no carry-over, no yearly cap.
+    for (let m = 0; m < MONTHS; m++) {
+      out.push(tax(Math.min(base[m], monthlyCap)));
+    }
+    return out;
+  }
+  // Cumulative: seed from the prior-year opening base, reset at the tax-year
+  // boundary. A January start (resetIdx 0) resets at m=0 → opening base
+  // discarded, identical to the pre-2c engine.
+  let cumPrev = openingBase;
   for (let m = 0; m < MONTHS; m++) {
+    if (m === resetIdx) cumPrev = 0;
     const monthBase = Math.min(base[m], monthlyCap);
     const cum = Math.min(cumPrev + monthBase, yearlyCap);
     out.push(tax(cum) - tax(cumPrev));
@@ -319,6 +336,22 @@ export function referencePosition(
       for (let m = 0; m < MONTHS; m++) base[m] = vacation[m];
       return base;
     }
+    if (selector.kind === "SS_BASE") {
+      // The Social-Security base: NET base salary (gross − vacation) and/or the
+      // vacation series and/or other component lines. Ticking both flags sums to
+      // gross. Custom ids are never the base-salary def, so computeLine is safe.
+      for (let m = 0; m < MONTHS; m++) {
+        if (selector.includeBaseSalary) base[m] += gross[m] - vacation[m];
+        if (selector.includeVacation) base[m] += vacation[m];
+      }
+      for (const id of selector.componentIds) {
+        const def = defById.get(id);
+        if (!def) continue;
+        const series = computeLine(def);
+        for (let m = 0; m < MONTHS; m++) base[m] += series[m];
+      }
+      return base;
+    }
     for (const id of selector.componentIds) {
       const def = defById.get(id);
       if (!def) continue;
@@ -356,7 +389,11 @@ export function referencePosition(
       case "SOCIAL_SECURITY": {
         const scheme = schemeById.get(def.ssSchemeId as string);
         if (!scheme) throw new Error(`reference: missing scheme for ${def.label}`);
-        out = socialSecurity(scheme, resolveBase(def.baseSelector));
+        out = socialSecurity(
+          scheme,
+          resolveBase(def.baseSelector),
+          valueByDef.get(def.id as string)?.ssOpeningBase ?? 0
+        );
         break;
       }
       case "STAT": {
@@ -472,18 +509,21 @@ export function referencePosition(
 
   for (const def of definitions) computeLine(def);
 
-  // Count multiplier — mirror of execute.ts. The row represents `headcount`
-  // identical positions: compute every line as a single unit first (so the
-  // social-security caps apply per person), then book it C times over. The
-  // HEADCOUNT stat already carries the count, so it stays as-is.
-  const count = position.headcount;
-  if (count !== 1) {
+  // Count × cluster-weight multiplier — mirror of execute.ts. The row
+  // represents `headcount` identical positions, of which this hotel carries
+  // `hotelClusterWeight` (its hotel-cluster share): compute every line as a
+  // single unit first (so the social-security caps apply per person on the
+  // FULL salary), then book it count × weight over. The HEADCOUNT stat
+  // already carries the count and a shared person still counts as one head,
+  // so it stays as-is; KPI-driven lines are absolute (whole-line amount),
+  // not per-head, and stay exempt too.
+  const coeff = position.headcount * position.hotelClusterWeight;
+  if (coeff !== 1) {
     for (const def of definitions) {
       if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
-      // KPI-driven lines are absolute (whole-line amount), not per-head.
       if (def.spreadMethod === "DIRECT_ABS") continue;
       const series = lines.get(def.id);
-      if (series) for (let m = 0; m < MONTHS; m++) series[m] *= count;
+      if (series) for (let m = 0; m < MONTHS; m++) series[m] *= coeff;
     }
   }
 

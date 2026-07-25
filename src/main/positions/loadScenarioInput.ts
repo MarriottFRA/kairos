@@ -29,11 +29,18 @@ import type {
   ScenarioInput,
 } from "../../shared/engine/types";
 import {
+  applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
   resolveBlockValues,
+  resolveYearlyHoursWorked,
 } from "../../shared/positions/engineInput";
 import { listBlocks } from "../blocks/repo";
+import { listClusters } from "../hotelClusters/repo";
+import {
+  clusterMapById,
+  resolveHotelClusterWeight,
+} from "../../shared/hotelClusters/resolve";
 import { OuScope } from "./ouScope";
 import { prepared } from "./stmtCache";
 import { getComponentDefinitions, getSsSchemes } from "./structureRepo";
@@ -99,17 +106,31 @@ export async function loadScenarioInput(
 
   const values = loadScenarioValues(valuesDb, scope, scenarioId);
 
+  // Hotel-cluster definitions (cross-OU, plaintext store). The stored value is
+  // the cluster ID; the engine gets the resolved NAME (its staffing-stats
+  // rollup key) and this hotel's WEIGHT. Must mirror runLiveSim exactly —
+  // liveSimParity pins the two together.
+  const clusterById = clusterMapById(listClusters(structureDb));
+
   // Inactive positions are retained in the store and the grid (and roll forward
   // with a scenario copy) but are not budgeted — dropping them here keeps the
   // engine a pure 12-month kernel with no notion of activation.
   const positions: Position[] = values.positions
     .filter((record) => record.active)
-    .map((record): Position => ({
+    .map((record): Position => {
+      const resolved = resolveHotelClusterWeight(
+        scope.ou,
+        record.cluster,
+        record.clusterMultiplierOverride,
+        clusterById
+      );
+      return {
       id: record.id as PositionId,
       scenarioId: record.scenarioId as ScenarioId,
       departmentCode: record.departmentCode,
       jobTypeCode: record.jobTypeCode,
-      cluster: record.cluster,
+      cluster: resolved.clusterName,
+      hotelClusterWeight: resolved.weight,
       payType: record.payType,
       headcount: record.headcount,
       fte: record.fte,
@@ -121,7 +142,14 @@ export async function loadScenarioInput(
       manualYearlyIncrease: record.manualYearlyIncrease,
       increaseMonth: record.increaseMonth,
       dailyContractHours: record.dailyContractHours,
-      yearlyHoursWorked: record.yearlyHoursWorked,
+      // Auto-derived from the calendar (net productive days − vacation) × daily
+      // hours; a positive stored value is a manual override. Shared with
+      // runLiveSim via resolveYearlyHoursWorked — liveSimParity pins the two.
+      yearlyHoursWorked: resolveYearlyHoursWorked(
+        record.yearlyHoursWorked,
+        record,
+        calendar
+      ),
       vacationDays: record.vacationDays,
       vacationMonthlyWeights: record.vacationMonthlyWeights,
       // Accrual is auto-calculated (Yearly Days ÷ 12) and generated only when the
@@ -132,7 +160,8 @@ export async function loadScenarioInput(
         : 0,
       updatedAt: record.updatedAt,
       deletedAt: null,
-    }));
+      };
+    });
 
   const componentValues: ComponentValue[] = values.componentValues.map(
     (record): ComponentValue => ({
@@ -143,6 +172,7 @@ export async function loadScenarioInput(
       monthlyValues: record.monthlyValues ?? undefined,
       qty: record.qty ?? undefined,
       unitRate: record.unitRate ?? undefined,
+      ssOpeningBase: record.ssOpeningBase ?? undefined,
       accountCode: record.accountCode ?? undefined,
       statsAccountCode: record.statsAccountCode ?? undefined,
       updatedAt: record.updatedAt,
@@ -166,6 +196,12 @@ export async function loadScenarioInput(
   const bankHolidayDef = buildBankHolidayDefinition(scope.ou, calendarYear);
   if (bankHolidayDef) definitions.push(bankHolidayDef);
 
+  // Fill each NI scheme's contributory base from its own base membership
+  // (mirror of runLiveSim — liveSimParity pins the two).
+  const blocks = listBlocks(structureDb, scope);
+  const ssSchemes = getSsSchemes(structureDb, scope);
+  applySocialSecurityBase(definitions, ssSchemes);
+
   // Resolve KPI-driven blocks to absolute monthly values (the KPI precalc cache
   // lives in the same plaintext store as the structure). Positions carry the
   // per-position multiplier as ComponentValue.rate. Then synthesize the
@@ -176,7 +212,7 @@ export async function loadScenarioInput(
   const resolvedValues = resolveBlockValues(
     definitions,
     componentValues,
-    listBlocks(structureDb, scope).map((block) => ({
+    blocks.map((block) => ({
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,
       statsAccountLocked: block.statsAccountLocked,
@@ -187,7 +223,7 @@ export async function loadScenarioInput(
     scenario,
     calendar,
     definitions,
-    ssSchemes: getSsSchemes(structureDb, scope),
+    ssSchemes,
     positions,
     componentValues: resolvedValues,
     buyouts,

@@ -45,7 +45,7 @@ export type FieldLookup = Map<string, FieldDef>;
 
 const POSITION_COLUMNS = `
   id, scenario_id, lineage_id, active,
-  department_code, job_type_code, cluster, pay_type,
+  department_code, job_type_code, cluster, cluster_multiplier_override, pay_type,
   headcount, fte, seasonality, monthly_base_salary, hourly_rate,
   additional_monthly_costs,
   merit_increase_pct, manual_yearly_increase, increase_month,
@@ -90,6 +90,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     departmentCode: row.department_code as string,
     jobTypeCode: row.job_type_code as string,
     cluster: row.cluster as string,
+    clusterMultiplierOverride:
+      (row.cluster_multiplier_override as number | null) ?? null,
     payType: row.pay_type as PositionRecord["payType"],
     headcount: row.headcount as number,
     fte: row.fte as number,
@@ -128,7 +130,8 @@ export function loadScenarioValues(
     prepared(
       db,
       `SELECT position_id, component_def_id, rate, yearly_value, monthly_values,
-              qty, unit_rate, account_code, stats_account_code, updated_at
+              qty, unit_rate, ss_opening_base, account_code, stats_account_code,
+              updated_at
          FROM component_values
         WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
     ).all(scope.ou, scenarioId) as Array<Record<string, unknown>>
@@ -141,6 +144,7 @@ export function loadScenarioValues(
       monthlyValues: row.monthly_values ? parseVector(row.monthly_values) : null,
       qty: row.qty as number | null,
       unitRate: row.unit_rate as number | null,
+      ssOpeningBase: (row.ss_opening_base as number | null) ?? null,
       accountCode: (row.account_code as string | null) ?? null,
       statsAccountCode: (row.stats_account_code as string | null) ?? null,
       updatedAt: row.updated_at as string,
@@ -280,19 +284,24 @@ interface SplitFields {
  * Empty-cell values for engine columns whose schema default is not the type's
  * zero. Clearing "Increase Month" must mean "no increase" (13), not "increase
  * from month 0 onward"; a headcount/FTE cleared to 0 would silently zero the
- * position's whole cost rather than fall back to one.
+ * position's whole cost rather than fall back to one. A cleared cluster
+ * multiplier override MUST persist as NULL ("use the cluster's weight") — the
+ * numeric-zero fallback would zero the position's whole cost instead.
  */
 const ENGINE_EMPTY_OVERRIDES: Readonly<Record<string, unknown>> = {
   increaseMonth: 13,
   headcount: 1,
   fte: 1,
   active: 1,
+  clusterMultiplierOverride: null,
 };
 
 /**
- * Coerce one engine scalar. EVERY column this feeds is NOT NULL (see
- * POSITIONS_VALUE_TABLES_SQL), so a cleared or absent cell resolves to the
- * column's default — returning null here fails the whole batch transaction.
+ * Coerce one engine scalar. Every column this feeds is NOT NULL (see
+ * POSITIONS_VALUE_TABLES_SQL) except cluster_multiplier_override (nullable by
+ * design, cleared via its ENGINE_EMPTY_OVERRIDES entry), so a cleared or
+ * absent cell resolves to the column's default — returning an unmapped null
+ * here fails the whole batch transaction.
  */
 function coerceScalar(key: string, def: FieldDef | undefined, value: unknown): unknown {
   if (value === undefined || value === null || value === "") {
@@ -434,6 +443,7 @@ const COMPONENT_VALUE_COLUMNS: Record<string, string> = {
   monthlyValues: "monthly_values",
   qty: "qty",
   unitRate: "unit_rate",
+  ssOpeningBase: "ss_opening_base",
   accountCode: "account_code",
   statsAccountCode: "stats_account_code",
 };
@@ -654,14 +664,16 @@ export function cloneScenarioValues(
       db,
       `INSERT INTO positions (
          id, ou, scenario_id, lineage_id, active,
-         department_code, job_type_code, cluster, pay_type, headcount, fte,
+         department_code, job_type_code, cluster, cluster_multiplier_override,
+         pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
          vacation_monthly_weights, accrual_days_per_month,
          extra_values, updated_at, deleted_at)
        SELECT ?, ou, ?, lineage_id, active,
-         department_code, job_type_code, cluster, pay_type, headcount, fte,
+         department_code, job_type_code, cluster, cluster_multiplier_override,
+         pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
@@ -684,9 +696,11 @@ export function cloneScenarioValues(
       db,
       `INSERT INTO component_values (
          position_id, component_def_id, ou, scenario_id, rate, yearly_value,
-         monthly_values, qty, unit_rate, updated_at, deleted_at)
+         monthly_values, qty, unit_rate, ss_opening_base, account_code,
+         stats_account_code, updated_at, deleted_at)
        SELECT ?, component_def_id, ou, ?, rate, yearly_value,
-         monthly_values, qty, unit_rate, ?, NULL
+         monthly_values, qty, unit_rate, ss_opening_base, account_code,
+         stats_account_code, ?, NULL
          FROM component_values
         WHERE position_id = ? AND ou = ? AND deleted_at IS NULL`
     );

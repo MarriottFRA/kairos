@@ -16,6 +16,7 @@ import { resolveOuScope } from "../../main/positions/ouScope";
 import {
   deleteBlock,
   ensureBaseSalaryDef,
+  ensurePositionCountDef,
   listBlocks,
   reorderBlocks,
   restoreBlock,
@@ -48,12 +49,32 @@ type Scope = ReturnType<typeof resolveOuScope>;
 /** The full structure read model the renderer needs for grid + live sim. */
 function readModel(db: LocalDb, scope: Scope): BlocksListResponse {
   // The engine mandates exactly one BASE_SALARY def; guarantee it here so the
-  // component graph is always compilable once blocks come into play.
-  ensureBaseSalaryDef(db, scope, { now: new Date().toISOString() });
+  // component graph is always compilable once blocks come into play. NI/SS blocks
+  // are now user-added (as many as the OU needs), so nothing is seeded here.
+  // The permanent position-count head (always booked to A972540) is seeded
+  // beside it so every scenario reports its heads — never silently dropped.
+  const now = new Date().toISOString();
+  ensureBaseSalaryDef(db, scope, { now });
+  ensurePositionCountDef(db, scope, { now });
+  const ssSchemes = getSsSchemes(db, scope);
+  // Stamp each SS block with whether its scheme carries a prior-year opening
+  // base (CUMULATIVE + non-January tax year). This is the single source of the
+  // gate for the per-row "Opening base" column — the renderer's grid and live
+  // sim both read it off the block, so neither re-joins the scheme.
+  const schemeById = new Map(ssSchemes.map((scheme) => [scheme.id as string, scheme]));
+  const blocks = listBlocks(db, scope).map((block) => {
+    if (block.blockType !== "SOCIAL_SECURITY" || !block.ssSchemeId) return block;
+    const scheme = schemeById.get(block.ssSchemeId);
+    const cumulativeNonJan =
+      !!scheme &&
+      (scheme.accumulationMode ?? "CUMULATIVE") === "CUMULATIVE" &&
+      (scheme.taxYearStartMonth ?? 1) > 1;
+    return { ...block, ssCumulativeNonJan: cumulativeNonJan };
+  });
   return {
-    blocks: listBlocks(db, scope),
+    blocks,
     definitions: getComponentDefinitions(db, scope),
-    ssSchemes: getSsSchemes(db, scope),
+    ssSchemes,
   };
 }
 

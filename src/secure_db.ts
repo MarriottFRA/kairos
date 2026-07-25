@@ -3,10 +3,6 @@ import fs from "fs";
 import Database from "better-sqlite3-multiple-ciphers";
 import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
-  applyValueStoreV3,
-  applyValueStoreV4,
-  applyValueStoreV5,
-  applyValueStoreV9,
   ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "./main/positions/schema";
@@ -42,30 +38,30 @@ import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 const securePath = SECURE_DB_PATH;
 
-// Schema versions for the encrypted database, tracked independently of the
-// settings DB:
-//   1 - schema_info
-//   2 - positions value store (positions, position_pii, component_values,
-//       buyout_rows)
-//   3 - positions.lineage_id + positions.active (cross-year identity and the
-//       retained-but-not-budgeted toggle)
-//   4 - positions.hourly_rate (alternate basic-salary input, seed v10)
-//   5 - drop positions.daily_vacation_cost + accrual_cost_per_day (now derived
-//       from base pay by the engine, seed v11)
-//   6 - manual_input_rows (hand-entered cost lines: hours/amount per month)
-//   7 - manual_input_rows: split spread_target/spread_base into separate
-//       spread_base_hours + spread_base_amount columns
-//   8 - manual_input_rows: reframe "hours" as generic "stats" (hours_json ->
-//       stats_json, spread_base_hours -> spread_base_stats) + add stats_account
-//   9 - component_values.account_code + stats_account_code (per-row account
-//       overrides for "unlocked" blocks)
-//  10 - persisted engine output (engine_runs + engine_output_lines), written
-//       by the explicit Recalculate and read by the Results page
+// Schema versioning for the encrypted database, tracked independently of the
+// settings DB.
+//
+// v1 is the BASELINE: the entire feature schema in its final shape, created in
+// one shot by createSchema(). Pre-launch, the former stepwise migrations 1–11
+// (positions value store; the lineage/active/hourly_rate/vacation-cost/cluster
+// column churn on positions; manual_input_rows and its hours→stats reshaping;
+// per-row account overrides on component_values; the persisted engine output
+// tables) were squashed into this baseline — there are no upgraded stores in
+// the wild whose stepwise path had to be preserved, so the accumulated history
+// was collapsed into the final-state DDL constants it produced.
+//
+// FROM LAUNCH ON, schema changes are APPEND-ONLY entries in MIGRATIONS below
+// (v2, v3, …): a new numbered step that ALTERs/creates and is stamped as it
+// lands. Never edit or renumber a shipped migration — the runner only executes
+// versions ABOVE a database's stored number, so an edited body silently never
+// re-runs (exactly the drift that motivated this squash). When the list grows
+// unwieldy again and every live store is known to be at/above some floor, it
+// can be squashed back to a fresh baseline the same way.
 //
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 10;
+const CURRENT_SCHEMA_VERSION = 1;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -178,6 +174,41 @@ export function isSecureDatabaseUnlocked(): boolean {
 }
 
 /**
+ * DESTRUCTIVE: drop every table in the encrypted store and recreate the schema
+ * from the current v1 baseline. Wipes all encrypted feature data (positions,
+ * PII, component values, buyouts, manual input, cached engine outputs) but
+ * keeps the database file and its key, so NO re-authentication is needed and
+ * the plaintext key material is untouched.
+ *
+ * Requires the store to be unlocked — throws otherwise. The encrypted half of
+ * the Settings "Rebuild database" escape hatch, for a store whose schema has
+ * drifted from the code (e.g. a column added to the baseline after the store
+ * was already stamped, which createSchema's IF NOT EXISTS DDL cannot heal).
+ * Surface only behind an explicit, data-loss-warned confirmation.
+ */
+export function rebuildSecureSchema(): void {
+  const handle = secureDb(); // throws if locked — a rebuild needs an open store
+  // FKs off so the drop order across referencing tables never matters.
+  handle.pragma("foreign_keys = OFF");
+  try {
+    const tables = handle
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+      )
+      .all() as Array<{ name: string }>;
+    handle.transaction(() => {
+      for (const { name } of tables) {
+        handle.exec(`DROP TABLE IF EXISTS "${name}"`);
+      }
+    })();
+  } finally {
+    handle.pragma("foreign_keys = ON");
+  }
+  // Recreate schema_info + the full baseline and re-stamp v1.
+  createSchema(handle);
+}
+
+/**
  * Close the connection, dropping the key from memory. Call on sign-out.
  *
  * The database file stays on disk and is readable again after the next
@@ -199,55 +230,10 @@ export function closeSecureDatabase(): void {
 //------------------------------------------------------------------------------
 //--- SCHEMA -------------------------------------------------------------------
 
-const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
-  2: (handle) => {
-    handle.exec(POSITIONS_VALUE_TABLES_SQL);
-  },
-  3: (handle) => {
-    applyValueStoreV3(handle);
-  },
-  4: (handle) => {
-    applyValueStoreV4(handle);
-  },
-  5: (handle) => {
-    applyValueStoreV5(handle);
-  },
-  6: (handle) => {
-    handle.exec(MANUAL_INPUT_TABLES_SQL);
-  },
-  // The spread helper gained a separate Hours base and Amount base in place of
-  // the old single base + hours/amount target toggle. Carry the existing base
-  // into whichever side its target pointed at, then drop the old columns.
-  7: (handle) => {
-    handle.exec(`
-      ALTER TABLE manual_input_rows ADD COLUMN spread_base_hours REAL;
-      ALTER TABLE manual_input_rows ADD COLUMN spread_base_amount REAL;
-      UPDATE manual_input_rows
-        SET spread_base_hours  = CASE WHEN spread_target = 'amount' THEN NULL ELSE spread_base END,
-            spread_base_amount = CASE WHEN spread_target = 'amount' THEN spread_base ELSE NULL END;
-      ALTER TABLE manual_input_rows DROP COLUMN spread_target;
-      ALTER TABLE manual_input_rows DROP COLUMN spread_base;
-    `);
-  },
-  // The units side generalised from "hours" to "stats" (hours is one kind of
-  // stat), and gained its own statistical account alongside the cost account.
-  // Rename the existing columns in place (data preserved) and add stats_account.
-  8: (handle) => {
-    handle.exec(`
-      ALTER TABLE manual_input_rows RENAME COLUMN hours_json TO stats_json;
-      ALTER TABLE manual_input_rows RENAME COLUMN spread_base_hours TO spread_base_stats;
-      ALTER TABLE manual_input_rows ADD COLUMN stats_account TEXT NOT NULL DEFAULT '';
-    `);
-  },
-  // Per-row account overrides for "unlocked" blocks (blocks feature).
-  9: (handle) => {
-    applyValueStoreV9(handle);
-  },
-  // Persisted engine output — Recalculate overwrites, the Results page reads.
-  10: (handle) => {
-    handle.exec(ENGINE_OUTPUTS_SQL);
-  },
-};
+// Append-only post-launch migrations, keyed by the version they produce
+// (v2, v3, …). Empty today: the whole pre-launch history is folded into the v1
+// baseline in createSchema(). NEVER edit or renumber a shipped entry.
+const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {};
 
 function createSchema(handle: SecureDb): void {
   handle.exec(`
@@ -258,7 +244,16 @@ function createSchema(handle: SecureDb): void {
     );
   `);
 
-  // Stamp the baseline (1) without downgrading; the runner owns the rest.
+  // Baseline (v1): the entire encrypted feature schema in its final shape. Every
+  // statement is IF NOT EXISTS, so this is safe to run on every unlock and also
+  // re-asserts any table a drifted store happens to be missing. Column-level
+  // drift is NOT healed here (a plain CREATE cannot add a column to an existing
+  // table) — that is what the Settings "Rebuild database" action is for.
+  handle.exec(POSITIONS_VALUE_TABLES_SQL);
+  handle.exec(MANUAL_INPUT_TABLES_SQL);
+  handle.exec(ENGINE_OUTPUTS_SQL);
+
+  // Stamp the baseline (1) without downgrading; the runner owns anything above.
   handle
     .prepare(`
       INSERT INTO schema_info (key, value, updated_at)

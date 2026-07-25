@@ -207,6 +207,36 @@ export default function Results() {
           {error}
         </Alert>
       )}
+      {outputs?.diagnostics &&
+        (outputs.diagnostics.noAccountPositions > 0 ||
+          outputs.diagnostics.allZeroPositions > 0) && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2 }}
+            onClose={() =>
+              setOutputs((prev) => (prev ? { ...prev, diagnostics: undefined } : prev))
+            }
+          >
+            {outputs.diagnostics.noAccountPositions > 0 && (
+              <>
+                {outputs.diagnostics.noAccountPositions} active position
+                {outputs.diagnostics.noAccountPositions === 1 ? "" : "s"} produced
+                no output — their posting accounts (Salary / Headcount / Hours) are
+                blank, so every line was dropped. Set the account codes on the
+                Positions grid, then recalculate.
+              </>
+            )}
+            {outputs.diagnostics.noAccountPositions > 0 &&
+              outputs.diagnostics.allZeroPositions > 0 && <br />}
+            {outputs.diagnostics.allZeroPositions > 0 && (
+              <>
+                {outputs.diagnostics.allZeroPositions} active position
+                {outputs.diagnostics.allZeroPositions === 1 ? "" : "s"} produced only
+                zeros — check the salary/hourly rate, working months, and Count.
+              </>
+            )}
+          </Alert>
+        )}
 
       <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", mb: 1.5, flexWrap: "wrap", rowGap: 1 }}>
         <Button

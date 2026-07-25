@@ -71,6 +71,7 @@ export function makePosition(overrides: WithId<Position>): Position {
     departmentCode: "1010",
     jobTypeCode: "Associate Hourly Pay",
     cluster: "Rooms",
+    hotelClusterWeight: 1,
     payType: "SALARIED",
     headcount: 1,
     fte: 1,
@@ -281,6 +282,9 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
         departmentCode: pick(["1010", "1310", "1910"]),
         jobTypeCode: pick(["Associate Hourly Pay", "Manager Salaried Pay", "Casual Hourly Pay"]),
         cluster: pick(["Rooms", "F&B", "Admin"]),
+        // ~30% carry a hotel-cluster share < 1 so the parity / invariant
+        // suites cover the weight leg of the count-multiplier pass.
+        hotelClusterWeight: rand() < 0.3 ? pick([0.25, 0.5, 0.75]) : 1,
         payType: pick(["HOURLY", "SALARIED"]),
         headcount: 1 + Math.floor(rand() * 3),
         fte: Math.round(rand() * 200) / 100,

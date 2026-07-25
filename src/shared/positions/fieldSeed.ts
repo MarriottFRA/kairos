@@ -99,7 +99,28 @@ import {
 //     Filters are the only change, so stored account values survive; dropdown_source
 //     is stored per OU and re-applied only when seed_version climbs, so the bump is
 //     what reaches catalogs seeded earlier.
-export const SEED_VERSION = 14;
+// v15: Cluster realizes its intended purpose — hotel clusters. The column now
+//     stores a hotel-cluster ID from the plaintext hotel_clusters table (picker
+//     displays names via dropdownSource {kind:"hotelClusters"}; "" = none); its
+//     old free-text department groupings are dropped (mapping tables replace
+//     that use) and cleared by secure migration v11. A new locked NUMBER field,
+//     Cluster Multiplier (clusterMultiplierOverride -> cluster_multiplier_override,
+//     secure v11), sits beside it: read-only display of the hotel's weight in
+//     the assigned cluster, manually editable only while that cluster has
+//     exactly one member hotel. The engine flexes every cost/hours/FTE line by
+//     the resolved weight — headcount never flexes (a shared person still
+//     counts as one head).
+// v16 (2c): niOpeningBase — the prior-year NI/SS base carried into a
+//     non-January tax year. RETIRED in v18: the opening base moved to
+//     per-(position, scheme) storage owned by each SS block (a component_values
+//     slot surfaced inside the scheme's block column group), so the single
+//     per-position scalar is gone.
+// v17: positionCount — read-only COMPUTED mirror of Count, beside it. Surfaces
+//     the universal head the engine always books to A972540 (VBA §21), so heads
+//     are never silently unreported when the per-row Headcount account is blank.
+// v18: retired niOpeningBase (see v16) — now a per-scheme block input, not a
+//     position field. ensureFieldCatalogSeed prunes the stale catalog row.
+export const SEED_VERSION = 18;
 
 /** base_account prefixes each account field books to — a first, broad pass the
  *  user will narrow later. Kept beside the seed so the A9/A5 split is stated
@@ -125,9 +146,9 @@ export const SECTIONS: SectionDef[] = [
 /** Job classification options. These name the *post* (grade/role band) only —
  *  the pay basis (salaried vs hourly) is a separate axis, carried by `payType`.
  *  "Hourly" used to live here, which conflated the two; it now belongs solely to
- *  Pay Basis. Values are free-form strings and double as the merit/stat lookup
- *  key (`cluster|jobTypeCode` in compile.ts), so any new classification needs a
- *  matching stat-table row to price it. */
+ *  Pay Basis. Values are free-form strings and double as half of the staffing
+ *  stats rollup key (`cluster|jobTypeCode` in compile.ts — the other half is
+ *  now the hotel-cluster name). */
 const JOB_TYPE_OPTIONS = [
   "Manager",
   "Manager (Non Exempt)",
@@ -253,8 +274,7 @@ const SEED: FieldDef[] = [
   }),
   // Pay basis and cluster describe the post's shape, not its contract mechanics,
   // so they band with Position. Pay basis (salaried 30/360 vs hourly real days)
-  // still drives the engine's day-count; cluster still rolls positions up and
-  // pairs with Classification as the merit/stat lookup key.
+  // still drives the engine's day-count.
   sys("employee", "ENUM", "ENGINE", {
     key: "payType",
     defaultLabel: "Pay Basis",
@@ -262,10 +282,30 @@ const SEED: FieldDef[] = [
     dropdownSource: { kind: "static", options: PAY_TYPE_OPTIONS },
     defaultValue: "SALARIED",
   }),
+  // Hotel cluster this position is shared across (stores the cluster ID; the
+  // picker shows names). The position's own hotel's weight in that cluster
+  // flexes its costs/hours/FTE down — headcount never flexes. The resolved
+  // cluster NAME doubles as the staffing-stats rollup key
+  // (`cluster|jobTypeCode` in compile.ts).
   sys("employee", "TEXT", "ENGINE", {
     key: "cluster",
     defaultLabel: "Cluster",
     locked: true,
+    dropdownSource: { kind: "hotelClusters" },
+  }),
+  // The effective share this hotel carries for the row: read-only display of
+  // the assigned cluster's weight, manually editable ONLY while that cluster
+  // has exactly one member hotel (grid isCellEditable gates it; rowModel
+  // sanitize clears it when the assignment changes). NULL = cluster weight.
+  sys("employee", "NUMBER", "ENGINE", {
+    key: "clusterMultiplierOverride",
+    defaultLabel: "Cluster Multiplier",
+    locked: true,
+    validation: { min: 0, max: 1 },
+    // NULL = "use the cluster's weight". Without this, newDraftRow's numeric
+    // fallback would seed 0 — an out-of-domain value the column must never
+    // store (see ENGINE_EMPTY_OVERRIDES in positionsRepo).
+    defaultValue: null,
   }),
   // "Count" is the engine's headcount multiplier under a name that reads for
   // budgeting: one row with Count = 5 is five identical positions, and every cost
@@ -286,6 +326,17 @@ const SEED: FieldDef[] = [
     key: "headCountAccount",
     defaultLabel: "Headcount",
     dropdownSource: { kind: "accounts", filter: HEADCOUNT_ACCOUNT_FILTER },
+  }),
+  // The universal position-count head (VBA §21). Read-only COMPUTED mirror of
+  // Count, sat right beside it: the engine ALWAYS books this head to a fixed
+  // account (A972540, see ensurePositionCountDef), regardless of the per-row
+  // Headcount account above — so heads are never silently unreported. Distinct
+  // from Count only in that its account is pinned and it always generates.
+  sys("employee", "NUMBER", "COMPUTED", {
+    key: "positionCount",
+    defaultLabel: "Position Count",
+    locked: true,
+    computeKey: "positionCount",
   }),
 
   // ── Contract ──────────────────────────────────────────────────────
@@ -339,6 +390,9 @@ const SEED: FieldDef[] = [
     validation: { min: 0, decimals: 2 },
     defaultValue: 1,
   }),
+  // (v18) The prior-year NI/SS opening base is no longer a position field — it
+  // moved to per-(position, scheme) storage owned by each SS block, edited as a
+  // conditional "Opening base" column inside the scheme's block group.
 
   // ── Seasonality ───────────────────────────────────────────────────
   ...monthFamily("seasonality", "seasonality", (m) => `Working ${m}`, {

@@ -30,6 +30,7 @@ import CalendarMonthOutlinedIcon from "@mui/icons-material/CalendarMonthOutlined
 import Grid3x3OutlinedIcon from "@mui/icons-material/Grid3x3Outlined";
 import PercentOutlinedIcon from "@mui/icons-material/PercentOutlined";
 import PaidOutlinedIcon from "@mui/icons-material/PaidOutlined";
+import AccountBalanceOutlinedIcon from "@mui/icons-material/AccountBalanceOutlined";
 import {
   BlockBaseRef,
   BlockDto,
@@ -55,6 +56,9 @@ export interface BlockDialogProps {
   onSave: (input: BlockInput) => void;
   /** Edit mode only — soft delete (page shows the undo snackbar). */
   onDelete?: (block: BlockDto) => void;
+  /** Palette picked "Social Security / NI" — the parent opens the scheme dialog
+   *  (rich brackets/caps/base config) instead of the generic block form. */
+  onPickSocialSecurity?: () => void;
 }
 
 const TYPE_TILES: Array<{
@@ -87,6 +91,12 @@ const TYPE_TILES: Array<{
     blurb: "Each row types an amount for each of the twelve months — full manual control of the spread.",
     icon: <CalendarMonthOutlinedIcon />,
   },
+  {
+    type: "SOCIAL_SECURITY",
+    title: "Social Security / NI",
+    blurb: "An employer contribution (NI, pension, levy…) charged as progressive rate bands over a contributory base you choose. One column per scheme.",
+    icon: <AccountBalanceOutlinedIcon />,
+  },
 ];
 
 /** Encode a base ref as a stable Select value. */
@@ -104,6 +114,7 @@ export default function BlockDialog({
   onClose,
   onSave,
   onDelete,
+  onPickSocialSecurity,
 }: BlockDialogProps) {
   const isEdit = !!block;
   const [type, setType] = useState<BlockType | null>(null);
@@ -181,7 +192,11 @@ export default function BlockDialog({
               {TYPE_TILES.map((tile) => (
                 <ButtonBase
                   key={tile.type}
-                  onClick={() => setType(tile.type)}
+                  onClick={() =>
+                    tile.type === "SOCIAL_SECURITY"
+                      ? onPickSocialSecurity?.()
+                      : setType(tile.type)
+                  }
                   sx={{
                     p: 1.75,
                     borderRadius: 2,

@@ -65,6 +65,9 @@ export interface CompiledPlan {
   holidayDays: Float64Array; // 12 (BANK_HOLIDAY count basis)
   posHeadcount: Float64Array; // P
   posFte: Float64Array; // P
+  /** Hotel-cluster share per position (1 = fully owned). Applied with the
+   *  count in the multiplier pass; HEADCOUNT stays unweighted. */
+  posWeight: Float64Array; // P
   positionStatRow: Uint32Array; // P → statKeys index
 
   // ---- buyouts (bypass the VM, merged during aggregation) ----
@@ -166,8 +169,12 @@ function validate(
         if (schemeErrors) errors.push(schemeErrors);
       }
     }
-    if (def.baseSelector?.kind === "COMPONENTS") {
-      for (const refId of def.baseSelector.componentIds) {
+    const baseComponentIds =
+      def.baseSelector?.kind === "COMPONENTS" || def.baseSelector?.kind === "SS_BASE"
+        ? def.baseSelector.componentIds
+        : null;
+    if (baseComponentIds) {
+      for (const refId of baseComponentIds) {
         const target = defById.get(refId);
         if (!target) {
           errors.push({
@@ -200,6 +207,17 @@ function validate(
           refs: [position.id],
         });
       }
+    }
+    // The loaders' resolver guarantees a sane weight; reject junk here so a
+    // loader bug fails loudly instead of silently zeroing (≤ 0) or inflating
+    // (> 1) every line.
+    const weight = position.hotelClusterWeight;
+    if (!Number.isFinite(weight) || weight <= 0 || weight > 1) {
+      errors.push({
+        code: "INVALID_POSITION",
+        message: `Position ${position.id}: hotelClusterWeight must be a number in (0, 1].`,
+        refs: [position.id],
+      });
     }
   }
 
@@ -265,12 +283,20 @@ function topoSort(
         (def.spreadMethod === "PERCENT_OF" || def.spreadMethod === "WEIGHTED_BY_BASE"));
     if (!usesBase) continue;
 
-    if (
-      def.kind !== "HOLIDAY_ACCRUAL" &&
-      def.kind !== "BANK_HOLIDAY" &&
-      def.baseSelector?.kind === "COMPONENTS"
-    ) {
-      for (const refId of def.baseSelector.componentIds) {
+    const selector =
+      def.kind !== "HOLIDAY_ACCRUAL" && def.kind !== "BANK_HOLIDAY"
+        ? def.baseSelector
+        : undefined;
+    if (selector?.kind === "COMPONENTS") {
+      for (const refId of selector.componentIds) {
+        const refIndex = indexById.get(refId);
+        if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
+      }
+    } else if (selector?.kind === "SS_BASE") {
+      // Net base + vacation scratch are both produced by the BASE_SALARY block,
+      // so always depend on it; then on each custom component line.
+      if (baseIndex >= 0 && baseIndex !== i) dependsOn[i].push(baseIndex);
+      for (const refId of selector.componentIds) {
         const refIndex = indexById.get(refId);
         if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
       }
@@ -372,6 +398,7 @@ export function compile(input: ScenarioInput): CompileResult {
   const componentDefs = topo.order;
   const defCount = componentDefs.length;
   const defIndexById = new Map(componentDefs.map((def, index) => [def.id as string, index]));
+  const baseDefIndex = componentDefs.findIndex((def) => def.kind === "BASE_SALARY");
   const positionCount = positions.length;
 
   // ---- per-(position, component) values, keyed for O(1) lookup ----
@@ -394,6 +421,7 @@ export function compile(input: ScenarioInput): CompileResult {
   const daysPerMonth = new Float64Array(positionCount * MONTHS);
   const posHeadcount = new Float64Array(positionCount);
   const posFte = new Float64Array(positionCount);
+  const posWeight = new Float64Array(positionCount);
 
   const emitter = new Emitter();
   const positionInstrStart = new Uint32Array(positionCount + 1);
@@ -422,6 +450,23 @@ export function compile(input: ScenarioInput): CompileResult {
       emitter.emit(Op.ACC_ADD_VAC, LINE_NONE, 0, []);
       return;
     }
+    if (selector.kind === "SS_BASE") {
+      // Emit net base → vacation → components, matching reference.ts order. The
+      // NET base line is the BASE_SALARY def's output (post-BASE_DEDUCT), read
+      // via ACC_ADD_LINE — not ACC_ADD_GROSS, which would re-add vacation.
+      if (selector.includeBaseSalary && baseDefIndex >= 0) {
+        emitter.emit(Op.ACC_ADD_LINE, LINE_NONE, lineBase + baseDefIndex, []);
+      }
+      if (selector.includeVacation) {
+        emitter.emit(Op.ACC_ADD_VAC, LINE_NONE, 0, []);
+      }
+      for (const refId of selector.componentIds) {
+        const refIndex = defIndexById.get(refId);
+        if (refIndex === undefined) continue; // validated above; defensive
+        emitter.emit(Op.ACC_ADD_LINE, LINE_NONE, lineBase + refIndex, []);
+      }
+      return;
+    }
     for (const refId of selector.componentIds) {
       const refIndex = defIndexById.get(refId);
       if (refIndex === undefined) continue; // validated above; defensive
@@ -444,6 +489,9 @@ export function compile(input: ScenarioInput): CompileResult {
     }
     posHeadcount[p] = position.headcount;
     posFte[p] = position.fte;
+    // Verbatim — no clamping (validate() rejects junk; a silent clamp here
+    // would desync from the reference implementation).
+    posWeight[p] = position.hotelClusterWeight;
     positionStatRow[p] = statInterner.intern(
       `${position.cluster}|${position.jobTypeCode}`,
       { cluster: position.cluster, jobTypeCode: position.jobTypeCode }
@@ -525,6 +573,11 @@ export function compile(input: ScenarioInput): CompileResult {
             scheme.monthlyCap ?? Infinity,
             scheme.yearlyCap ?? Infinity,
             scheme.brackets.length,
+            // 2c: accumulation mode + tax-year reset + prior-year opening base.
+            // Defaults (CUMULATIVE, month 1, opening 0) reproduce the pre-2c run.
+            scheme.accumulationMode === "PER_PERIOD" ? 1 : 0,
+            scheme.taxYearStartMonth ?? 1,
+            value?.ssOpeningBase ?? 0,
           ];
           for (let b = 0; b < SS_MAX_BRACKETS; b++) {
             const bracket = scheme.brackets[b];
@@ -663,6 +716,7 @@ export function compile(input: ScenarioInput): CompileResult {
     holidayDays: Float64Array.from(input.calendar.holidayDays),
     posHeadcount,
     posFte,
+    posWeight,
     positionStatRow,
     buyoutAggRow,
     buyoutValues,

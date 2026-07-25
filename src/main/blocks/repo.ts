@@ -46,6 +46,9 @@ interface StoredConfig {
   increaseAware: boolean;
   departmentMode: "POSITION" | "FIXED";
   fixedDepartment?: string;
+  /** SOCIAL_SECURITY only: attached scheme id (undefined = unconfigured). The
+   *  scheme owns its own contributory-base membership now. */
+  ssSchemeId?: string;
 }
 
 interface BlockRow {
@@ -76,6 +79,7 @@ function rowToDto(row: BlockRow): BlockDto {
     increaseAware: config.increaseAware ?? false,
     departmentMode: config.departmentMode ?? "POSITION",
     fixedDepartment: config.fixedDepartment,
+    ssSchemeId: config.ssSchemeId,
     sortOrder: row.sort_order,
     updatedAt: row.updated_at,
     costDefId: blockCostDefId(row.id),
@@ -149,14 +153,15 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
 
 interface DefRow {
   id: string;
-  kind: "SPREAD";
-  spreadMethod: string;
+  kind: "SPREAD" | "SOCIAL_SECURITY";
+  spreadMethod: string | null;
   label: string;
   accountCode: string;
   baseSelectorKind: "BASE_SALARY" | "COMPONENTS" | null;
   baseRefJson: string | null;
   baseRefDefIds: string[];
   kpiDriverId: string | null;
+  ssSchemeId: string | null;
   increaseAware: boolean;
 }
 
@@ -181,9 +186,32 @@ export function compileBlockDefs(
     baseRefJson: null as string | null,
     baseRefDefIds: [] as string[],
     kpiDriverId: null as string | null,
+    ssSchemeId: null as string | null,
   };
 
   switch (input.blockType) {
+    case "SOCIAL_SECURITY": {
+      // An NI/SS block. Emits nothing until a scheme is attached — a
+      // SOCIAL_SECURITY def with no/invalid scheme fails compile
+      // (MISSING_SCHEME), so an unconfigured block must produce no def. The
+      // base selector stored here is a placeholder; it is overwritten at engine
+      // load with the scheme's own SS_BASE membership (applySocialSecurityBase).
+      const schemeId = String(input.ssSchemeId ?? "").trim();
+      if (!schemeId) return [];
+      return [
+        {
+          ...common,
+          kind: "SOCIAL_SECURITY",
+          id: blockCostDefId(blockId),
+          spreadMethod: null,
+          label: input.label,
+          accountCode: input.accountCode ?? "",
+          baseSelectorKind: "COMPONENTS",
+          ssSchemeId: schemeId,
+          increaseAware: false,
+        },
+      ];
+    }
     case "MULTIPLIER": {
       const base = input.base!;
       const def: DefRow = {
@@ -307,6 +335,7 @@ export function saveBlock(
     increaseAware: input.increaseAware ?? false,
     departmentMode: input.departmentMode ?? "POSITION",
     fixedDepartment: input.fixedDepartment,
+    ssSchemeId: input.ssSchemeId?.trim() ? input.ssSchemeId.trim() : undefined,
   };
   const defs = compileBlockDefs(id, scope.ou, input);
 
@@ -344,7 +373,7 @@ export function saveBlock(
            department_mode, fixed_department, increase_aware, sort_order,
            base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
            updated_at, deleted_at
-         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)
+         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
            spread_method = excluded.spread_method,
            label = excluded.label,
@@ -354,6 +383,7 @@ export function saveBlock(
            increase_aware = excluded.increase_aware,
            sort_order = excluded.sort_order,
            base_selector_kind = excluded.base_selector_kind,
+           ss_scheme_id = excluded.ss_scheme_id,
            kpi_driver_id = excluded.kpi_driver_id,
            base_ref = excluded.base_ref,
            updated_at = excluded.updated_at,
@@ -371,6 +401,7 @@ export function saveBlock(
         def.increaseAware ? 1 : 0,
         sortOrder,
         def.baseSelectorKind,
+        def.ssSchemeId,
         def.kpiDriverId,
         id,
         def.baseRefJson,
@@ -512,6 +543,45 @@ export function ensureBaseSalaryDef(
                'POSITION', NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, NULL)
      ON CONFLICT(id) DO NOTHING`
   ).run(`sys-base:${scope.ou}`, scope.ou, opts.now);
+}
+
+/**
+ * The universal "position count" head — VBA Engine §21 "Stats Position Count".
+ * Unlike the per-position Headcount account (which the user sets per row and may
+ * leave blank), this head is ALWAYS booked, to a fixed account, so a scenario can
+ * never silently fail to report its heads. It is a plain STAT/HEADCOUNT line —
+ * same math as any headcount (emit Count in each active month, never flexed by
+ * hotel-cluster weight, zero where Count is 0) — differing only in that its
+ * account is pinned and it is seeded permanently rather than on demand.
+ */
+export const POSITION_COUNT_ACCOUNT = "A972540";
+
+/** Fixed id of the permanent, always-output position-count head (per OU). */
+export function positionCountDefId(ou: string): string {
+  return `sys-poscount:${ou}`;
+}
+
+/**
+ * Idempotently seed the permanent position-count head. Always present (fixed id
+ * per OU) so every scenario books its heads to POSITION_COUNT_ACCOUNT. Seeded
+ * alongside ensureBaseSalaryDef wherever the structure read model is built.
+ */
+export function ensurePositionCountDef(
+  db: Db,
+  scope: OuScope,
+  opts: { now: string }
+): void {
+  prepared(
+    db,
+    `INSERT INTO cost_component_definitions (
+       id, ou, kind, spread_method, stat_kind, label, account_code,
+       department_mode, fixed_department, increase_aware, sort_order,
+       base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
+       updated_at, deleted_at
+     ) VALUES (?, ?, 'STAT', NULL, 'HEADCOUNT', 'Position Count', ?,
+               'POSITION', NULL, 0, 6, NULL, NULL, NULL, NULL, NULL, ?, NULL)
+     ON CONFLICT(id) DO NOTHING`
+  ).run(positionCountDefId(scope.ou), scope.ou, POSITION_COUNT_ACCOUNT, opts.now);
 }
 
 const STAT_DEF_LABELS: Record<"HOURS" | "HEADCOUNT" | "FTE", string> = {

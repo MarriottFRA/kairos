@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -125,6 +125,33 @@ export function initializeIpc(deps: {
   const blocksHandlers = createBlocksHandlers();
   Object.entries(blocksHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Social Security / NI scheme handlers (OU-scoped scheme configs in
+  // the plaintext local store — brackets + caps the engine already runs). Same
+  // OU-gate as blocks.
+  const socialSecurityHandlers = createSocialSecurityHandlers();
+  Object.entries(socialSecurityHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Allocations handlers (per-hotel spread definitions in the plaintext
+  // local store; the grid is computed on demand from the scenario's active
+  // positions in the encrypted store). OU-gated like blocks.
+  const allocationsHandlers = createAllocationsHandlers();
+  Object.entries(allocationsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Hotel-cluster handlers (cross-OU cluster reference data in the
+  // plaintext store + the one explicit multi-scope membership read/clear).
+  // Deliberately NOT OU-gated — a cluster spans hotels by definition; the
+  // channels that touch positions are gated by the secure-DB session lock
+  // (sign-in) instead. Global middleware (sender validation, security, error
+  // handling) still applies.
+  const hotelClustersHandlers = createHotelClustersHandlers();
+  Object.entries(hotelClustersHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
   });
 
   // Initialize the registry (sets up the main IPC listener)

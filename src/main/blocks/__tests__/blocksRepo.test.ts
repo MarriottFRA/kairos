@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { compile } from "../../../shared/engine/compile";
+import { simulate } from "../../../shared/engine/simulate";
 import { POSITIONS_STRUCTURE_TABLES_SQL } from "../../positions/schema";
 import { resolveOuScope } from "../../positions/ouScope";
 import { getComponentDefinitions } from "../../positions/structureRepo";
@@ -21,7 +22,10 @@ import {
 import {
   deleteBlock,
   ensureBaseSalaryDef,
+  ensurePositionCountDef,
   listBlocks,
+  POSITION_COUNT_ACCOUNT,
+  positionCountDefId,
   reorderBlocks,
   restoreBlock,
   saveBlock,
@@ -401,6 +405,7 @@ describe("scoping + engine round trip", () => {
           departmentCode: "0410",
           jobTypeCode: "MGR",
           cluster: "Rooms",
+          hotelClusterWeight: 1,
           payType: "SALARIED",
           headcount: 1,
           fte: 1,
@@ -425,5 +430,89 @@ describe("scoping + engine round trip", () => {
     });
 
     expect("errors" in result).toBe(false);
+  });
+
+  it("ensurePositionCountDef is idempotent and pins a HEADCOUNT head to A972540", () => {
+    ensurePositionCountDef(db, OU_A, NOW);
+    ensurePositionCountDef(db, OU_A, NOW);
+
+    const heads = getComponentDefinitions(db, OU_A).filter(
+      (def) => def.id === positionCountDefId(OU_A.ou)
+    );
+    expect(heads).toHaveLength(1);
+    expect(heads[0]).toMatchObject({
+      kind: "STAT",
+      statKind: "HEADCOUNT",
+      accountCode: POSITION_COUNT_ACCOUNT,
+    });
+  });
+
+  it("the position-count head always books Count to A972540 (unflexed, seasonality-gated)", () => {
+    ensureBaseSalaryDef(db, OU_A, NOW);
+    ensurePositionCountDef(db, OU_A, NOW);
+    const defs = getComponentDefinitions(db, OU_A);
+
+    // Count 3, half-owned by a shared cluster (weight 0.5 → heads must NOT flex),
+    // and idle in January (seasonality[0] = 0 → that month's head is 0).
+    const seasonality = new Array(12).fill(1);
+    seasonality[0] = 0;
+    const compiled = compile({
+      scenario: {
+        id: "scen-1" as never,
+        ou: OU_A.ou,
+        year: 2026,
+        label: "Planning",
+        updatedAt: NOW.now,
+        deletedAt: null,
+      },
+      calendar: {
+        realDays: new Float64Array(12).fill(21),
+        flatDays: new Float64Array(12).fill(30),
+        holidayDays: new Float64Array(12),
+      },
+      definitions: defs,
+      ssSchemes: [],
+      positions: [
+        {
+          id: "pos-1" as never,
+          scenarioId: "scen-1" as never,
+          departmentCode: "0410",
+          jobTypeCode: "MGR",
+          cluster: "Rooms",
+          hotelClusterWeight: 0.5,
+          payType: "SALARIED",
+          headcount: 3,
+          fte: 1,
+          seasonality,
+          monthlyBaseSalary: 3000,
+          hourlyRate: 0,
+          additionalMonthlyCosts: new Array(12).fill(0),
+          meritIncreasePct: 0,
+          manualYearlyIncrease: 0,
+          increaseMonth: 13,
+          dailyContractHours: 8,
+          yearlyHoursWorked: 2000,
+          vacationDays: 20,
+          vacationMonthlyWeights: new Array(12).fill(1 / 12),
+          accrualDaysPerMonth: 0,
+          updatedAt: NOW.now,
+          deletedAt: null,
+        },
+      ],
+      componentValues: [],
+      buyouts: [],
+    });
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+
+    const headRow = result.aggregates.keys.findIndex(
+      (key) => key.dept === "0410" && key.account === POSITION_COUNT_ACCOUNT
+    );
+    expect(headRow).toBeGreaterThanOrEqual(0);
+    const head = Array.from({ length: 12 }, (_, m) =>
+      result.aggregates.values[headRow * 12 + m]
+    );
+    // Full 3 heads every active month (weight 0.5 does not flex headcount), 0 in January.
+    expect(head).toEqual([0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]);
   });
 });

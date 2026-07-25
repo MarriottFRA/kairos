@@ -11,11 +11,16 @@ import {
   PositionDefaults,
   normalizePositionDefaults,
 } from "./shared/positionDefaults";
-import { POSITIONS_STRUCTURE_TABLES_SQL } from "./main/positions/schema";
+import {
+  POSITIONS_STRUCTURE_TABLES_SQL,
+  applySsSchemeBaseColumns,
+} from "./main/positions/schema";
 import { MAPPING_TABLES_SQL } from "./main/mappingTables/schema";
 import { BUDGET_IMPORT_SQL } from "./main/budgetImport/schema";
 import { KPI_DRIVERS_SQL } from "./main/kpiDrivers/schema";
 import { applyBlocksStructureV12 } from "./main/blocks/schema";
+import { applyHotelClustersV13 } from "./main/hotelClusters/schema";
+import { applyAllocations } from "./main/allocations/schema";
 import {
   LOCAL_DB_PATH,
   ensureDataDir,
@@ -46,33 +51,23 @@ db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 db.pragma("foreign_keys = ON");
 
-// Schema versions:
-//   1 - schema_info, user_settings
-//   2 - budget/forecast calendar (calendar_years, calendar_months)
-//   3 - positions structure store (scenarios, cost component definitions,
-//       social security schemes, field catalog, hotels cache)
-//   4 - safe defaults for new positions (position_defaults), one row per
-//       (hotel OU, year)
-//   5 - mapping reference tables (account_maps, department_maps,
-//       account_department_combos) + mapping_tables_meta, cached from the backend
-//   6 - bank-holiday premium config columns on calendar_years
-//   7 - budget import tables (budget_imports, budget_values), pulled from a
-//       hotel's Excel BGT Spread File
-//   8 - budget_imports.imported_by (who committed the pull), for DBs that built
-//       v7 before the column was part of the create
-//   9 - KPI drivers (kpi_drivers + dept-pattern/account child tables +
-//       kpi_driver_values precalc cache), aggregated from budget_values
-//  10 - cost_component_definitions.kpi_driver_id (marks a SPREAD block as
-//       KPI-driven, resolved to DIRECT_ABS at engine load)
-//  11 - kpi_drivers.description (optional free-text note, searchable in the UI)
-//  12 - blocks feature: block_configs (user-facing block configurations) +
-//       cost_component_definitions.block_id / base_ref columns
+// Schema versioning.
 //
-// Versions <= 2 predate the migration runner and are created wholesale by the
-// baseline exec in initializeDatabase() (idempotent IF NOT EXISTS). Later
-// versions are stepwise entries in MIGRATIONS, each run in its own transaction
-// and stamped as it lands.
-const CURRENT_SCHEMA_VERSION = 12;
+// v1 is the BASELINE: the full plaintext schema in its final shape, created in
+// one shot by applyBaselineSchema() below. Pre-launch, the former stepwise
+// migrations 1–13 (settings + calendar; the positions structure store; safe
+// position defaults; mapping reference tables; the bank-holiday premium columns;
+// budget import tables; KPI drivers; the blocks feature; hotel clusters) were
+// squashed into this baseline — there are no upgraded stores in the wild whose
+// stepwise path had to be preserved.
+//
+// FROM LAUNCH ON, schema changes are APPEND-ONLY entries in MIGRATIONS below
+// (v2, v3, …), each run in its own transaction and stamped as it lands. Never
+// edit or renumber a shipped migration — the runner only executes versions
+// ABOVE a database's stored number, so an edited body silently never re-runs.
+// When the list grows unwieldy and every live store is at/above a known floor,
+// squash back to a fresh baseline the same way.
+const CURRENT_SCHEMA_VERSION = 1;
 
 type LocalDb = InstanceType<typeof Database>;
 
@@ -91,84 +86,73 @@ const POSITION_DEFAULTS_TABLE_SQL = `
   );
 `;
 
-const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
-  3: (handle) => {
-    handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  },
-  4: (handle) => {
-    handle.exec(POSITION_DEFAULTS_TABLE_SQL);
-  },
-  5: (handle) => {
-    handle.exec(MAPPING_TABLES_SQL);
-  },
-  // Bank-holiday premium config, one set per hotel-year, stored on the calendar
-  // head. Off by default with sensible starting knobs the home page reveals when
-  // it is switched on; an empty account keeps the feature effectively inert.
-  6: (handle) => {
-    handle.exec(`
-      ALTER TABLE calendar_years ADD COLUMN bank_holiday_enabled INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE calendar_years ADD COLUMN bank_holiday_staff_fraction REAL NOT NULL DEFAULT 0.5;
-      ALTER TABLE calendar_years ADD COLUMN bank_holiday_premium_multiplier REAL NOT NULL DEFAULT 2;
-      ALTER TABLE calendar_years ADD COLUMN bank_holiday_account TEXT NOT NULL DEFAULT '';
-    `);
-  },
-  // Budget data pulled from a hotel's Excel BGT Spread File (plaintext, per OU).
-  7: (handle) => {
-    handle.exec(BUDGET_IMPORT_SQL);
-  },
-  // Add budget_imports.imported_by for DBs that created v7 before the column
-  // existed. ADD COLUMN isn't IF NOT EXISTS, so guard on the current columns —
-  // a fresh v7 already has it (from the create) and this becomes a no-op.
-  8: (handle) => {
-    const hasColumn = (
-      handle.prepare("PRAGMA table_info(budget_imports)").all() as Array<{
-        name: string;
-      }>
-    ).some((col) => col.name === "imported_by");
-    if (!hasColumn) {
-      handle.exec("ALTER TABLE budget_imports ADD COLUMN imported_by TEXT");
-    }
-  },
-  // KPI drivers: user-defined + precalc cache, aggregated from budget_values.
-  9: (handle) => {
-    handle.exec(KPI_DRIVERS_SQL);
-  },
-  // Mark a SPREAD component as KPI-driven. ADD COLUMN isn't IF NOT EXISTS, so
-  // guard on the current columns — a fresh v3 (created after the column was
-  // added to the baseline) already has it and this becomes a no-op.
-  10: (handle) => {
-    const hasColumn = (
-      handle
-        .prepare("PRAGMA table_info(cost_component_definitions)")
-        .all() as Array<{ name: string }>
-    ).some((col) => col.name === "kpi_driver_id");
-    if (!hasColumn) {
-      handle.exec(
-        "ALTER TABLE cost_component_definitions ADD COLUMN kpi_driver_id TEXT"
-      );
-    }
-  },
-  // Optional free-text description on a KPI driver. ADD COLUMN isn't IF NOT
-  // EXISTS, so guard on the current columns — a fresh v9 (created after the
-  // column was added to KPI_DRIVERS_SQL) already has it and this is a no-op.
-  11: (handle) => {
-    const hasColumn = (
-      handle.prepare("PRAGMA table_info(kpi_drivers)").all() as Array<{
-        name: string;
-      }>
-    ).some((col) => col.name === "description");
-    if (!hasColumn) {
-      handle.exec(
-        "ALTER TABLE kpi_drivers ADD COLUMN description TEXT NOT NULL DEFAULT ''"
-      );
-    }
-  },
-  // Blocks: user-facing block configurations that compile into cost-component
-  // definitions (block_id back-ref + base_ref JSON for extended base kinds).
-  12: (handle) => {
-    applyBlocksStructureV12(handle);
-  },
-};
+// Append-only post-launch migrations, keyed by the version they produce
+// (v2, v3, …). Empty today: the whole pre-launch history is folded into the v1
+// baseline in applyBaselineSchema(). NEVER edit or renumber a shipped entry.
+const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {};
+
+/**
+ * Create the entire plaintext feature/structure schema in its final shape (the
+ * v1 baseline). Every statement is IF NOT EXISTS / column-guarded, so this is
+ * idempotent — safe to run on every launch and to re-run from the Settings
+ * "Rebuild database" action after the feature tables have been dropped.
+ *
+ * user_settings and schema_info are deliberately NOT touched here (they hold
+ * app settings, the permanent device salt, and the DPAPI-wrapped secure-DB
+ * key); initializeDatabase() creates them, and the rebuild path preserves them.
+ */
+function applyBaselineSchema(handle: LocalDb): void {
+  // Budget/forecast calendar (former v2), one row per (hotel OU, year).
+  // weekend_mask seeds the Weekends row; per-month counts in calendar_months
+  // stay authoritative once edited. The bank_holiday_* columns are the
+  // per-hotel-year premium config (former v6; off by default, an empty account
+  // keeps the feature effectively inert).
+  handle.exec(`
+    CREATE TABLE IF NOT EXISTS calendar_years (
+        ou TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        weekend_mask INTEGER NOT NULL,
+        bank_holiday_enabled INTEGER NOT NULL DEFAULT 0,
+        bank_holiday_staff_fraction REAL NOT NULL DEFAULT 0.5,
+        bank_holiday_premium_multiplier REAL NOT NULL DEFAULT 2,
+        bank_holiday_account TEXT NOT NULL DEFAULT '',
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ou, year)
+    );
+    CREATE TABLE IF NOT EXISTS calendar_months (
+        ou TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+        calendar_days INTEGER NOT NULL,
+        public_holidays INTEGER NOT NULL DEFAULT 0,
+        weekend_days INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (ou, year, month),
+        FOREIGN KEY (ou, year) REFERENCES calendar_years (ou, year) ON DELETE CASCADE
+    );
+  `);
+  // Structure store: scenarios, cost component definitions, SS schemes, field
+  // catalog, hotels cache (former v3).
+  handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+  // Safe defaults for new positions (former v4).
+  handle.exec(POSITION_DEFAULTS_TABLE_SQL);
+  // Mapping reference tables cached from the backend (former v5).
+  handle.exec(MAPPING_TABLES_SQL);
+  // Budget import tables pulled from a hotel's Excel BGT Spread File (v7/v8).
+  handle.exec(BUDGET_IMPORT_SQL);
+  // KPI drivers + precalc cache (v9; kpi_driver_id/description now in the
+  // constants above).
+  handle.exec(KPI_DRIVERS_SQL);
+  // Blocks: block_configs + the block_id / base_ref columns on
+  // cost_component_definitions (former v12). Column-guarded, so idempotent.
+  applyBlocksStructureV12(handle);
+  // Hotel clusters: hotel_clusters + hotel_cluster_members (former v13).
+  applyHotelClustersV13(handle);
+  // Per-scheme SS contributory-base columns on ss_schemes. Column-guarded.
+  applySsSchemeBaseColumns(handle);
+  // Allocations: per-hotel spread definitions (departments × allocations grid is
+  // computed on demand, nothing derived stored). Fresh table, IF NOT EXISTS.
+  applyAllocations(handle);
+}
 
 /**
  * Apply stepwise migrations above the stored schema version. Shared shape with
@@ -218,6 +202,9 @@ const UPSERT_SETTING_SQL = `
 //--- INITIALIZE DATABASE ------------------------------------------------------
 export async function initializeDatabase(): Promise<void> {
   try {
+    // The two tables the rebuild path preserves: schema_info (version stamp) and
+    // user_settings (app settings, the permanent device salt, and the
+    // DPAPI-wrapped secure-DB key). Created here, never dropped by a rebuild.
     db.exec(`
       CREATE TABLE IF NOT EXISTS schema_info (
           key TEXT PRIMARY KEY,
@@ -229,43 +216,61 @@ export async function initializeDatabase(): Promise<void> {
           value TEXT NOT NULL,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
-      -- Budget/forecast calendar, one row per (hotel OU, year). weekend_mask is
-      -- the weekday pattern used to seed the Weekends row; the per-month counts
-      -- in calendar_months stay authoritative once the user edits them.
-      CREATE TABLE IF NOT EXISTS calendar_years (
-          ou TEXT NOT NULL,
-          year INTEGER NOT NULL,
-          weekend_mask INTEGER NOT NULL,
-          updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (ou, year)
-      );
-      CREATE TABLE IF NOT EXISTS calendar_months (
-          ou TEXT NOT NULL,
-          year INTEGER NOT NULL,
-          month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
-          calendar_days INTEGER NOT NULL,
-          public_holidays INTEGER NOT NULL DEFAULT 0,
-          weekend_days INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (ou, year, month),
-          FOREIGN KEY (ou, year) REFERENCES calendar_years (ou, year) ON DELETE CASCADE
-      );
     `);
 
-    // Stamp the baseline version (2) without ever downgrading a newer stamp —
-    // the stepwise runner below owns everything past the baseline.
+    // The full feature/structure schema (v1 baseline), idempotent.
+    applyBaselineSchema(db);
+
+    // Stamp the baseline (1) without ever downgrading a newer stamp — the
+    // append-only runner below owns anything past the baseline.
     db.prepare(`
       INSERT INTO schema_info (key, value, updated_at)
-      VALUES ('schema_version', '2', CURRENT_TIMESTAMP)
+      VALUES ('schema_version', '1', CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET
         value = excluded.value,
         updated_at = CURRENT_TIMESTAMP
-      WHERE CAST(schema_info.value AS INTEGER) < 2
+      WHERE CAST(schema_info.value AS INTEGER) < 1
     `).run();
 
     runMigrations(db);
   } catch (error) {
     console.error("Error initializing database:", error);
     throw error;
+  }
+}
+
+/**
+ * DESTRUCTIVE: drop every plaintext feature/structure table and recreate them
+ * from the v1 baseline. Wipes all planning reference data — scenarios, cost
+ * component definitions, SS schemes, field catalog, hotels cache, position
+ * defaults, mapping tables, budget imports, KPI drivers, blocks, hotel clusters,
+ * calendars — but PRESERVES user_settings and schema_info, so app settings, the
+ * permanent device salt, and the DPAPI-wrapped secure-DB key survive (the
+ * session and device identity are untouched).
+ *
+ * The plaintext half of the Settings "Rebuild database" escape hatch, for a
+ * store whose schema has drifted from the code. See the note on
+ * CURRENT_SCHEMA_VERSION. Surface only behind an explicit, data-loss-warned
+ * confirmation.
+ */
+export function rebuildLocalSchema(): void {
+  const PRESERVE = new Set(["user_settings", "schema_info"]);
+  // FKs off so the drop order across referencing tables never matters.
+  db.pragma("foreign_keys = OFF");
+  try {
+    const tables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+      )
+      .all() as Array<{ name: string }>;
+    db.transaction(() => {
+      for (const { name } of tables) {
+        if (!PRESERVE.has(name)) db.exec(`DROP TABLE IF EXISTS "${name}"`);
+      }
+      applyBaselineSchema(db);
+    })();
+  } finally {
+    db.pragma("foreign_keys = ON");
   }
 }
 

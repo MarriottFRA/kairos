@@ -18,6 +18,7 @@
 
 import { uuidv7 } from "../engine/ids";
 import { referenceVacation } from "../engine/reference";
+import { deriveYearlyHoursWorked } from "./engineInput";
 import {
   CalendarContext,
   PayType,
@@ -31,6 +32,8 @@ import {
   ENGINE_SCALAR_COLUMNS,
   FieldCatalog,
   FieldDef,
+  HOTEL_CLUSTER_KEY,
+  HOTEL_CLUSTER_MULT_KEY,
   PII_CORE_COLUMNS,
   VECTOR_COLUMNS,
   VectorName,
@@ -218,6 +221,20 @@ export function sanitizeRow(
     out[BASIC_SALARY_HOURLY_KEY] = 0;
   }
 
+  // Hotel-cluster pair. The manual multiplier is only meaningful against the
+  // row's current assignment — changing (or clearing) the cluster invalidates
+  // it. Reads the RAW committed value (the generic numeric pass above cannot
+  // represent "cleared"): empty → null ("use the cluster's weight" — NEVER 0,
+  // a zero multiplier would zero the row's whole cost); invalid/≤0 → null;
+  // >1 clamps to 1.
+  if (out[HOTEL_CLUSTER_KEY] !== oldRow[HOTEL_CLUSTER_KEY]) {
+    out[HOTEL_CLUSTER_MULT_KEY] = null;
+  } else if (row[HOTEL_CLUSTER_MULT_KEY] !== undefined) {
+    const num = toNumber(row[HOTEL_CLUSTER_MULT_KEY], Number.NaN);
+    out[HOTEL_CLUSTER_MULT_KEY] =
+      Number.isFinite(num) && num > 0 ? Math.min(num, 1) : null;
+  }
+
   return out;
 }
 
@@ -281,7 +298,11 @@ export function rowToEnginePosition(row: PositionRow, scenarioId: string): Posit
     scenarioId: scenarioId as ScenarioId,
     departmentCode: typeof row.departmentCode === "string" ? row.departmentCode : "",
     jobTypeCode: typeof row.jobTypeCode === "string" ? row.jobTypeCode : "",
+    // Raw stored cluster ID and a per-unit weight. The liveSim overlays the
+    // resolved cluster NAME + this hotel's weight (see runLiveSim) — kept out
+    // of here so vacationCostById stays a per-unit valuation like headcount.
     cluster: typeof row.cluster === "string" ? row.cluster : "",
+    hotelClusterWeight: 1,
     payType: (row.payType === "HOURLY" ? "HOURLY" : "SALARIED") as PayType,
     headcount: toNumber(row.headcount, 0),
     fte: toNumber(row.fte, 0),
@@ -328,6 +349,29 @@ export function vacationCostById(
   return out;
 }
 
+/**
+ * Auto-derived Manhours Worked per row id — (Σ net productive days − vacation)
+ * × daily hours — for the grid to display when the field carries no manual
+ * override. Uses the same helper the engine-input paths use, so the shown
+ * number equals what the simulation spreads. Empty map while the calendar
+ * loads (the column then falls back to any stored override, else blank).
+ */
+export function manhoursWorkedById(
+  rows: PositionRow[],
+  calendar: CalendarContext | null,
+  scenarioId: string
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!calendar) return out;
+  for (const row of rows) {
+    out.set(
+      row.id,
+      deriveYearlyHoursWorked(rowToEnginePosition(row, scenarioId), calendar)
+    );
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Computed columns
 // ---------------------------------------------------------------------------
@@ -367,6 +411,12 @@ function effectiveMonthlyBase(row: PositionRow, seasTotal: number): number {
 
 export const COMPUTES: Record<string, ComputeFn> = {
   totalWorkingMonths: (row) => sumVector(row, "seasonality"),
+
+  /** The universal position-count head: always mirrors Count and is always
+   *  booked (to A972540 in the engine — see ensurePositionCountDef), so heads
+   *  are never silently unreported when the per-row Headcount account is blank.
+   *  Read-only; Count 0 ⇒ 0. */
+  positionCount: (row) => toNumber(row.headcount, 1),
 
   vacationWeightsTotal: (row) => sumVector(row, "vacationMonthlyWeights"),
 

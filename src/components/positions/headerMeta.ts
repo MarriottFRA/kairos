@@ -51,7 +51,21 @@ const OVERRIDES: Readonly<
     unit: "basis",
     hint: "Salaried uses a 30/360 month; Hourly uses real calendar days.",
   },
-  cluster: { unit: "group", hint: "Reporting cluster used to roll positions up." },
+  cluster: {
+    unit: "staff sharing",
+    hint:
+      "Hotel cluster this position is shared across. This hotel's weight in the " +
+      "cluster flexes the row's hours, costs and statistics down — headcount " +
+      "stays whole. Manage clusters on the Clusters tab.",
+  },
+  clusterMultiplierOverride: {
+    short: "Multiplier",
+    unit: "× hours & costs",
+    hint:
+      "The share of this position the hotel carries — the assigned cluster's " +
+      "weight for this hotel. Editable only when the cluster has a single " +
+      "hotel; scales every cost, hours and FTE line, never the headcount.",
+  },
   headcount: {
     unit: "count",
     hint: "Number of identical positions on this line — every cost is multiplied by it.",
@@ -80,7 +94,7 @@ const OVERRIDES: Readonly<
   },
   yearlyHoursWorked: {
     unit: "hrs / yr",
-    hint: "Hours actually worked across the year. Feeds the payroll engine.",
+    hint: "Auto-calculated: (calendar productive days − vacation days) × daily hours. Feeds the payroll engine. Type a value to override.",
   },
   fte: { unit: "ratio", hint: "Full-time equivalent — 1.00 is a full-time position." },
 

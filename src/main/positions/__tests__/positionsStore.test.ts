@@ -25,6 +25,8 @@ import {
   POSITIONS_VALUE_TABLES_SQL,
 } from "../schema";
 import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyHotelClustersV13 } from "../../hotelClusters/schema";
+import { saveCluster as saveHotelCluster } from "../../hotelClusters/repo";
 import { OuScope, resolveOuScope } from "../ouScope";
 import {
   DEFAULT_SCENARIO_LABEL,
@@ -62,6 +64,7 @@ beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   applyBlocksStructureV12(structureDb);
+  applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
   valuesDb.exec(ENGINE_OUTPUTS_SQL);
@@ -912,6 +915,39 @@ describe("cross-year positions", () => {
     expect(copiedPii[keepCopy.id]?.empNumber).toBe("E-1");
   });
 
+  it("carries block inputs and their per-row account overrides through the clone", () => {
+    seedTwoPositions();
+    batchWrite(
+      valuesDb,
+      OU_A,
+      {
+        ou: OU_A.ou,
+        scenarioId: SOURCE,
+        componentValuePatches: [
+          {
+            positionId: "pos-keep",
+            componentDefId: "blk-1:cost",
+            fields: { yearlyValue: 250, accountCode: "517999", statsAccountCode: "988201" },
+          },
+        ],
+      },
+      lookupFor(OU_A),
+      new Set(["blk-1:cost"])
+    );
+
+    cloneScenarioValues(valuesDb, OU_A, SOURCE, TARGET, sequentialIds("copy"));
+    const target = loadScenarioValues(valuesDb, OU_A, TARGET);
+    const keepCopy = target.positions.find((p) => p.lineageId === "pos-keep")!;
+    const value = target.componentValues.find(
+      (v) => v.positionId === keepCopy.id
+    )!;
+    expect(value.yearlyValue).toBe(250);
+    // Regression: the per-row account overrides used to be dropped by the
+    // clone's INSERT column list.
+    expect(value.accountCode).toBe("517999");
+    expect(value.statsAccountCode).toBe("988201");
+  });
+
   it("keeps the copy independent of its source", () => {
     seedTwoPositions();
     cloneScenarioValues(valuesDb, OU_A, SOURCE, TARGET, sequentialIds("copy"));
@@ -996,6 +1032,83 @@ describe("cross-year positions", () => {
       async () => null
     );
     expect(input.positions.map((p) => p.id)).toEqual(["pos-on"]);
+  });
+
+  it("resolves hotel-cluster assignments to engine names + weights", async () => {
+    const scenario = saveScenario(structureDb, OU_A, { year: 2027, label: "B27" });
+    // Two clusters in the plaintext store: a two-hotel spread and a
+    // single-hotel one (the only case where the manual override applies).
+    const pairId = saveHotelCluster(
+      structureDb,
+      {
+        name: "Shared Services",
+        members: [
+          { ou: OU_A.ou, weight: 0.25 },
+          { ou: OU_B.ou, weight: 0.75 },
+        ],
+      },
+      { now: "2026-01-01T00:00:00.000Z" }
+    );
+    const soloId = saveHotelCluster(
+      structureDb,
+      { name: "Solo", members: [{ ou: OU_A.ou, weight: 0.6 }] },
+      { now: "2026-01-01T00:00:00.000Z" }
+    );
+
+    batchWrite(
+      valuesDb,
+      OU_A,
+      {
+        ou: OU_A.ou,
+        scenarioId: scenario.id,
+        creates: [
+          // Member of the pair → this hotel's weight, override IGNORED.
+          {
+            id: "pos-pair",
+            fields: { departmentCode: "D110", cluster: pairId, clusterMultiplierOverride: 0.9 },
+          },
+          // Single-hotel cluster → the override wins over the member weight.
+          {
+            id: "pos-solo",
+            fields: { departmentCode: "D110", cluster: soloId, clusterMultiplierOverride: 0.4 },
+          },
+          // Dangling id (deleted/unknown cluster) → weight 1, blank name.
+          {
+            id: "pos-gone",
+            fields: { departmentCode: "D110", cluster: "no-such-cluster" },
+          },
+          // No cluster → weight 1.
+          { id: "pos-none", fields: { departmentCode: "D110" } },
+        ],
+      },
+      lookupFor(OU_A)
+    );
+
+    const input = await loadScenarioInput(
+      structureDb,
+      valuesDb,
+      OU_A,
+      scenario.id,
+      async () => null
+    );
+    const byId = new Map(input.positions.map((p) => [p.id as string, p]));
+    // The engine sees resolved NAMES (its staffing-stats key), never ids.
+    expect(byId.get("pos-pair")).toMatchObject({
+      cluster: "Shared Services",
+      hotelClusterWeight: 0.25,
+    });
+    expect(byId.get("pos-solo")).toMatchObject({
+      cluster: "Solo",
+      hotelClusterWeight: 0.4,
+    });
+    expect(byId.get("pos-gone")).toMatchObject({
+      cluster: "",
+      hotelClusterWeight: 1,
+    });
+    expect(byId.get("pos-none")).toMatchObject({
+      cluster: "",
+      hotelClusterWeight: 1,
+    });
   });
 });
 

@@ -19,6 +19,11 @@ import {
   listBlocks,
   saveBlock,
 } from "../../../main/blocks/repo";
+import { applyHotelClustersV13 } from "../../../main/hotelClusters/schema";
+import {
+  listClusters as listHotelClusters,
+  saveCluster as saveHotelCluster,
+} from "../../../main/hotelClusters/repo";
 import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
@@ -54,6 +59,7 @@ beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   applyBlocksStructureV12(structureDb);
+  applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
   scenarioId = saveScenario(structureDb, SCOPE, { year: YEAR, label: "Planning" }).id;
@@ -252,4 +258,131 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   // excluded only from persisted output).
   const vacLevy = live.results.get("pos-1")!.get(`${multVacId}:cost`)!;
   expect(vacLevy.total).toBeGreaterThan(0);
+});
+
+it("resolves a hotel-cluster weight identically in both paths and flexes block totals", async () => {
+  ensureBaseSalaryDef(structureDb, SCOPE, NOW);
+  const flatId = saveBlock(
+    structureDb, SCOPE,
+    { blockType: "FLAT_MONTHLY", label: "Uniforms", accountCode: "511000", accountLocked: true },
+    NOW
+  );
+
+  // Two-hotel cluster: this hotel carries 0.25 of shared people. Written
+  // through the real repo so the stored shape is the wire shape.
+  const clusterId = saveHotelCluster(
+    structureDb,
+    {
+      name: "Shared Services",
+      members: [
+        { ou: SCOPE.ou, weight: 0.25 },
+        { ou: "OU99999", weight: 0.75 },
+      ],
+    },
+    NOW
+  );
+  const hotelClusters = listHotelClusters(structureDb);
+
+  const blocks = listBlocks(structureDb, SCOPE);
+  const lookup = buildFieldMap(getFieldCatalog(structureDb, SCOPE));
+  const defIds = new Set(getComponentDefinitions(structureDb, SCOPE).map((def) => def.id as string));
+
+  batchWrite(
+    valuesDb, SCOPE,
+    {
+      ou: SCOPE.ou,
+      scenarioId,
+      creates: [
+        {
+          // Assigned via the catalog write path — exercises the cluster field
+          // end-to-end (seed v15 column + ENGINE_SCALAR_COLUMNS mapping).
+          id: "pos-1",
+          fields: {
+            departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
+            payType: "SALARIED", headcount: 1, fte: 1, monthlyBaseSalary: 3000,
+            seasonality: new Array(12).fill(1),
+            vacationMonthlyWeights: new Array(12).fill(1 / 12),
+            dailyContractHours: 8, yearlyHoursWorked: 1800,
+          },
+        },
+        {
+          // A multi-member cluster must IGNORE the stored override.
+          id: "pos-2",
+          fields: {
+            departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
+            clusterMultiplierOverride: 0.9,
+            payType: "SALARIED", headcount: 1, fte: 1, monthlyBaseSalary: 3000,
+            seasonality: new Array(12).fill(1),
+            vacationMonthlyWeights: new Array(12).fill(1 / 12),
+            dailyContractHours: 8, yearlyHoursWorked: 1800,
+          },
+        },
+      ],
+      componentValuePatches: [
+        { positionId: "pos-1", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 1200 } },
+        { positionId: "pos-2", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 1200 } },
+      ],
+    },
+    lookup,
+    defIds
+  );
+
+  const input = await loadScenarioInput(
+    structureDb, valuesDb, SCOPE, scenarioId,
+    async () => CALENDAR
+  );
+  // The loader hands the engine the resolved NAME (stats key) + weight.
+  expect(input.positions.map((p) => p.cluster)).toEqual([
+    "Shared Services",
+    "Shared Services",
+  ]);
+  expect(input.positions.map((p) => p.hotelClusterWeight)).toEqual([0.25, 0.25]);
+
+  const compiled = compile(input);
+  if (!("plan" in compiled)) {
+    throw new Error(`loader compile failed: ${JSON.stringify(compiled.errors)}`);
+  }
+  const mainRun = simulate(compiled.plan);
+
+  const loaded = loadScenarioValues(valuesDb, SCOPE, scenarioId);
+  const valuesByPosition = new Map<string, typeof loaded.componentValues>();
+  for (const value of loaded.componentValues) {
+    const list = valuesByPosition.get(value.positionId) ?? [];
+    list.push(value);
+    valuesByPosition.set(value.positionId, list);
+  }
+  const rows = loaded.positions.map((record) =>
+    applyComponentValuesToRow(toRow(record), valuesByPosition.get(record.id), blocks)
+  );
+
+  const live = runLiveSim({
+    rows,
+    blocks,
+    definitions: getComponentDefinitions(structureDb, SCOPE),
+    ssSchemes: getSsSchemes(structureDb, SCOPE),
+    calendarYear: CALENDAR,
+    kpiSeries: () => [],
+    scenarioId,
+    ou: SCOPE.ou,
+    hotelClusters,
+  });
+  expect(live.errors).toBeNull();
+
+  for (const positionId of ["pos-1", "pos-2"]) {
+    const mainMonths = mainRun
+      .positionLines(positionId as PositionId)
+      .find((line) => (line.component.id as string) === `${flatId}:cost`)!.months;
+    const liveMonths = live.results.get(positionId)!.get(`${flatId}:cost`)!.months;
+    for (let m = 0; m < 12; m++) {
+      expect(liveMonths[m], `${positionId} month ${m + 1}`).toBe(mainMonths[m]);
+    }
+    // Semantics, not just parity: FLAT_MONTHLY books its value per active
+    // month (1200/mo), × 0.25 share = 300 — and the override on pos-2 is
+    // ignored (two member hotels), so both rows land the same.
+    expect(liveMonths[0]).toBeCloseTo(300, 9);
+  }
+
+  // Headcount stat is exempt: 2 whole heads; FTE flexes: 2 × 0.25 = 0.5.
+  expect(mainRun.stats.headcount[0]).toBe(2);
+  expect(mainRun.stats.fte[0]).toBeCloseTo(0.5, 9);
 });

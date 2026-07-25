@@ -138,7 +138,21 @@ export type BaseSelector =
   | { kind: "BASE_SALARY" }
   | { kind: "COMPONENTS"; componentIds: ComponentDefId[] }
   | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" }
-  | { kind: "VACATION" };
+  | { kind: "VACATION" }
+  /**
+   * The Social-Security contributory base, decomposed. `includeBaseSalary` adds
+   * the NET base-salary line (gross − vacation); `includeVacation` adds the
+   * vacation series; `componentIds` add other (non-base, non-vacation) lines.
+   * Ticking both flags reproduces gross base salary. Built at engine load by
+   * applySocialSecurityBase from the scheme's own base membership — unlike
+   * COMPONENTS, a base-salary id here means the NET line, not gross.
+   */
+  | {
+      kind: "SS_BASE";
+      includeBaseSalary: boolean;
+      includeVacation: boolean;
+      componentIds: ComponentDefId[];
+    };
 
 export interface CostComponentDefinition extends SyncMeta {
   id: ComponentDefId;
@@ -191,6 +205,15 @@ export interface SsBracket {
   rate: number;
 }
 
+/**
+ * How contributions accumulate across the year.
+ * CUMULATIVE — the base runs up month to month within a tax year (with the
+ *   yearly cap), resetting at the tax-year boundary. UK PAYE / annual schemes.
+ * PER_PERIOD — each month stands alone against the brackets + monthly cap; no
+ *   carry-over, no yearly cap. UK National Insurance.
+ */
+export type SsAccumulationMode = "CUMULATIVE" | "PER_PERIOD";
+
 export interface SocialSecurityScheme extends SyncMeta {
   id: SsSchemeId;
   label: string;
@@ -200,6 +223,18 @@ export interface SocialSecurityScheme extends SyncMeta {
   yearlyCap: number | null;
   /** Ascending by upTo; at most SS_MAX_BRACKETS entries; only the last may be unbounded. */
   brackets: SsBracket[];
+  /** Defaults to CUMULATIVE (today's behaviour) when absent. */
+  accumulationMode?: SsAccumulationMode;
+  /** Month (1–12) the tax year starts; the cumulative accumulator resets here.
+   *  Defaults to 1 (January = calendar year) when absent — then the opening
+   *  base is discarded and the run is identical to the pre-2c engine. */
+  taxYearStartMonth?: number;
+  /** Contributory base: include the NET base-salary line. Defaults to true. */
+  includeBaseSalary?: boolean;
+  /** Contributory base: include the vacation series. Defaults to true. */
+  includeVacation?: boolean;
+  /** Contributory base: cost-def ids of other blocks in this scheme's base. */
+  baseComponentIds?: ComponentDefId[];
 }
 
 export const SS_MAX_BRACKETS = 7;
@@ -218,8 +253,18 @@ export interface Position extends SyncMeta {
   departmentCode: string;
   /** Job-type code used for stats clustering (e.g. manager / associate / casual). */
   jobTypeCode: string;
-  /** Department cluster for the staffing overview (e.g. Rooms, F&B). */
+  /** Hotel-cluster name for the staffing overview grouping ("" = none). The
+   *  loaders resolve the stored cluster id to its display name; the engine
+   *  only ever sees this string as a grouping key. */
   cluster: string;
+  /** Resolved hotel-cluster share of this position's costs (1 = fully owned
+   *  by this hotel). Applied by the count-multiplier pass exactly like
+   *  headcount — post-computation, with the same exemptions (HEADCOUNT stat,
+   *  DIRECT_ABS) — so per-person effects (SS brackets/caps) run on the FULL
+   *  salary first and the hotel then books its share. Resolution from cluster
+   *  definitions + override happens at input-building time in both loaders
+   *  (see src/shared/hotelClusters/resolve.ts); the engine never sees ids. */
+  hotelClusterWeight: number;
   payType: PayType;
   headcount: number;
   fte: number;
@@ -269,6 +314,13 @@ export interface ComponentValue extends SyncMeta {
   /** QTY_TIMES_RATE (yearly qty × unit rate). */
   qty?: number;
   unitRate?: number;
+  /** SOCIAL_SECURITY defs only: the position's cumulative NI/SS contribution
+   *  base already accrued into the current tax year before its first simulated
+   *  month (a non-January tax year straddles the prior calendar year). Seeds the
+   *  SS accumulator; only consulted for a CUMULATIVE scheme with
+   *  taxYearStartMonth > 1. Defaults to 0. Per (position, scheme) since each SS
+   *  block is its own component def. */
+  ssOpeningBase?: number;
   /** Per-line account override: when defined, this line's dept×account key
    *  uses it instead of the definition's account. Loaders populate it only
    *  for "unlocked" blocks; values never change, only the aggregation key. */

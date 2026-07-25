@@ -343,16 +343,34 @@ export function executePosition(
         const monthlyCap = paramPool[pp];
         const yearlyCap = paramPool[pp + 1];
         const bracketCount = paramPool[pp + 2];
-        const bracketOfs = pp + 3;
-        let cumPrev = 0;
-        let taxPrev = 0;
-        for (let m = 0; m < MONTHS; m++) {
-          const monthBase = Math.min(scratch[SCRATCH_ACC + m], monthlyCap);
-          const cum = Math.min(cumPrev + monthBase, yearlyCap);
-          const taxCum = ssTax(paramPool, bracketOfs, bracketCount, cum);
-          values[out + m] = taxCum - taxPrev;
-          cumPrev = cum;
-          taxPrev = taxCum;
+        const perPeriod = paramPool[pp + 3] === 1;
+        const resetIdx = paramPool[pp + 4] - 1; // 0-based tax-year start month
+        const openingBase = paramPool[pp + 5];
+        const bracketOfs = pp + 6;
+        if (perPeriod) {
+          // Each month stands alone: no carry-over, no yearly cap.
+          for (let m = 0; m < MONTHS; m++) {
+            const monthBase = Math.min(scratch[SCRATCH_ACC + m], monthlyCap);
+            values[out + m] = ssTax(paramPool, bracketOfs, bracketCount, monthBase);
+          }
+        } else {
+          // Cumulative: seed from the prior-year opening base, reset at the
+          // tax-year boundary. A January start (resetIdx 0) resets at m=0, so the
+          // opening base is discarded — identical to the pre-2c engine.
+          let cumPrev = openingBase;
+          let taxPrev = ssTax(paramPool, bracketOfs, bracketCount, openingBase);
+          for (let m = 0; m < MONTHS; m++) {
+            if (m === resetIdx) {
+              cumPrev = 0;
+              taxPrev = 0;
+            }
+            const monthBase = Math.min(scratch[SCRATCH_ACC + m], monthlyCap);
+            const cum = Math.min(cumPrev + monthBase, yearlyCap);
+            const taxCum = ssTax(paramPool, bracketOfs, bracketCount, cum);
+            values[out + m] = taxCum - taxPrev;
+            cumPrev = cum;
+            taxPrev = taxCum;
+          }
         }
         break;
       }
@@ -398,23 +416,25 @@ export function executePosition(
     }
   }
 
-  // Count multiplier: this row stands for `posHeadcount[p]` identical positions.
-  // Every line was computed as a single unit first — so per-person effects like
-  // the social-security caps land correctly — then the whole slice is booked C
-  // times over here. The HEADCOUNT stat already emits the count itself (see
-  // compile.ts), so it is exempt; scaling it too would square the count. Mirrors
-  // referencePosition; keep the two in lockstep.
-  const count = plan.posHeadcount[p];
-  if (count !== 1) {
+  // Count × cluster-weight multiplier: this row stands for `posHeadcount[p]`
+  // identical positions, of which this hotel carries `posWeight[p]` (its
+  // hotel-cluster share). Every line was computed as a single unit first — so
+  // per-person effects like the social-security caps land correctly on the
+  // FULL salary — then the slice is booked count × weight over here. The
+  // HEADCOUNT stat is exempt from BOTH (it already emits the count itself,
+  // and a shared person still counts as one head wherever they sit); KPI
+  // lines are absolute (whole-line amount), not per-head, so they stay exempt
+  // too. Mirrors referencePosition; keep the two in lockstep.
+  const coeff = plan.posHeadcount[p] * plan.posWeight[p];
+  if (coeff !== 1) {
     const defs = plan.componentDefs;
     const defCount = defs.length;
     for (let di = 0; di < defCount; di++) {
       const def = defs[di];
       if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
-      // KPI-driven lines are absolute (whole-line amount), not per-head.
       if (def.spreadMethod === "DIRECT_ABS") continue;
       const lineOfs = (p * defCount + di) * MONTHS;
-      for (let m = 0; m < MONTHS; m++) values[lineOfs + m] *= count;
+      for (let m = 0; m < MONTHS; m++) values[lineOfs + m] *= coeff;
     }
   }
 }

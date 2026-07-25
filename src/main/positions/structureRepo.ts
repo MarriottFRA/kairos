@@ -542,10 +542,25 @@ export function getComponentDefinitions(
   });
 }
 
+/** Parse the ss_schemes.base_component_ids JSON, tolerating malformed data. */
+function parseBaseComponentIds(raw: string): ComponentDefId[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? (parsed.filter((id) => typeof id === "string") as ComponentDefId[])
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 export function getSsSchemes(db: Db, scope: OuScope): SocialSecurityScheme[] {
   const rows = prepared(
     db,
-    `SELECT id, label, monthly_cap, yearly_cap, updated_at
+    `SELECT id, label, monthly_cap, yearly_cap,
+            accumulation_mode, tax_year_start_month,
+            include_base_salary, include_vacation, base_component_ids,
+            updated_at
        FROM ss_schemes
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY label`
@@ -554,6 +569,11 @@ export function getSsSchemes(db: Db, scope: OuScope): SocialSecurityScheme[] {
     label: string;
     monthly_cap: number | null;
     yearly_cap: number | null;
+    accumulation_mode: string;
+    tax_year_start_month: number;
+    include_base_salary: number;
+    include_vacation: number;
+    base_component_ids: string;
     updated_at: string;
   }>;
 
@@ -579,6 +599,11 @@ export function getSsSchemes(db: Db, scope: OuScope): SocialSecurityScheme[] {
     monthlyCap: row.monthly_cap,
     yearlyCap: row.yearly_cap,
     brackets: bracketsByScheme.get(row.id) ?? [],
+    accumulationMode: row.accumulation_mode === "PER_PERIOD" ? "PER_PERIOD" : "CUMULATIVE",
+    taxYearStartMonth: row.tax_year_start_month,
+    includeBaseSalary: row.include_base_salary !== 0,
+    includeVacation: row.include_vacation !== 0,
+    baseComponentIds: parseBaseComponentIds(row.base_component_ids),
     updatedAt: row.updated_at,
     deletedAt: null,
   }));

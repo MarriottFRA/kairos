@@ -27,7 +27,9 @@ import HomeIcon from "@mui/icons-material/Home";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import InsightsIcon from "@mui/icons-material/Insights";
 import EditNoteIcon from "@mui/icons-material/EditNote";
+import HubIcon from "@mui/icons-material/Hub";
 import BadgeIcon from "@mui/icons-material/Badge";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import AssessmentIcon from "@mui/icons-material/Assessment";
 import ApartmentIcon from "@mui/icons-material/Apartment";
 import Menu from "@mui/material/Menu";
@@ -672,12 +674,30 @@ const handleSignOut = useCallback(async () => {
               <ListItemText primary="Manual Input" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
+          {/* Clusters sits with the configuration tabs, right before the
+              Positions grid that consumes them. */}
+          <ListItem key="clusters" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/clusters")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <HubIcon />
+              </ListItemIcon>
+              <ListItemText primary="Clusters" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
           <ListItem key="positions" disablePadding sx={{ display: "block" }}>
             <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/positions")}>
               <ListItemIcon sx={listItemIconStyle}>
                 <BadgeIcon />
               </ListItemIcon>
               <ListItemText primary="Positions" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          <ListItem key="allocations" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/allocations")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <CallSplitIcon />
+              </ListItemIcon>
+              <ListItemText primary="Allocations" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
           <ListItem key="results" disablePadding sx={{ display: "block" }}>

@@ -39,10 +39,12 @@ export function aggregate(
   const positionCount = plan.positionIds.length;
   for (let p = 0; p < positionCount; p++) {
     const row = plan.positionStatRow[p];
-    // posHeadcount is the Count multiplier — the number of identical positions on
-    // the row — so it is already the total people. FTE is stored per position, so
-    // it scales by the same Count to give the row's total FTE.
+    // posHeadcount is the Count multiplier — the number of identical positions
+    // on the row — so it is already the total people, and it is NEVER scaled
+    // by the hotel-cluster weight: a person shared across hotels still counts
+    // as one head here. FTE is budgeted capacity, so it scales by the Count
+    // AND the hotel-cluster share (half a shared person = half an FTE).
     statHeadcount[row] += plan.posHeadcount[p];
-    statFte[row] += plan.posFte[p] * plan.posHeadcount[p];
+    statFte[row] += plan.posFte[p] * plan.posHeadcount[p] * plan.posWeight[p];
   }
 }

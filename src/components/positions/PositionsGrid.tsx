@@ -39,9 +39,12 @@ import {
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
   FieldCatalog,
+  HOTEL_CLUSTER_KEY,
+  HOTEL_CLUSTER_MULT_KEY,
   SectionId,
 } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
 import { BlockDto } from "../../shared/blocks/ipc";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
@@ -65,6 +68,14 @@ export interface PositionsGridProps {
   accounts: AccountOption[];
   /** Engine-simulated vacation cost per row id — feeds the Vacation Cost column. */
   vacationCostById: ReadonlyMap<string, number>;
+  /** Calendar-derived Manhours Worked per row id — shown when the cell has no
+   *  manual override. */
+  manhoursWorkedById: ReadonlyMap<string, number>;
+  /** Hotel-cluster definitions for the Cluster picker + Multiplier column;
+   *  empty until loaded (the Cluster field then degrades to plain text). */
+  hotelClusters: HotelClusterDto[];
+  /** The selected hotel — whose weight in an assigned cluster flexes a row. */
+  currentOu: string | null;
   /** The hotel's blocks — each renders as a column band after the sections. */
   blocks: BlockDto[];
   /** Live-sim results feeding every block's Total column; null while loading. */
@@ -188,6 +199,9 @@ export default function PositionsGrid({
   departments,
   accounts,
   vacationCostById,
+  manhoursWorkedById,
+  hotelClusters,
+  currentOu,
   blocks,
   blockResults,
   masked,
@@ -301,7 +315,7 @@ export default function PositionsGrid({
 
     // The gutter's members lead the array too, so unpinning keeps them together.
     const [controlColumns, dataColumns] = partition(
-      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById }),
+      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, hotelClusters, currentOu }),
       (column) => controlKeys.has(column.field)
     );
 
@@ -310,7 +324,7 @@ export default function PositionsGrid({
     const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, blocks, blockResults, statusByRow, onDuplicate, onDelete]);
+  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, hotelClusters, currentOu, blocks, blockResults, statusByRow, onDuplicate, onDelete]);
 
   const columnGroupingModel = useMemo(
     () => [
@@ -318,6 +332,26 @@ export default function PositionsGrid({
       ...buildBlockGroupingEntries(blocks, onEditBlock),
     ],
     [catalog, onAddField, onManageColumns, blocks, onEditBlock]
+  );
+
+  // Only a single-hotel cluster's multiplier may be overridden by hand — with
+  // several member hotels the cluster's weights ARE the spread, and a manual
+  // number would silently break the split.
+  const clusterOverridable = useCallback(
+    (row: PositionRow | undefined): boolean => {
+      const id =
+        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "";
+      if (!id) return false;
+      const cluster = hotelClusters.find((candidate) => candidate.id === id);
+      return (
+        !!cluster &&
+        cluster.members.length === 1 &&
+        cluster.members[0].ou === (currentOu ?? "")
+      );
+    },
+    [hotelClusters, currentOu]
   );
 
   // Masked PII cells are read-only: blind edits and blind pastes into hidden
@@ -331,9 +365,12 @@ export default function PositionsGrid({
       const isHourly = params.row?.payType === "HOURLY";
       if (params.field === BASIC_SALARY_MONTHLY_KEY && isHourly) return false;
       if (params.field === BASIC_SALARY_HOURLY_KEY && !isHourly) return false;
+      if (params.field === HOTEL_CLUSTER_MULT_KEY && !clusterOverridable(params.row)) {
+        return false;
+      }
       return params.colDef.editable !== false;
     },
-    [masked, maskableKeys]
+    [masked, maskableKeys, clusterOverridable]
   );
 
   // The read-only Department (code) cell is a mirror of the Dept Name pick, so

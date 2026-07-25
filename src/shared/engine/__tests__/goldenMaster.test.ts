@@ -337,3 +337,125 @@ describe("golden master 5 — bank-holiday premium (hourly-only, staff × premiu
     expectMonths(months(lines, "bankhol"), new Array(MONTHS).fill(0));
   });
 });
+
+describe("golden master 6 — hotel-cluster weight", () => {
+  // A shared person: this hotel carries `hotelClusterWeight` of the position.
+  // The weight rides the count-multiplier pass (coeff = headcount × weight), so
+  // every currency/FTE/hours line flexes by it while the HEADCOUNT stat — a
+  // person is still one person here — never does.
+  const definitions = [
+    makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+    makeDef({ id: "indemnity", spreadMethod: "WEIGHTED_BY_BASE", accountCode: "621000" }),
+    makeDef({ id: "custom", spreadMethod: "DIRECT_MONTHLY", accountCode: "624000" }),
+    makeDef({ id: "overtime", spreadMethod: "QTY_TIMES_RATE", accountCode: "625000" }),
+    makeDef({ id: "hc", kind: "STAT", statKind: "HEADCOUNT", accountCode: "972000" }),
+    makeDef({ id: "fte", kind: "STAT", statKind: "FTE", accountCode: "972540" }),
+    makeDef({ id: "hours", kind: "STAT", statKind: "HOURS", accountCode: "971000" }),
+  ];
+  const values = (id: string) => [
+    makeValue(id, "indemnity", { yearlyValue: 1440 }),
+    makeValue(id, "custom", { monthlyValues: new Array(MONTHS).fill(10) }),
+    makeValue(id, "overtime", { qty: 120, unitRate: 15 }),
+  ];
+  const position = (id: string, overrides: Record<string, unknown>) =>
+    makePosition({
+      id,
+      monthlyBaseSalary: 1200,
+      fte: 1.5,
+      yearlyHoursWorked: 1500,
+      vacationDays: 5,
+      dailyContractHours: 8,
+      ...overrides,
+    });
+
+  it("halves every line except the HEADCOUNT stat (weight 0.5)", () => {
+    // Golden master 3's per-unit figures, × 0.5 instead of × 2.
+    const input = makeInput({
+      definitions,
+      positions: [position("p1", { hotelClusterWeight: 0.5 })],
+      componentValues: values("p1"),
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+    const lines = result.positionLines(posId("p1"));
+
+    const flat = (value: number) => new Array(MONTHS).fill(value);
+    // Base: gross 1200 minus the vacation deduction (5 days × day-rate 40 =
+    // 200/yr, uniform weights → 16.67/mo) = 1183.33 per-unit, × 0.5.
+    expectMonths(months(lines, "base"), flat((1200 - 200 / 12) * 0.5));
+    expectMonths(months(lines, "indemnity"), flat(60)); // 120/mo per-unit × 0.5
+    expectMonths(months(lines, "custom"), flat(5)); // 10 × 0.5
+    expectMonths(months(lines, "overtime"), flat(75)); // 150 × 0.5
+    expectMonths(months(lines, "hc"), flat(1)); // NEVER weighted
+    expectMonths(months(lines, "fte"), flat(0.75)); // 1.5 × 0.5
+    expectMonths(months(lines, "hours"), flat(62.5)); // 125 × 0.5
+
+    // The dedicated staffing stats mirror the lines: heads stay whole, FTE flexes.
+    expect(result.stats.headcount[0]).toBe(1);
+    expect(result.stats.fte[0]).toBeCloseTo(0.75, 9);
+  });
+
+  it("composes with the Count: headcount 2 × weight 0.5 = coeff 1 (per-unit figures)", () => {
+    const input = makeInput({
+      definitions,
+      positions: [position("p1", { headcount: 2, hotelClusterWeight: 0.5 })],
+      componentValues: values("p1"),
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+    const lines = result.positionLines(posId("p1"));
+
+    const flat = (value: number) => new Array(MONTHS).fill(value);
+    expectMonths(months(lines, "indemnity"), flat(120)); // per-unit — 2 × 0.5 cancels
+    expectMonths(months(lines, "custom"), flat(10));
+    expectMonths(months(lines, "hc"), flat(2)); // the Count itself, unweighted
+    expectMonths(months(lines, "fte"), flat(1.5)); // 1.5 × 2 × 0.5
+    expect(result.stats.headcount[0]).toBe(2); // both heads still count
+    expect(result.stats.fte[0]).toBeCloseTo(1.5, 9);
+  });
+
+  it("computes social security on the FULL salary, then books the hotel's share", () => {
+    // The bracket boundary pins the ordering: gross 1200/mo crosses the 6000
+    // bound at May on the FULL salary → per-unit SS [120×5, 60×7], × 0.5.
+    // Weighting the salary first (600/mo, bound at Oct) would give
+    // [60×10, 30×2] — a different shape, so a wrong order cannot pass.
+    const scheme = makeScheme({
+      id: "sch",
+      brackets: [
+        { upTo: 6000, rate: 0.1 },
+        { upTo: null, rate: 0.05 },
+      ],
+    });
+    const input = makeInput({
+      definitions: [
+        makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+        makeDef({ id: "ss", kind: "SOCIAL_SECURITY", accountCode: "630000", ssSchemeId: "sch" as SsSchemeId }),
+      ],
+      ssSchemes: [scheme],
+      positions: [
+        makePosition({ id: "p1", monthlyBaseSalary: 1200, hotelClusterWeight: 0.5 }),
+      ],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p1"));
+
+    expectMonths(months(lines, "ss"), [60, 60, 60, 60, 60, 30, 30, 30, 30, 30, 30, 30]);
+  });
+
+  it("rejects an out-of-range or non-finite weight at compile", () => {
+    for (const weight of [0, -0.5, 2, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const input = makeInput({
+        definitions: [makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" })],
+        positions: [makePosition({ id: "p1", hotelClusterWeight: weight })],
+      });
+      const compiled = compile(input);
+      expect("errors" in compiled, String(weight)).toBe(true);
+      if ("errors" in compiled) {
+        expect(compiled.errors.some((error) => error.code === "INVALID_POSITION")).toBe(true);
+      }
+    }
+  });
+});

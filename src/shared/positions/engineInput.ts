@@ -13,11 +13,13 @@
 import { CalendarYear } from "../calendar";
 import { KPI_EXPLICIT_DEPT_KEY } from "../kpiDrivers/ipc";
 import {
+  CalendarContext,
   ComponentDefId,
   ComponentValue,
   CostComponentDefinition,
   MONTHS,
   Position,
+  SocialSecurityScheme,
 } from "../engine/types";
 
 /**
@@ -54,6 +56,91 @@ export function buildBankHolidayDefinition(
     updatedAt: calendar.updatedAt ?? "",
     deletedAt: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Manhours Worked — auto-derived from the calendar, override-aware
+// ---------------------------------------------------------------------------
+
+/**
+ * Calendar-derived yearly worked hours (net of vacation):
+ *   (Σ realDays − vacationDays) × dailyContractHours, floored at 0.
+ *
+ * `realDays` is the calendar's net productive days per month (calendar days −
+ * public holidays − weekends). The engine's HOURS stat adds the vacation hours
+ * back and removes them again by the vacation weights (VBA Section 22), so a
+ * net-of-vacation yearly total lands the hours in the right months.
+ */
+export function deriveYearlyHoursWorked(
+  position: Pick<Position, "vacationDays" | "dailyContractHours">,
+  calendar: Pick<CalendarContext, "realDays">
+): number {
+  let productiveDays = 0;
+  for (let m = 0; m < MONTHS; m++) productiveDays += calendar.realDays[m];
+  const workedDays = productiveDays - position.vacationDays;
+  return workedDays > 0 ? workedDays * position.dailyContractHours : 0;
+}
+
+/**
+ * The worked-hours figure to feed the engine. A positive stored value is a
+ * manual override entered on the grid; unset (≤ 0) falls back to the
+ * calendar-derived value so a freshly added row still spreads hours. Both
+ * engine-input paths call this with the same calendar → identical results
+ * (pinned by liveSimParity).
+ */
+export function resolveYearlyHoursWorked(
+  storedYearlyHoursWorked: number,
+  position: Pick<Position, "vacationDays" | "dailyContractHours">,
+  calendar: Pick<CalendarContext, "realDays">
+): number {
+  return storedYearlyHoursWorked > 0
+    ? storedYearlyHoursWorked
+    : deriveYearlyHoursWorked(position, calendar);
+}
+
+// ---------------------------------------------------------------------------
+// Social Security / NI — materialize the contributory base at engine load
+// ---------------------------------------------------------------------------
+
+/** The scheme facts applySocialSecurityBase needs (a slice of SocialSecurityScheme). */
+export type SsBaseScheme = Pick<
+  SocialSecurityScheme,
+  "id" | "includeBaseSalary" | "includeVacation" | "baseComponentIds"
+>;
+
+/**
+ * Fill each SOCIAL_SECURITY definition's contributory base from ITS OWN scheme's
+ * base membership, rather than materializing it in the DB (which would force a
+ * cross-block recompile whenever membership changed). Each scheme independently
+ * chooses net Base Salary, Vacation, and any custom-block lines — so multiple SS
+ * schemes (one grid column each) can have different bases. Defaults both flags on
+ * when a scheme is missing or leaves them unset, so an unconfigured base reads as
+ * gross base salary (today's behaviour). Called by BOTH engine-input paths before
+ * compile — the same anti-divergence guarantee as injectKpiSeries. Mutates the SS
+ * defs in place (callers pass loader-owned copies).
+ */
+export function applySocialSecurityBase(
+  definitions: CostComponentDefinition[],
+  schemes: SsBaseScheme[]
+): void {
+  const ssDefs = definitions.filter((def) => def.kind === "SOCIAL_SECURITY");
+  if (ssDefs.length === 0) return;
+
+  const schemeById = new Map(schemes.map((scheme) => [scheme.id as string, scheme]));
+  const defIds = new Set(definitions.map((def) => def.id as string));
+
+  for (const def of ssDefs) {
+    const scheme = def.ssSchemeId ? schemeById.get(def.ssSchemeId as string) : undefined;
+    const componentIds = (scheme?.baseComponentIds ?? []).filter((id) =>
+      defIds.has(id as string)
+    ) as ComponentDefId[];
+    def.baseSelector = {
+      kind: "SS_BASE",
+      includeBaseSalary: scheme?.includeBaseSalary ?? true,
+      includeVacation: scheme?.includeVacation ?? true,
+      componentIds,
+    };
+  }
 }
 
 /** One resolved KPI series (the deptKey/values slice of KpiDriverSeries). */

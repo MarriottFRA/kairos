@@ -29,7 +29,11 @@ export interface PositionRecord {
   active: boolean;
   departmentCode: string;
   jobTypeCode: string;
+  /** Hotel-cluster id from the plaintext store ("" = none). */
   cluster: string;
+  /** Manual multiplier, honored only while the assigned cluster has exactly
+   *  one member hotel. null = use the cluster's member weight. */
+  clusterMultiplierOverride: number | null;
   payType: "HOURLY" | "SALARIED";
   headcount: number;
   fte: number;
@@ -71,6 +75,10 @@ export interface ComponentValueRecord {
   monthlyValues: number[] | null;
   qty: number | null;
   unitRate: number | null;
+  /** SOCIAL_SECURITY blocks only: this position's prior-year contribution base
+   *  for the scheme's cumulative, non-January tax year. null = 0 (the engine
+   *  default). Seeded by the opening-balance pre-sim; overrideable per row. */
+  ssOpeningBase: number | null;
   /** Per-row account override for an "unlocked" block; null = the block's
    *  configured default. Empty string = calculation-only for this row. */
   accountCode: string | null;
@@ -203,6 +211,7 @@ export interface ComponentValuePatch {
       | "monthlyValues"
       | "qty"
       | "unitRate"
+      | "ssOpeningBase"
       | "accountCode"
       | "statsAccountCode"
     >
@@ -250,6 +259,19 @@ export interface OutputAggRowDto {
   total: number;
 }
 
+/** Why a Recalculate produced empty/zero results for some positions — surfaced
+ *  as a Results-page notice so a silently-dropped row is visible. Populated by
+ *  recalc only; absent on a plain outputs read (page mount). */
+export interface OutputDiagnostics {
+  /** Active positions that produced no output lines at all — every candidate
+   *  line was dropped for a blank posting account (Salary / Headcount / Hours
+   *  account unset). */
+  noAccountPositions: number;
+  /** Active positions that produced only zero-valued lines — e.g. no salary or
+   *  hours entered, or Count 0. */
+  allZeroPositions: number;
+}
+
 export interface OutputsResponse {
   /** Null = never calculated for this (hotel, scenario). */
   run: OutputRunDto | null;
@@ -257,6 +279,9 @@ export interface OutputsResponse {
    *  KPI recalc, budget pull) — the "Recalculate to refresh" chip. */
   stale: boolean;
   rows: OutputAggRowDto[];
+  /** Present only in a Recalculate response when some active positions produced
+   *  no/zero output — drives a one-time notice. */
+  diagnostics?: OutputDiagnostics;
 }
 
 /** Error sentinel the renderer branches on when the encrypted DB is locked. */

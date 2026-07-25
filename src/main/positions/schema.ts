@@ -64,6 +64,17 @@ export const POSITIONS_STRUCTURE_TABLES_SQL = `
       label TEXT NOT NULL,
       monthly_cap REAL,
       yearly_cap REAL,
+      -- CUMULATIVE (default, pre-2c behaviour) | PER_PERIOD (each month alone).
+      accumulation_mode TEXT NOT NULL DEFAULT 'CUMULATIVE',
+      -- Month (1-12) the tax year starts; the cumulative accumulator resets here.
+      -- 1 = January = calendar year (identical to the pre-2c engine).
+      tax_year_start_month INTEGER NOT NULL DEFAULT 1,
+      -- Contributory base membership (see applySocialSecurityBase). Defaults on,
+      -- so an unconfigured base reads as gross base salary (net + vacation).
+      include_base_salary INTEGER NOT NULL DEFAULT 1,
+      include_vacation INTEGER NOT NULL DEFAULT 1,
+      -- JSON array of cost-def ids of the custom blocks in this scheme's base.
+      base_component_ids TEXT NOT NULL DEFAULT '[]',
       updated_at TEXT NOT NULL,
       deleted_at TEXT
   );
@@ -130,7 +141,14 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       active                   INTEGER NOT NULL DEFAULT 1,
       department_code          TEXT NOT NULL DEFAULT '',
       job_type_code            TEXT NOT NULL DEFAULT '',
+      -- Hotel-cluster assignment: the id of a hotel_clusters row in the
+      -- PLAINTEXT store ('' = none; no cross-file FK possible — dangling ids
+      -- resolve to weight 1 at load). Originally held free-text department
+      -- groupings; repurposed in secure v11 (legacy values cleared).
       cluster                  TEXT NOT NULL DEFAULT '',
+      -- Manual multiplier, honored only while the assigned cluster has
+      -- exactly one member hotel. NULL = use the cluster's member weight.
+      cluster_multiplier_override REAL,
       pay_type                 TEXT NOT NULL DEFAULT 'SALARIED'
                                  CHECK (pay_type IN ('HOURLY','SALARIED')),
       headcount                REAL NOT NULL DEFAULT 1,
@@ -155,6 +173,9 @@ export const POSITIONS_VALUE_TABLES_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_positions_scope ON positions (ou, scenario_id);
   CREATE INDEX IF NOT EXISTS idx_positions_lineage ON positions (ou, lineage_id);
+  -- The explicit multi-scope reads (hotel-cluster membership view / clear)
+  -- filter on the assignment alone, across OUs.
+  CREATE INDEX IF NOT EXISTS idx_positions_cluster ON positions (cluster);
 
   -- PII sidecar. Never joined into a ScenarioInput; only the dedicated
   -- positions:pii-get channel reads it.
@@ -187,6 +208,11 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       monthly_values   TEXT,
       qty              REAL,
       unit_rate        REAL,
+      -- SOCIAL_SECURITY blocks only: this position's prior-year NI/SS contribution
+      -- base carried into a cumulative, non-January tax year (2c). Per (position,
+      -- scheme) since each SS block is its own component def. Seeded by the
+      -- opening-balance pre-sim; overrideable. NULL = 0 (the engine default).
+      ss_opening_base    REAL,
       -- Per-row account overrides for "unlocked" blocks (NULL = the block's
       -- default account). stats_account_code is the dual-block count line's.
       account_code       TEXT,
@@ -354,5 +380,70 @@ export function applyValueStoreV9(
   }
   if (!present.has("stats_account_code")) {
     handle.exec(`ALTER TABLE component_values ADD COLUMN stats_account_code TEXT`);
+  }
+}
+
+/**
+ * Repurpose positions.cluster for hotel clusters (secure v11).
+ *
+ * The column now stores a hotel_clusters id from the PLAINTEXT store ('' =
+ * no cluster); its old free-text department groupings are dropped (mapping
+ * tables replace that use), so an UPGRADED store clears them — otherwise
+ * every legacy value would render as a dangling cluster warning. The clear
+ * only runs when the override column is genuinely being added (a pre-v11
+ * store): on a fresh install the column comes from the DDL above, there is
+ * no legacy data, and re-execs must never wipe real assignments.
+ * Idempotent — guard on the column check.
+ */
+export function applyValueStoreV11(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("cluster_multiplier_override")) {
+    handle.exec(
+      `ALTER TABLE positions ADD COLUMN cluster_multiplier_override REAL`
+    );
+    handle.exec(`UPDATE positions SET cluster = ''`);
+  }
+  handle.exec(
+    `CREATE INDEX IF NOT EXISTS idx_positions_cluster ON positions (cluster)`
+  );
+}
+
+/**
+ * Add the per-scheme contributory-base columns to ss_schemes (base membership
+ * moved off the block flags and onto the scheme itself). Fresh installs get the
+ * columns from the DDL above; this backfills stores whose ss_schemes predates
+ * them. Defaults keep existing schemes at gross base salary (both flags on, no
+ * custom components). Idempotent — guard on the column check.
+ */
+export function applySsSchemeBaseColumns(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(ss_schemes)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("include_base_salary")) {
+    handle.exec(
+      `ALTER TABLE ss_schemes ADD COLUMN include_base_salary INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+  if (!present.has("include_vacation")) {
+    handle.exec(
+      `ALTER TABLE ss_schemes ADD COLUMN include_vacation INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+  if (!present.has("base_component_ids")) {
+    handle.exec(
+      `ALTER TABLE ss_schemes ADD COLUMN base_component_ids TEXT NOT NULL DEFAULT '[]'`
+    );
   }
 }

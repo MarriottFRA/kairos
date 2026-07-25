@@ -142,6 +142,20 @@ export function computeFingerprint(
         WHERE ou = ? ORDER BY committed_at DESC LIMIT 1`,
       scope.ou
     ),
+    // Hotel clusters (cross-OU reference data, no ou filter): the repo stamps
+    // hotel_clusters.updated_at on EVERY save — members are rewritten in the
+    // same transaction — so head-stamp+count covers renames, membership and
+    // weight edits; the members probe is belt and braces for weight drift.
+    // Assignment/override edits live on positions and are caught above.
+    probe(
+      structureDb,
+      `SELECT MAX(updated_at), COUNT(*) FROM hotel_clusters
+        WHERE deleted_at IS NULL`
+    ),
+    probe(
+      structureDb,
+      `SELECT COUNT(*), COALESCE(SUM(weight), 0) FROM hotel_cluster_members`
+    ),
   ];
   return parts.join("§");
 }

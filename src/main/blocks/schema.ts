@@ -17,7 +17,7 @@ export const BLOCK_CONFIGS_SQL = `
       id         TEXT PRIMARY KEY,
       ou         TEXT NOT NULL,
       block_type TEXT NOT NULL CHECK (block_type IN
-        ('MULTIPLIER','FLAT_MONTHLY','COUNT_RATE','CUSTOM_MONTHLY')),
+        ('MULTIPLIER','FLAT_MONTHLY','COUNT_RATE','CUSTOM_MONTHLY','SOCIAL_SECURITY')),
       label      TEXT NOT NULL,
       -- Everything type-specific (accounts, locks, base ref, spread choice,
       -- increase-aware, department mode) as one JSON blob; the compiled

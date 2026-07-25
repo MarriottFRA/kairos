@@ -22,7 +22,13 @@ import { PositionRow } from "./rowModel";
 
 const MONTHS = 12;
 
-export type BlockSlot = "rate" | "amount" | "qty" | "unitRate" | `m${number}`;
+export type BlockSlot =
+  | "rate"
+  | "amount"
+  | "qty"
+  | "unitRate"
+  | "openingBase"
+  | `m${number}`;
 
 export const BLOCK_KEY_PREFIX = "blk:";
 
@@ -41,6 +47,10 @@ export function blockInputSlots(block: BlockDto): BlockSlot[] {
       return ["qty", "unitRate"];
     case "CUSTOM_MONTHLY":
       return Array.from({ length: MONTHS }, (_, m) => `m${m + 1}` as BlockSlot);
+    case "SOCIAL_SECURITY":
+      // Fully computed from salary + scheme, except the prior-year opening base:
+      // a CUMULATIVE, non-January scheme carries one per (position, scheme).
+      return block.ssCumulativeNonJan ? ["openingBase"] : [];
   }
 }
 
@@ -93,6 +103,7 @@ export function applyComponentValuesToRow(
       else if (slot === "amount") row[key] = value.yearlyValue ?? null;
       else if (slot === "qty") row[key] = value.qty ?? null;
       else if (slot === "unitRate") row[key] = value.unitRate ?? null;
+      else if (slot === "openingBase") row[key] = value.ssOpeningBase ?? null;
       else {
         const month = Number(slot.slice(1));
         row[key] = value.monthlyValues?.[month - 1] ?? null;
@@ -185,6 +196,7 @@ export function blockPatchesFromRow(
     else if (slot === "amount") fields.yearlyValue = numberOrNull(row[key]);
     else if (slot === "qty") fields.qty = numberOrNull(row[key]);
     else if (slot === "unitRate") fields.unitRate = numberOrNull(row[key]);
+    else if (slot === "openingBase") fields.ssOpeningBase = numberOrNull(row[key]);
     else if (slot === "account") fields.accountCode = stringOrNull(row[key]);
     else if (slot === "statsAccount") fields.statsAccountCode = stringOrNull(row[key]);
     else if (/^m\d{1,2}$/.test(slot)) touchedMonthsByDef.add(defId);
@@ -226,6 +238,7 @@ export function rowToComponentValues(
       monthlyValues: null,
       qty: null,
       unitRate: null,
+      ssOpeningBase: null,
       accountCode: null,
       statsAccountCode: null,
       updatedAt: "",
@@ -241,6 +254,7 @@ export function rowToComponentValues(
       else if (slot === "amount") record.yearlyValue = num;
       else if (slot === "qty") record.qty = num;
       else if (slot === "unitRate") record.unitRate = num;
+      else if (slot === "openingBase") record.ssOpeningBase = num;
       else {
         const month = Number(slot.slice(1));
         record.monthlyValues = record.monthlyValues ?? new Array(MONTHS).fill(0);

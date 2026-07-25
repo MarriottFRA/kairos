@@ -29,12 +29,20 @@ import {
   SocialSecurityScheme,
 } from "../engine/types";
 import {
+  applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
   KpiSeriesSlice,
   resolveBlockValues,
+  resolveYearlyHoursWorked,
 } from "./engineInput";
+import { HotelClusterDto } from "../hotelClusters/ipc";
+import {
+  clusterMapById,
+  resolveHotelClusterWeight,
+} from "../hotelClusters/resolve";
 import { rowToComponentValues } from "./blockRows";
+import { HOTEL_CLUSTER_MULT_KEY, HOTEL_CLUSTER_KEY } from "./fields";
 import { PositionRow, rowToEnginePosition } from "./rowModel";
 
 export interface BlockLineResult {
@@ -53,6 +61,11 @@ export interface LiveSimResult {
 
 const EMPTY: LiveSimResult = { results: new Map(), errors: null };
 
+function toFiniteOrNull(value: unknown): number | null {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) && value !== null && value !== "" ? num : null;
+}
+
 export function runLiveSim(args: {
   rows: PositionRow[];
   blocks: BlockDto[];
@@ -65,15 +78,46 @@ export function runLiveSim(args: {
   kpiSeries: (driverId: string) => KpiSeriesSlice[];
   scenarioId: string;
   ou: string;
+  /** Hotel-cluster definitions (cross-OU reference data); omitted/empty means
+   *  every assignment resolves DANGLING → weight 1. */
+  hotelClusters?: HotelClusterDto[];
 }): LiveSimResult {
   const { rows, blocks, definitions, ssSchemes, calendarYear, scenarioId } = args;
   if (blocks.length === 0 || rows.length === 0 || !calendarYear) return EMPTY;
+
+  // Hotel-cluster resolution: overlay the resolved cluster NAME (the stats
+  // rollup key) and this hotel's WEIGHT onto the per-unit row mapping — the
+  // exact mirror of loadScenarioInput (liveSimParity pins the two together).
+  const clusterById = clusterMapById(args.hotelClusters ?? []);
+
+  // Built once: the overlay below derives Manhours Worked from it, and the
+  // ScenarioInput reuses the same instance.
+  const calendar = buildCalendarContext(calendarYear);
 
   // Inactive rows are excluded exactly like the budget loader excludes them —
   // a retained-but-not-budgeted position shows no block totals.
   const positions = rows
     .filter((row) => row.active !== false)
-    .map((row) => rowToEnginePosition(row, scenarioId));
+    .map((row) => {
+      const position = rowToEnginePosition(row, scenarioId);
+      const resolved = resolveHotelClusterWeight(
+        args.ou,
+        typeof row[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "",
+        toFiniteOrNull(row[HOTEL_CLUSTER_MULT_KEY]),
+        clusterById
+      );
+      position.cluster = resolved.clusterName;
+      position.hotelClusterWeight = resolved.weight;
+      // Auto-derive worked hours (override-aware) — mirror of loadScenarioInput.
+      position.yearlyHoursWorked = resolveYearlyHoursWorked(
+        position.yearlyHoursWorked,
+        position,
+        calendar
+      );
+      return position;
+    });
   if (positions.length === 0) return EMPTY;
 
   // Clone defs before resolution: injectKpiSeries rewrites spreadMethod in
@@ -87,6 +131,9 @@ export function runLiveSim(args: {
   }));
   const bankHolidayDef = buildBankHolidayDefinition(args.ou, calendarYear);
   if (bankHolidayDef) defs.push(bankHolidayDef);
+  // Fill each NI scheme's contributory base from its own base membership (mirror
+  // of loadScenarioInput — liveSimParity pins the two).
+  applySocialSecurityBase(defs, ssSchemes);
 
   // Rebuild component values from the live rows (one source of truth), then
   // run the same shared resolution the loader applies.
@@ -100,6 +147,7 @@ export function runLiveSim(args: {
         monthlyValues: record.monthlyValues ?? undefined,
         qty: record.qty ?? undefined,
         unitRate: record.unitRate ?? undefined,
+        ssOpeningBase: record.ssOpeningBase ?? undefined,
         accountCode: record.accountCode ?? undefined,
         statsAccountCode: record.statsAccountCode ?? undefined,
         updatedAt: "",
@@ -127,7 +175,7 @@ export function runLiveSim(args: {
       updatedAt: "",
       deletedAt: null,
     },
-    calendar: buildCalendarContext(calendarYear),
+    calendar,
     definitions: defs,
     ssSchemes,
     positions,

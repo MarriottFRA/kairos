@@ -87,6 +87,7 @@ function slotPresentation(block: BlockDto, slot: BlockSlot): { short: string; un
   if (slot === "amount") return { short: "Amount", unit: "per month" };
   if (slot === "qty") return { short: "Count", unit: "per year" };
   if (slot === "unitRate") return { short: "Rate", unit: "per unit" };
+  if (slot === "openingBase") return { short: "Opening base", unit: "prior year" };
   const month = Number(slot.slice(1));
   return { short: MONTH_SHORT[month - 1] ?? slot, unit: "amount" };
 }

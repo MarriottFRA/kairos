@@ -211,6 +211,8 @@ describe("instruction emission", () => {
     const ss = decode(plan, 0).find((instr) => instr.name === "SOCIAL_SEC");
     expect(ss?.params).toEqual([
       4000, Infinity, 2,
+      // 2c: perPeriod flag, tax-year start month, per-position opening base.
+      0, 1, 0,
       6000, 0.1,
       Infinity, 0.05,
       Infinity, 0, Infinity, 0, Infinity, 0, Infinity, 0, Infinity, 0,

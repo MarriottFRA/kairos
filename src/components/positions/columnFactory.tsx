@@ -37,9 +37,17 @@ import {
   FieldCatalog,
   FieldDef,
   fieldLabel,
+  HOTEL_CLUSTER_KEY,
+  HOTEL_CLUSTER_MULT_KEY,
   SectionId,
 } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
+import {
+  clusterMapById,
+  ResolvedClusterWeight,
+  resolveHotelClusterWeight,
+} from "../../shared/hotelClusters/resolve";
 import { COMPUTES, PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import { headerPresentation } from "./headerMeta";
@@ -62,6 +70,17 @@ export interface ColumnFactoryContext {
   /** Simulated vacation cost per row id, from the engine (reference.ts). Feeds
    *  the read-only Vacation Cost column; empty while the calendar is loading. */
   vacationCostById: ReadonlyMap<string, number>;
+  /** Calendar-derived Manhours Worked per row id (net productive days −
+   *  vacation × daily hours). Shown when the cell carries no manual override;
+   *  empty while the calendar is loading. */
+  manhoursWorkedById: ReadonlyMap<string, number>;
+  /** Hotel-cluster definitions for the Cluster picker + Multiplier column.
+   *  Empty until loaded — the Cluster field then degrades to read-only text,
+   *  like an unsynced departments picker. */
+  hotelClusters: HotelClusterDto[];
+  /** The selected hotel — whose weight inside an assigned cluster is the
+   *  row's multiplier. */
+  currentOu: string | null;
 }
 
 const MONTH_SELECT_OPTIONS = [
@@ -343,12 +362,13 @@ function selectOptions(source: DropdownSource | null | undefined) {
       return source.options;
     case "months":
       return MONTH_SELECT_OPTIONS;
-    // Accounts and departments are both handled separately in buildColumn via a
-    // type-ahead edit cell (search by description, store the code), not the
-    // grid's singleSelect, so they never reach this switch as options; with no
-    // reference data they degrade to free text.
+    // Accounts, departments and hotel clusters are all handled separately in
+    // buildColumn (type-ahead edit cells / the cluster singleSelect), so they
+    // never reach this switch as options; with no reference data they degrade
+    // to free text.
     case "accounts":
     case "departments":
+    case "hotelClusters":
       return null;
   }
 }
@@ -536,6 +556,65 @@ function buildColumn(
     }
   }
 
+  // Manhours Worked: shows the row's EFFECTIVE worked hours — a positive manual
+  // override, else the calendar-derived value (Σ net productive days − vacation
+  // × daily hours), which is what the engine spreads. Editable so the auto value
+  // can be overridden; an untouched commit echoes the derived value back, which
+  // the valueSetter drops so the cell stays auto (mirrors the Cluster Multiplier
+  // override). An empty cell persists as 0 → the loaders re-derive it.
+  if (def.key === "yearlyHoursWorked") {
+    const derivedOf = (row: PositionRow | undefined): number | null => {
+      if (!row) return null;
+      const value = ctx.manhoursWorkedById.get(row.id);
+      return typeof value === "number" ? value : null;
+    };
+    const storedOverride = (row: PositionRow | undefined): number | null => {
+      const num = Number(row?.yearlyHoursWorked);
+      return Number.isFinite(num) && num > 0 ? num : null;
+    };
+    column.valueGetter = (_value: unknown, row: PositionRow) => {
+      if (!row) return null;
+      return storedOverride(row) ?? derivedOf(row);
+    };
+    column.valueSetter = (value: number | null | undefined, row: PositionRow) => {
+      const num = typeof value === "number" && Number.isFinite(value) ? value : null;
+      const derived = derivedOf(row);
+      // Clearing, a non-positive entry, or committing the derived value back
+      // unchanged all mean "stay auto" — store null (persisted as 0) so the row
+      // keeps following the calendar instead of freezing as an override.
+      if (num === null || num <= 0 || (derived !== null && Math.abs(num - derived) < 0.5)) {
+        return { ...row, yearlyHoursWorked: null };
+      }
+      return { ...row, yearlyHoursWorked: num };
+    };
+    column.valueFormatter = (value: number | null | undefined) => {
+      const num = Number(value);
+      return value !== null && value !== undefined && Number.isFinite(num)
+        ? num.toLocaleString(undefined, { maximumFractionDigits: 0 })
+        : "";
+    };
+    column.cellClassName = (params) =>
+      storedOverride(params.row) !== null
+        ? "pos-cell--num"
+        : "pos-cell--num pos-cell--derived";
+    column.renderCell = (params) => {
+      const overridden = storedOverride(params.row) !== null;
+      const num = Number(params.value);
+      const label =
+        params.value !== null && params.value !== undefined && Number.isFinite(num)
+          ? num.toLocaleString(undefined, { maximumFractionDigits: 0 })
+          : "";
+      const title = overridden
+        ? "Manual override — clear the cell to fall back to the calendar-derived hours (productive days − vacation × daily hours)."
+        : "Auto-calculated: (calendar productive days − vacation days) × daily hours. Type a value to override.";
+      return (
+        <Tooltip title={title}>
+          <span>{label}</span>
+        </Tooltip>
+      );
+    };
+  }
+
   // Department: a type-ahead picker (by name) over the synced reference data.
   // Attached only when options exist — otherwise the field stays plain editable
   // text, and both the paste path and the code auto-fill tolerate a typed name.
@@ -564,6 +643,211 @@ function buildColumn(
   if (isAutofilledCode) {
     column.editable = false;
     column.cellClassName = "pos-cell--derived";
+  }
+
+  // Hotel cluster with NO clusters loaded (none created yet, or the list
+  // failed to load): unlike departments there is no legitimate free-text
+  // entry — a typed raw id is never right — so the cell goes read-only
+  // instead of degrading to text. Stored ids render as a placeholder rather
+  // than leaking uuids into the grid.
+  if (
+    def.dropdownSource?.kind === "hotelClusters" &&
+    ctx.hotelClusters.length === 0
+  ) {
+    column.editable = false;
+    column.cellClassName = "pos-cell--derived";
+    column.valueFormatter = (value: unknown) =>
+      typeof value === "string" && value !== "" ? "(cluster unavailable)" : "";
+  }
+
+  // Hotel cluster: the cell stores a cluster ID; the picker and display both
+  // speak names. A stored id whose cluster was deleted shows "(deleted
+  // cluster)" and is offered as an option so re-picking None never blanks
+  // silently; a cluster whose members don't include this hotel tints the cell
+  // (the row resolves to multiplier ×1). Attached only when clusters loaded.
+  if (
+    def.dropdownSource?.kind === "hotelClusters" &&
+    ctx.hotelClusters.length > 0
+  ) {
+    const clusterById = clusterMapById(ctx.hotelClusters);
+    const resolveRow = (row: PositionRow | undefined): ResolvedClusterWeight =>
+      resolveHotelClusterWeight(
+        ctx.currentOu ?? "",
+        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "",
+        typeof row?.[HOTEL_CLUSTER_MULT_KEY] === "number"
+          ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
+          : null,
+        clusterById
+      );
+    const options = [
+      { value: "", label: "None" },
+      ...ctx.hotelClusters.map((cluster) => ({
+        value: cluster.id,
+        label: cluster.name,
+      })),
+    ];
+    delete column.align;
+    delete column.headerAlign;
+    // singleSelect owns filtering; display + editor are custom below.
+    Object.assign(column, { type: "singleSelect", valueOptions: options });
+    column.valueFormatter = (value: unknown) => {
+      const id = typeof value === "string" ? value : "";
+      if (!id) return "";
+      return clusterById.get(id)?.name ?? "(deleted cluster)";
+    };
+    column.renderEditCell = (params) => {
+      const stored = typeof params.value === "string" ? params.value : "";
+      const orphan = stored !== "" && !clusterById.has(stored);
+      return (
+        <SelectEditCell
+          {...params}
+          options={
+            orphan
+              ? [{ value: stored, label: "(deleted cluster)" }, ...options]
+              : options
+          }
+        />
+      );
+    };
+    column.cellClassName = (params) =>
+      resolveRow(params.row).warning ? "pos-cell--warn" : "";
+    column.renderCell = (params) => {
+      const resolved = resolveRow(params.row);
+      const label = column.valueFormatter
+        ? String(
+            (column.valueFormatter as (value: unknown) => string)(params.value)
+          )
+        : "";
+      if (!resolved.warning) return <span>{label}</span>;
+      const title =
+        resolved.warning === "DANGLING"
+          ? "This cluster no longer exists — the position gets multiplier ×1. Pick None or another cluster."
+          : `This hotel is not a member of “${resolved.clusterName}” — the position gets multiplier ×1. Add it on the Clusters tab.`;
+      return (
+        <Tooltip title={title}>
+          <span>{label}</span>
+        </Tooltip>
+      );
+    };
+  }
+
+  // Cluster Multiplier: shows the row's EFFECTIVE hotel-cluster share — the
+  // stored manual override when it applies, else the assigned cluster's
+  // weight for this hotel — and blank when no cluster is assigned (a column
+  // of ×1.00 is noise). The cell only accepts edits for a single-hotel
+  // cluster (PositionsGrid.isCellEditable is the functional gate); the muting
+  // here mirrors that rule so locked cells read as derived.
+  if (def.key === HOTEL_CLUSTER_MULT_KEY) {
+    const clusterById = clusterMapById(ctx.hotelClusters);
+    const resolveRow = (row: PositionRow | undefined): ResolvedClusterWeight =>
+      resolveHotelClusterWeight(
+        ctx.currentOu ?? "",
+        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "",
+        typeof row?.[HOTEL_CLUSTER_MULT_KEY] === "number"
+          ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
+          : null,
+        clusterById
+      );
+    const overridable = (row: PositionRow | undefined): boolean => {
+      const id =
+        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "";
+      const cluster = id ? clusterById.get(id) : undefined;
+      return (
+        !!cluster &&
+        cluster.members.length === 1 &&
+        cluster.members[0].ou === (ctx.currentOu ?? "")
+      );
+    };
+    column.valueGetter = (_value: unknown, row: PositionRow) => {
+      if (!row) return null;
+      const resolved = resolveRow(row);
+      return resolved.source === "NONE" ? null : resolved.weight;
+    };
+    // The valueGetter shows the EFFECTIVE weight, so an untouched edit commit
+    // echoes the cluster's own weight back. Persisting that echo would
+    // silently freeze the row as a manual override (it would stop following
+    // future weight edits) — drop it so null stays null.
+    column.valueSetter = (value: number | null | undefined, row: PositionRow) => {
+      const stored =
+        typeof row[HOTEL_CLUSTER_MULT_KEY] === "number"
+          ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
+          : null;
+      const clusterWeight = resolveHotelClusterWeight(
+        ctx.currentOu ?? "",
+        typeof row[HOTEL_CLUSTER_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_KEY] as string)
+          : "",
+        null,
+        clusterById
+      ).weight;
+      if (stored === null && value === clusterWeight) return row;
+      return { ...row, [HOTEL_CLUSTER_MULT_KEY]: value ?? null };
+    };
+    // Invert the ×n.nn display format on paste; garbage rejects the paste
+    // (undefined) instead of clearing a stored override.
+    column.pastedValueParser = (value: string) => {
+      const raw = String(value ?? "").replace(/×/g, "").trim().replace(",", ".");
+      if (raw === "") return null; // pasting an empty cell clears the override
+      const num = Number(raw);
+      return Number.isFinite(num) ? num : undefined;
+    };
+    column.valueFormatter = (value: number | null | undefined) => {
+      const num = Number(value);
+      if (value === null || value === undefined || !Number.isFinite(num))
+        return "";
+      return `×${num.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    };
+    column.cellClassName = (params) => {
+      const resolved = resolveRow(params.row);
+      const classes = ["pos-cell--num"];
+      if (resolved.warning) classes.push("pos-cell--warn");
+      else if (resolved.source !== "NONE" && !overridable(params.row))
+        classes.push("pos-cell--derived");
+      return classes.join(" ");
+    };
+    column.renderCell = (params) => {
+      const resolved = resolveRow(params.row);
+      if (resolved.source === "NONE") return <span />;
+      const formatted = `×${resolved.weight.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+      const flexNote =
+        resolved.weight !== 1
+          ? " Scales hours, costs and statistics — not Count."
+          : "";
+      const clusterWeight = resolveHotelClusterWeight(
+        ctx.currentOu ?? "",
+        typeof params.row?.[HOTEL_CLUSTER_KEY] === "string"
+          ? (params.row[HOTEL_CLUSTER_KEY] as string)
+          : "",
+        null,
+        clusterById
+      ).weight;
+      const title = resolved.warning
+        ? resolved.warning === "DANGLING"
+          ? "The assigned cluster no longer exists — multiplier ×1."
+          : `This hotel is not a member of “${resolved.clusterName}” — multiplier ×1.`
+        : resolved.source === "OVERRIDE"
+          ? `Manual override — the cluster weight is ×${clusterWeight.toFixed(2)}. Clear the cell to fall back.${flexNote}`
+          : overridable(params.row)
+            ? `Manual override allowed (single-hotel cluster). Clear the cell to fall back to the cluster weight.${flexNote}`
+            : `From cluster “${resolved.clusterName}” — this hotel's weight. Overridable only for single-hotel clusters.${flexNote}`;
+      return (
+        <Tooltip title={title}>
+          <span>{formatted}</span>
+        </Tooltip>
+      );
+    };
   }
 
   // Basic salary: Pay Basis decides which of Monthly Basic / Hourly Rate is live.

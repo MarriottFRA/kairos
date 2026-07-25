@@ -90,7 +90,12 @@ export type DropdownSource =
   | { kind: "static"; options: Array<{ value: string | number; label: string }> }
   | { kind: "months" }
   | { kind: "accounts"; filter?: AccountFilter | null }
-  | { kind: "departments"; codeField?: string };
+  | { kind: "departments"; codeField?: string }
+  // Picks a hotel cluster: displays cluster NAMES, stores the cluster ID
+  // (rename-safe). Options come from the hotelClusters service at column
+  // build time; with none loaded the cell degrades to read-only text, like
+  // an unsynced departments picker.
+  | { kind: "hotelClusters" };
 
 /**
  * Does an account code pass a field's filter? The single matcher for account
@@ -164,6 +169,7 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
   departmentCode: "department_code",
   jobTypeCode: "job_type_code",
   cluster: "cluster",
+  clusterMultiplierOverride: "cluster_multiplier_override",
   payType: "pay_type",
   headcount: "headcount",
   fte: "fte",
@@ -187,6 +193,14 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
  *  muting) and rowModel (sanitize clears the counterpart). */
 export const BASIC_SALARY_MONTHLY_KEY = "monthlyBaseSalary";
 export const BASIC_SALARY_HOURLY_KEY = "hourlyRate";
+
+/** The hotel-cluster pair on a position: the assignment (stores a cluster id,
+ *  "" = none) and the manual multiplier override (only honored while the
+ *  assigned cluster has exactly one member hotel). Shared by the grid
+ *  (editability gating + display) and rowModel (sanitize clears the override
+ *  when the assignment changes). */
+export const HOTEL_CLUSTER_KEY = "cluster";
+export const HOTEL_CLUSTER_MULT_KEY = "clusterMultiplierOverride";
 
 /** Vector engine fields: vector name -> `positions` JSON column. */
 export const VECTOR_COLUMNS: Readonly<Record<VectorName, string>> = {

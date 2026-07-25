@@ -6,7 +6,12 @@
 import { autoUpdater, net } from 'electron';
 import { BrowserWindow, app } from 'electron';
 import type { IpcHandler } from '../types';
-import { revealSecureDbKeyForDev } from '../../secure_db';
+import {
+  isSecureDatabaseUnlocked,
+  rebuildSecureSchema,
+  revealSecureDbKeyForDev,
+} from '../../secure_db';
+import { rebuildLocalSchema } from '../../local_db';
 
 // Use app.isPackaged to properly detect production vs development
 // app.isPackaged is true when running from a built/installed app
@@ -113,6 +118,29 @@ export function createAppHandlers(): Record<string, IpcHandler> {
       // console.log('[AppHandlers] Installing update and restarting...');
       // For Squirrel.Windows, quitAndInstall() with no parameters is correct
       autoUpdater.quitAndInstall();
+      return { success: true };
+    },
+
+    // DESTRUCTIVE escape hatch: drop and recreate every feature table in both
+    // stores from the current schema baseline. For a database whose schema has
+    // drifted from the code (e.g. a store stamped past a migration whose body
+    // was later finalised) — the app's own IF NOT EXISTS startup DDL cannot add
+    // a missing column, so this rebuild is the fix. Wipes ALL positions, PII,
+    // component values, buyouts, manual input, cached outputs (encrypted store)
+    // and every scenario, definition, calendar, mapping, budget import, KPI
+    // driver, block and hotel cluster (plaintext store). Preserves the session,
+    // device identity, and app settings. The UI gates this behind an explicit,
+    // data-loss-warned confirmation and reloads afterwards.
+    'app:rebuild-database': async () => {
+      // The encrypted store must be unlocked to be rebuilt (a rebuild needs the
+      // live key); this is only reachable from Settings while signed in.
+      if (!isSecureDatabaseUnlocked()) {
+        throw new Error(
+          'Sign in before rebuilding — the encrypted store is locked.'
+        );
+      }
+      rebuildSecureSchema();
+      rebuildLocalSchema();
       return { success: true };
     },
   };

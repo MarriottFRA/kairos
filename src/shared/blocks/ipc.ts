@@ -23,14 +23,23 @@ export type BlockType =
   | "MULTIPLIER" // per-row multiplier × a chosen base series
   | "FLAT_MONTHLY" // per-row absolute amount booked each active month
   | "COUNT_RATE" // per-row count × rate → cost account, count → stats account
-  | "CUSTOM_MONTHLY"; // per-row 12 monthly amounts
+  | "CUSTOM_MONTHLY" // per-row 12 monthly amounts
+  | "SOCIAL_SECURITY"; // NI/SS scheme on a contributory base
 
 export const BLOCK_TYPES: readonly BlockType[] = [
   "MULTIPLIER",
   "FLAT_MONTHLY",
   "COUNT_RATE",
   "CUSTOM_MONTHLY",
+  "SOCIAL_SECURITY",
 ] as const;
+
+/**
+ * Every block type can be created by the user. SOCIAL_SECURITY is added like the
+ * rest (as many as the OU needs — one grid column each), but through the
+ * specialized scheme dialog rather than the generic block form.
+ */
+export const USER_ADDABLE_BLOCK_TYPES: readonly BlockType[] = BLOCK_TYPES;
 
 /** How a COUNT_RATE block distributes its yearly figures across months. */
 export type BlockSpread =
@@ -76,6 +85,11 @@ export interface BlockInput {
   /** Book to each position's own department, or always to a fixed one. */
   departmentMode?: "POSITION" | "FIXED";
   fixedDepartment?: string;
+  /** SOCIAL_SECURITY only: the scheme (brackets + caps + contributory base) this
+   *  block runs. Unset = unconfigured → compiles to no def (harmless), grid
+   *  shows "set up NI". A block's membership in any scheme's base now lives on
+   *  the scheme itself (SocialSecurityScheme.baseComponentIds), not here. */
+  ssSchemeId?: string;
 }
 
 /** A block as seen by the renderer. */
@@ -93,6 +107,13 @@ export interface BlockDto {
   increaseAware: boolean;
   departmentMode: "POSITION" | "FIXED";
   fixedDepartment?: string;
+  /** SOCIAL_SECURITY only: attached scheme id ("" = unconfigured). */
+  ssSchemeId?: string;
+  /** SOCIAL_SECURITY only: true when the attached scheme is CUMULATIVE with a
+   *  non-January tax year — the only case with a prior-year opening base. Gates
+   *  the per-row "Opening base" input column (resolved server-side against the
+   *  scheme, since BlockDto alone has no accumulation fields). */
+  ssCumulativeNonJan?: boolean;
   sortOrder: number;
   updatedAt: string;
   /** Compiled engine definition ids (the grid keys inputs/totals by these). */

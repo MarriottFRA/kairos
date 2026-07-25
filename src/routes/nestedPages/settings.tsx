@@ -21,8 +21,14 @@ import {
   Switch,
   TextField,
   Grid,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
 } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useSettingsStore } from "../../store/settings";
 import authService, { Hotel } from "../../services/auth";
 import {
@@ -153,6 +159,28 @@ export default function Settings() {
       });
     } finally {
       setIsRebuilding(false);
+    }
+  };
+
+  // Rebuild database (danger zone): drop & recreate every feature table in both
+  // stores from the current schema baseline. Wipes all planning data; keeps the
+  // session and app settings. Gated behind an explicit confirmation dialog.
+  const [rebuildDbOpen, setRebuildDbOpen] = useState(false);
+  const [isRebuildingDb, setIsRebuildingDb] = useState(false);
+  const [rebuildDbError, setRebuildDbError] = useState<string | null>(null);
+
+  const handleRebuildDatabase = async () => {
+    setIsRebuildingDb(true);
+    setRebuildDbError(null);
+    try {
+      await window.ipcApi.sendIpcRequest("app:rebuild-database");
+      // The in-memory renderer state (scenarios, positions, …) is now stale —
+      // reload to re-read the freshly rebuilt, empty stores.
+      window.location.reload();
+    } catch (err: any) {
+      console.error("Failed to rebuild database:", err);
+      setRebuildDbError(err?.message || "Failed to rebuild the database.");
+      setIsRebuildingDb(false);
     }
   };
 
@@ -499,6 +527,111 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      <Card
+        variant="outlined"
+        sx={{
+          mt: 2,
+          borderRadius: 2,
+          borderColor: "error.main",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+        }}
+      >
+        <CardContent>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ alignItems: "center", mb: 2 }}
+          >
+            <WarningAmberIcon color="error" />
+            <Typography variant="h6" sx={{ fontWeight: 600, color: "error.main" }}>
+              Danger Zone
+            </Typography>
+          </Stack>
+          <Divider sx={{ mb: 2 }} />
+
+          <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
+            Rebuild database
+          </Typography>
+          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+            Drops and recreates the local databases from the current schema. Use
+            this only if the app reports a database error that a restart does not
+            fix. This <strong>permanently deletes all planning data</strong> —
+            every scenario, position, cost component, calendar, budget import,
+            KPI driver, block, hotel cluster and any manual input. Your sign-in,
+            device, and app settings are kept. This cannot be undone.
+          </Typography>
+
+          <Button
+            variant="outlined"
+            color="error"
+            startIcon={<WarningAmberIcon />}
+            onClick={() => {
+              setRebuildDbError(null);
+              setRebuildDbOpen(true);
+            }}
+            sx={{ textTransform: "none" }}
+          >
+            Rebuild database…
+          </Button>
+
+          {rebuildDbError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {rebuildDbError}
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog
+        open={rebuildDbOpen}
+        onClose={() => {
+          if (!isRebuildingDb) setRebuildDbOpen(false);
+        }}
+        maxWidth="xs"
+      >
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <WarningAmberIcon color="error" />
+          Rebuild database?
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This permanently deletes <strong>all planning data</strong> in this
+            install — scenarios, positions, cost components, calendars, budget
+            imports, KPI drivers, blocks, hotel clusters and manual input. Your
+            sign-in and app settings are kept. This cannot be undone.
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>
+            The app will reload once the rebuild finishes.
+          </DialogContentText>
+          {rebuildDbError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {rebuildDbError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button
+            onClick={() => setRebuildDbOpen(false)}
+            disabled={isRebuildingDb}
+            sx={{ textTransform: "none" }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleRebuildDatabase}
+            disabled={isRebuildingDb}
+            startIcon={
+              isRebuildingDb ? <CircularProgress size={16} color="inherit" /> : undefined
+            }
+            sx={{ textTransform: "none" }}
+          >
+            {isRebuildingDb ? "Rebuilding…" : "Delete everything & rebuild"}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {import.meta.env.DEV && (
         <Card

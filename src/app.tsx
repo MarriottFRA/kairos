@@ -31,6 +31,8 @@ import Home from "./routes/nestedPages/home";
 import BudgetSync from "./routes/nestedPages/budgetSync";
 import KpiDrivers from "./routes/nestedPages/kpiDrivers";
 import ManualInput from "./routes/nestedPages/manualInput";
+import HotelClusters from "./routes/nestedPages/hotelClusters";
+import Allocations from "./routes/nestedPages/allocations";
 import Positions from "./routes/nestedPages/positions";
 import Results from "./routes/nestedPages/results";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -83,9 +85,19 @@ const router = createHashRouter([
         handle: { title: "Manual Input" },
       },
       {
+        path: "clusters",
+        element: <HotelClusters />,
+        handle: { title: "Clusters" },
+      },
+      {
         path: "positions",
         element: <Positions />,
         handle: { title: "Positions" },
+      },
+      {
+        path: "allocations",
+        element: <Allocations />,
+        handle: { title: "Allocations" },
       },
       {
         path: "results",

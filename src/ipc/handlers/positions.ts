@@ -392,12 +392,21 @@ export class PositionsHandlers {
       const result = simulate(compiled.plan);
 
       const lines: OutputLineWrite[] = [];
+      // Tally why a position contributed nothing so the Results page can say so
+      // instead of showing a silent blank (the top cause of "I added a row and
+      // nothing calculated"): every candidate line dropped for a blank account,
+      // or lines written but all zero (no salary/hours, or Count 0).
+      let noAccountPositions = 0;
+      let allZeroPositions = 0;
       for (const position of input.positions) {
+        let wrote = 0;
+        let nonZero = 0;
         for (const line of result.positionLines(position.id)) {
           if (!line.account) continue; // calculation-only — never output
           const months = Array.from(line.months);
           let total = 0;
           for (const value of months) total += value;
+          if (Math.abs(total) > 1e-9) nonZero++;
           lines.push({
             positionId: position.id as string,
             componentDefId: line.component.id as string,
@@ -407,7 +416,10 @@ export class PositionsHandlers {
             months,
             total,
           });
+          wrote++;
         }
+        if (wrote === 0) noAccountPositions++;
+        else if (nonZero === 0) allZeroPositions++;
       }
 
       // Fingerprint AFTER the load (same data the run saw).
@@ -428,7 +440,11 @@ export class PositionsHandlers {
         },
         lines
       );
-      return ok(readOutputs(localDbHandle(), secureDb(), scope, scenarioId));
+      const outputs = readOutputs(localDbHandle(), secureDb(), scope, scenarioId);
+      return ok({
+        ...outputs,
+        diagnostics: { noAccountPositions, allZeroPositions },
+      });
     } catch (error) {
       console.error("Failed to recalculate outputs:", error);
       return fail(error, null);

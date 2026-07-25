@@ -33,6 +33,7 @@ import {
 import {
   changedFieldKeys,
   newDraftRow,
+  manhoursWorkedById,
   PositionRow,
   sanitizeRow,
   toCreate,
@@ -60,7 +61,13 @@ import {
 } from "../../services/blocksService";
 import { listKpiDrivers } from "../../services/kpiDriversService";
 import { KpiDriverWithSeries } from "../../shared/kpiDrivers/ipc";
+import { listClusters as listHotelClusters } from "../../services/hotelClustersService";
+import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
+import { recomputeNiOpenings, saveSsScheme } from "../../services/socialSecurityService";
 import BlockDialog from "../../components/blocks/BlockDialog";
+import SsSchemeDialog, {
+  SsSchemeDialogSave,
+} from "../../components/socialSecurity/SsSchemeDialog";
 import {
   RemovedFieldDto,
   ScenarioDto,
@@ -256,6 +263,10 @@ export default function Positions() {
   // The hotel's blocks + their compiled definitions + SS schemes — the
   // structure half of the live simulation, loaded with the positions.
   const [blocksModel, setBlocksModel] = useState<BlocksListResponse | null>(null);
+  // Hotel clusters (cross-hotel reference data): the Cluster column's picker
+  // options and the live-sim's multiplier source. Best-effort — with none
+  // loaded, assignments resolve to weight 1 and the column degrades to text.
+  const [hotelClusters, setHotelClusters] = useState<HotelClusterDto[]>([]);
   // KPI drivers with cached series: the block dialog's KPI options AND the
   // series feed for KPI-based blocks in the live sim.
   const [kpiDrivers, setKpiDrivers] = useState<KpiDriverWithSeries[]>([]);
@@ -265,6 +276,9 @@ export default function Positions() {
   >(null);
   const [blockBusy, setBlockBusy] = useState(false);
   const [undoBlock, setUndoBlock] = useState<BlockDto | null>(null);
+  /** The NI/SS configurator: closed (null), editing a block, or adding a new
+   *  scheme (block: null). Opened from an SS block's cog or the block palette. */
+  const [niDialog, setNiDialog] = useState<{ block: BlockDto | null } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -474,11 +488,36 @@ export default function Positions() {
     };
   }, [selectedHotelOu]);
 
+  // ── Hotel clusters (cross-hotel; not OU-scoped). Reloaded on hotel switch
+  // anyway so edits made on the Clusters tab are picked up on return. ──
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const clusters = await listHotelClusters();
+        if (!cancelled) setHotelClusters(clusters);
+      } catch (err) {
+        console.error("Failed to load hotel clusters:", err);
+        if (!cancelled) setHotelClusters([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHotelOu, reloadToken]);
+
   // Engine-simulated vacation cost per row, recomputed as rows or the calendar
   // change. One pass of the same spread math the budget runs — instant for a
   // grid's worth of positions, and never drifts from the authoritative figure.
   const vacationCosts = useMemo(
     () => vacationCostById(rows, calendarCtx, scenario?.id ?? ""),
+    [rows, calendarCtx, scenario]
+  );
+
+  // Calendar-derived Manhours Worked per row — the auto value the grid shows
+  // when a row has no manual override (matches what the engine spreads).
+  const manhoursWorked = useMemo(
+    () => manhoursWorkedById(rows, calendarCtx, scenario?.id ?? ""),
     [rows, calendarCtx, scenario]
   );
 
@@ -504,9 +543,10 @@ export default function Positions() {
       kpiSeries: kpiSeriesByDriver,
       scenarioId: scenario.id,
       ou: selectedHotelOu,
+      hotelClusters,
     });
     return { results: run.results, errors: run.errors } as const;
-  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu]);
+  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu, hotelClusters]);
 
   // ── Queue lifecycle: one per (hotel, scenario), flushed before swap ──
   useEffect((): (() => void) | undefined => {
@@ -973,6 +1013,86 @@ export default function Positions() {
     [selectedHotelOu]
   );
 
+  // Configure an NI/SS scheme: save the scheme (brackets/caps/mode/tax year +
+  // its contributory base), then attach it + the account to its block —
+  // creating the block when adding a new scheme. On create the scheme/block have
+  // no id, so the scheme is the one that appears in the refreshed list but was
+  // not there before; the block label tracks the scheme name.
+  const persistNi = useCallback(
+    async (save: SsSchemeDialogSave): Promise<string> => {
+      if (!selectedHotelOu || !niDialog) {
+        throw new Error("No hotel or scheme selected.");
+      }
+      await queueRef.current?.flushNow();
+      const beforeIds = new Set(
+        (blocksModel?.ssSchemes ?? []).map((scheme) => scheme.id as string)
+      );
+      const schemesResp = await saveSsScheme(selectedHotelOu, save.scheme);
+      const schemeId =
+        save.scheme.id ??
+        schemesResp.schemes.find((scheme) => !beforeIds.has(scheme.id as string))?.id;
+      if (!schemeId) throw new Error("Could not resolve the saved scheme.");
+      const response = await saveBlockService(selectedHotelOu, {
+        id: niDialog.block?.id,
+        blockType: "SOCIAL_SECURITY",
+        label: save.scheme.label,
+        accountCode: save.accountCode,
+        accountLocked: true,
+        ssSchemeId: schemeId as string,
+      });
+      setBlocksModel(response);
+      return schemeId as string;
+    },
+    [selectedHotelOu, niDialog, blocksModel]
+  );
+
+  const handleSaveNi = useCallback(
+    (save: SsSchemeDialogSave) => {
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          await persistNi(save);
+          setNiDialog(null);
+          setToast("National Insurance updated");
+        } catch (err) {
+          console.error("Failed to save NI configuration:", err);
+          setError(err instanceof Error ? err.message : "Could not save National Insurance");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [persistNi]
+  );
+
+  // Save, then run the opening-balance pre-sim for this scheme and reload rows so
+  // the grid reflects the freshly written per-scheme Opening base values.
+  const handleRecomputeNi = useCallback(
+    (save: SsSchemeDialogSave) => {
+      if (!selectedHotelOu || !scenario) return;
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          const schemeId = await persistNi(save);
+          const { updated } = await recomputeNiOpenings(
+            selectedHotelOu,
+            scenario.id,
+            schemeId
+          );
+          setNiDialog(null);
+          setReloadToken((token) => token + 1);
+          setToast(`Opening balances recomputed for ${updated} position${updated === 1 ? "" : "s"}`);
+        } catch (err) {
+          console.error("Failed to recompute NI opening balances:", err);
+          setError(err instanceof Error ? err.message : "Could not recompute opening balances");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [persistNi, selectedHotelOu, scenario]
+  );
+
   const handleUndoDeleteBlock = useCallback(() => {
     const target = undoBlock;
     if (!target || !selectedHotelOu) return;
@@ -1088,6 +1208,9 @@ export default function Positions() {
             departments={departments}
             accounts={accounts}
             vacationCostById={vacationCosts}
+            manhoursWorkedById={manhoursWorked}
+            hotelClusters={hotelClusters}
+            currentOu={selectedHotelOu}
             blocks={blocksModel?.blocks ?? []}
             blockResults={liveSim.results}
             masked={masked}
@@ -1108,7 +1231,11 @@ export default function Positions() {
             onAddField={handleAddField}
             onRemoveField={handleRemoveField}
             onManageColumns={handleManageColumns}
-            onEditBlock={(block) => setBlockDialog({ mode: "edit", block })}
+            onEditBlock={(block) =>
+              block.blockType === "SOCIAL_SECURITY"
+                ? setNiDialog({ block })
+                : setBlockDialog({ mode: "edit", block })
+            }
           />
         )}
       </Box>
@@ -1175,6 +1302,26 @@ export default function Positions() {
         onClose={() => setBlockDialog(null)}
         onSave={handleSaveBlock}
         onDelete={handleDeleteBlock}
+        onPickSocialSecurity={() => {
+          setBlockDialog(null);
+          setNiDialog({ block: null });
+        }}
+      />
+
+      <SsSchemeDialog
+        open={!!niDialog}
+        niBlock={niDialog?.block ?? null}
+        schemes={blocksModel?.ssSchemes ?? []}
+        blocks={blocksModel?.blocks ?? []}
+        accounts={accounts}
+        saving={blockBusy}
+        onClose={() => setNiDialog(null)}
+        onSave={handleSaveNi}
+        onRecompute={handleRecomputeNi}
+        onDelete={(block) => {
+          setNiDialog(null);
+          handleDeleteBlock(block);
+        }}
       />
 
       <Snackbar
