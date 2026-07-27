@@ -26,10 +26,21 @@ import {
   BlockInput,
   BlockSpread,
   BlockType,
+  POOL_MONTHS,
+  POOL_SPREAD_BASES,
+  PoolEligibilityMode,
+  PoolSource,
+  PoolSpreadBase,
+  baseSalaryDefId,
   blockCostDefId,
   blockStatDefId,
+  holidayAccrualDefId,
+  positionCountDefId,
   SPREAD_TO_METHOD,
+  systemStatDefId,
+  vacationCostDefId,
 } from "../../shared/blocks/ipc";
+import { POSITION_COUNT_ACCOUNT } from "../../shared/positions/systemAccounts";
 import { OuScope } from "../positions/ouScope";
 import { prepared } from "../positions/stmtCache";
 
@@ -49,6 +60,32 @@ interface StoredConfig {
   /** SOCIAL_SECURITY only: attached scheme id (undefined = unconfigured). The
    *  scheme owns its own contributory-base membership now. */
   ssSchemeId?: string;
+  /** POOL_SPREAD only: the pot, how it divides, and who shares it. */
+  poolSource?: PoolSource;
+  poolKpiDriverId?: string;
+  poolMonthlyAmounts?: number[];
+  poolSpreadBase?: PoolSpreadBase;
+  poolEligibilityMode?: PoolEligibilityMode;
+  poolDepartments?: string[];
+  poolJobTypes?: string[];
+}
+
+/** Twelve finite amounts, padded/truncated from whatever was supplied. */
+function normPoolAmounts(raw: unknown): number[] {
+  const list = Array.isArray(raw) ? raw : [];
+  return Array.from({ length: POOL_MONTHS }, (_unused, index) => {
+    const value = Number(list[index]);
+    return Number.isFinite(value) ? value : 0;
+  });
+}
+
+/** Trimmed, de-duplicated, blank-free codes — the shape both the rule matcher
+ *  and the dialog expect. */
+function normCodeList(raw: unknown): string[] {
+  const list = Array.isArray(raw) ? raw : [];
+  return [
+    ...new Set(list.map((entry) => String(entry ?? "").trim()).filter(Boolean)),
+  ];
 }
 
 interface BlockRow {
@@ -80,6 +117,17 @@ function rowToDto(row: BlockRow): BlockDto {
     departmentMode: config.departmentMode ?? "POSITION",
     fixedDepartment: config.fixedDepartment,
     ssSchemeId: config.ssSchemeId,
+    ...(blockType === "POOL_SPREAD"
+      ? {
+          poolSource: config.poolSource ?? "KPI",
+          poolKpiDriverId: config.poolKpiDriverId,
+          poolMonthlyAmounts: normPoolAmounts(config.poolMonthlyAmounts),
+          poolSpreadBase: config.poolSpreadBase ?? "HEADCOUNT",
+          poolEligibilityMode: config.poolEligibilityMode ?? "MANUAL",
+          poolDepartments: normCodeList(config.poolDepartments),
+          poolJobTypes: normCodeList(config.poolJobTypes),
+        }
+      : {}),
     sortOrder: row.sort_order,
     updatedAt: row.updated_at,
     costDefId: blockCostDefId(row.id),
@@ -110,6 +158,66 @@ export function nextBlockSortOrder(db: Db, scope: OuScope): number {
 // Validation
 // ---------------------------------------------------------------------------
 
+/** A block id is usable as a base when it is not this block and still exists. */
+function assertUsableBaseBlock(
+  db: Db,
+  scope: OuScope,
+  selfId: string | undefined,
+  baseBlockId: string
+): void {
+  if (baseBlockId === selfId) {
+    throw new Error("A block cannot use itself as its base.");
+  }
+  const exists = prepared(
+    db,
+    `SELECT 1 FROM block_configs WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+  ).get(baseBlockId, scope.ou);
+  if (!exists) throw new Error("The base block no longer exists.");
+}
+
+/** Every block this one would reach through its base chain, plus their labels. */
+function walkBaseChain(
+  db: Db,
+  scope: OuScope,
+  startIds: string[]
+): Map<string, string> {
+  const seen = new Map<string, string>();
+  const queue = [...startIds];
+  while (queue.length > 0) {
+    const blockId = queue.shift() as string;
+    if (seen.has(blockId)) continue;
+    const row = prepared(
+      db,
+      `SELECT label, config FROM block_configs
+        WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+    ).get(blockId, scope.ou) as { label: string; config: string } | undefined;
+    if (!row) continue;
+    seen.set(blockId, row.label);
+    const base = (JSON.parse(row.config || "{}") as Partial<StoredConfig>).base;
+    if (base?.kind === "BLOCK") queue.push(base.blockId);
+    else if (base?.kind === "COMPOSITE") queue.push(...normCodeList(base.blockIds));
+  }
+  return seen;
+}
+
+/** Refuse a base that would (transitively) depend on the block being saved. */
+function assertNoBaseCycle(
+  db: Db,
+  scope: OuScope,
+  selfId: string | undefined,
+  baseBlockIds: string[]
+): void {
+  if (!selfId) return; // a brand-new block cannot yet be anyone's base
+  const reachable = walkBaseChain(db, scope, baseBlockIds);
+  const label = reachable.get(selfId);
+  if (label !== undefined) {
+    throw new Error(
+      `That base loops back to this block (via ${label}). ` +
+        `Pick a base that does not depend on it.`
+    );
+  }
+}
+
 function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
   if (!BLOCK_TYPES.includes(input.blockType)) {
     throw new Error(`Unknown block type: ${input.blockType}`);
@@ -122,18 +230,47 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
     const base = input.base;
     if (!base) throw new Error("A multiplier block needs a base to multiply.");
     if (base.kind === "BLOCK") {
-      if (base.blockId === input.id) {
-        throw new Error("A block cannot use itself as its base.");
+      assertUsableBaseBlock(db, scope, input.id, base.blockId);
+    }
+    if (base.kind === "COMPOSITE") {
+      const blockIds = normCodeList(base.blockIds);
+      if (!base.includeBaseSalary && blockIds.length === 0) {
+        throw new Error("Choose at least one thing for the base to add up.");
       }
-      const exists = prepared(
-        db,
-        `SELECT 1 FROM block_configs WHERE id = ? AND ou = ? AND deleted_at IS NULL`
-      ).get(base.blockId, scope.ou);
-      if (!exists) throw new Error("The base block no longer exists.");
+      for (const blockId of blockIds) assertUsableBaseBlock(db, scope, input.id, blockId);
+      // A single base is a straight lookup, but a composite can reach another
+      // composite, so a cycle need not involve this block directly. Catch it
+      // here with a name the user recognizes rather than letting compile()
+      // surface CYCLE at recalc time, long after the save appeared to succeed.
+      assertNoBaseCycle(db, scope, input.id, blockIds);
     }
     if (base.kind === "KPI" && !String(base.kpiDriverId ?? "").trim()) {
       throw new Error("A KPI base needs a KPI driver.");
     }
+  }
+
+  if (input.blockType === "POOL_SPREAD") {
+    const source = input.poolSource ?? "KPI";
+    if (source === "KPI" && !String(input.poolKpiDriverId ?? "").trim()) {
+      throw new Error("A pooled block needs a KPI to size the pot.");
+    }
+    if (source === "MANUAL") {
+      const amounts = input.poolMonthlyAmounts ?? [];
+      if (amounts.length !== POOL_MONTHS) {
+        throw new Error(`A manual pot needs ${POOL_MONTHS} monthly amounts.`);
+      }
+      if (amounts.some((amount) => !Number.isFinite(Number(amount)))) {
+        throw new Error("Every monthly pot amount must be a number.");
+      }
+    }
+    if (
+      input.poolSpreadBase !== undefined &&
+      !POOL_SPREAD_BASES.includes(input.poolSpreadBase)
+    ) {
+      throw new Error(`Unknown spread basis: ${input.poolSpreadBase}`);
+    }
+    // A RULE with both filter lists empty is legal and means "everyone" — the
+    // simplest way to pool across the whole hotel without ticking every row.
   }
 
   if (
@@ -163,15 +300,6 @@ interface DefRow {
   kpiDriverId: string | null;
   ssSchemeId: string | null;
   increaseAware: boolean;
-}
-
-/** Fixed id of a system stat definition (blank account → compute-only line
- *  usable as a multiplier base; never output). */
-export function systemStatDefId(
-  ou: string,
-  stat: "HOURS" | "HEADCOUNT" | "FTE"
-): string {
-  return `sys-stat-${stat.toLowerCase()}:${ou}`;
 }
 
 /** The engine definitions a block compiles to (pure; exported for tests). */
@@ -233,6 +361,17 @@ export function compileBlockDefs(
       } else if (base.kind === "BLOCK") {
         def.baseSelectorKind = "COMPONENTS";
         def.baseRefDefIds = [blockCostDefId(base.blockId)];
+      } else if (base.kind === "COMPOSITE") {
+        // The engine's COMPONENTS selector sums its refs, and reads the
+        // BASE_SALARY definition as gross salary rather than recursing into it
+        // — so "salary + these blocks" needs no new engine kind, just the right
+        // id list. Base salary leads so the compiled order matches how the
+        // dialog reads.
+        def.baseSelectorKind = "COMPONENTS";
+        def.baseRefDefIds = [
+          ...(base.includeBaseSalary ? [baseSalaryDefId(ou)] : []),
+          ...normCodeList(base.blockIds).map(blockCostDefId),
+        ];
       } else if (base.kind === "STAT") {
         // Stat series (hours worked, headcount, FTE) are ordinary engine
         // lines: reference the system stat definition (seeded on save) via
@@ -292,6 +431,29 @@ export function compileBlockDefs(
         },
       ];
     }
+    case "POOL_SPREAD": {
+      // The division happens before compile (engineInput.applyPoolSpread writes
+      // each position's share into ComponentValue.monthlyValues), so the engine
+      // only ever sees absolute per-month figures. DIRECT_ABS is also what makes
+      // the arithmetic right: it is exempt from the headcount × cluster-weight
+      // post-pass, and both are already baked into the share weights — applying
+      // them twice would break the "shares sum to the pot" guarantee.
+      //
+      // Deliberately NOT kpiDriverId, even for a KPI-sourced pot: that column
+      // is injectKpiSeries' trigger, and it would read the per-row eligibility
+      // flag as a multiplier. The driver id lives in the block config alone.
+      return [
+        {
+          ...common,
+          id: blockCostDefId(blockId),
+          spreadMethod: "DIRECT_ABS",
+          label: input.label,
+          accountCode: input.accountCode ?? "",
+          // A share of a fixed pot; a merit increase would inflate the total.
+          increaseAware: false,
+        },
+      ];
+    }
   }
 }
 
@@ -336,12 +498,32 @@ export function saveBlock(
     departmentMode: input.departmentMode ?? "POSITION",
     fixedDepartment: input.fixedDepartment,
     ssSchemeId: input.ssSchemeId?.trim() ? input.ssSchemeId.trim() : undefined,
+    ...(input.blockType === "POOL_SPREAD"
+      ? {
+          poolSource: input.poolSource ?? "KPI",
+          poolKpiDriverId: input.poolKpiDriverId?.trim() || undefined,
+          poolMonthlyAmounts: normPoolAmounts(input.poolMonthlyAmounts),
+          poolSpreadBase: input.poolSpreadBase ?? "HEADCOUNT",
+          poolEligibilityMode: input.poolEligibilityMode ?? "MANUAL",
+          poolDepartments: normCodeList(input.poolDepartments),
+          poolJobTypes: normCodeList(input.poolJobTypes),
+        }
+      : {}),
   };
   const defs = compileBlockDefs(id, scope.ou, input);
 
   db.transaction(() => {
     if (input.blockType === "MULTIPLIER" && input.base?.kind === "STAT") {
       ensureSystemStatDef(db, scope, input.base.stat, opts);
+    }
+    if (
+      input.blockType === "MULTIPLIER" &&
+      input.base?.kind === "COMPOSITE" &&
+      input.base.includeBaseSalary
+    ) {
+      // The composite refs it by id, so make sure the head exists even when the
+      // block is saved before the structure read model has ever been built.
+      ensureBaseSalaryDef(db, scope, opts);
     }
     prepared(
       db,
@@ -542,7 +724,7 @@ export function ensureBaseSalaryDef(
      ) VALUES (?, ?, 'BASE_SALARY', NULL, NULL, 'Base Salary', '',
                'POSITION', NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, ?, NULL)
      ON CONFLICT(id) DO NOTHING`
-  ).run(`sys-base:${scope.ou}`, scope.ou, opts.now);
+  ).run(baseSalaryDefId(scope.ou), scope.ou, opts.now);
 }
 
 /**
@@ -553,13 +735,19 @@ export function ensureBaseSalaryDef(
  * same math as any headcount (emit Count in each active month, never flexed by
  * hotel-cluster weight, zero where Count is 0) — differing only in that its
  * account is pinned and it is seeded permanently rather than on demand.
+ *
+ * Defined in shared/ because the renderer's field seed surfaces it as the
+ * read-only "HC Stats" column; re-exported here so main-side call sites keep
+ * reading it from the module that owns the definition it pins.
  */
-export const POSITION_COUNT_ACCOUNT = "A972540";
-
-/** Fixed id of the permanent, always-output position-count head (per OU). */
-export function positionCountDefId(ou: string): string {
-  return `sys-poscount:${ou}`;
-}
+export {
+  POSITION_COUNT_ACCOUNT,
+  baseSalaryDefId,
+  holidayAccrualDefId,
+  positionCountDefId,
+  systemStatDefId,
+  vacationCostDefId,
+};
 
 /**
  * Idempotently seed the permanent position-count head. Always present (fixed id
@@ -592,7 +780,11 @@ const STAT_DEF_LABELS: Record<"HOURS" | "HEADCOUNT" | "FTE", string> = {
 
 /** Idempotently seed the system stat definition a STAT base references.
  *  Blank account → the line computes (and is base-referenceable) but is
- *  never part of the output. */
+ *  never part of the output. HOURS and HEADCOUNT are additionally seeded
+ *  unconditionally (see ensureSystemDefs) because the Positions grid offers a
+ *  per-row account for each; FTE is still on-demand only, having no account
+ *  field of its own (retired in field seed v13 — FTE is a ratio with no GL
+ *  account). */
 export function ensureSystemStatDef(
   db: Db,
   scope: OuScope,
@@ -610,4 +802,97 @@ export function ensureSystemStatDef(
                'POSITION', NULL, 0, 5, NULL, NULL, NULL, NULL, NULL, ?, NULL)
      ON CONFLICT(id) DO NOTHING`
   ).run(systemStatDefId(scope.ou, stat), scope.ou, stat, STAT_DEF_LABELS[stat], opts.now);
+}
+
+/**
+ * The holiday-accrual head — VBA §2's holiday account. Books the accrual
+ * MOVEMENT: accrualDays × per-working-day pay − the leave actually taken, so a
+ * position that takes exactly what it accrues nets to zero. Posts to the row's
+ * Accrual account; blank means the line still computes (and can still feed an
+ * SS base) but is not output.
+ *
+ * increase_aware is 0 because it is not consulted: Op.ACCRUAL applies inc[m]
+ * unconditionally (compile emits it with no flag), so the accrual is always
+ * merit-scaled and the column would only misleadingly suggest otherwise.
+ */
+export function ensureHolidayAccrualDef(
+  db: Db,
+  scope: OuScope,
+  opts: { now: string }
+): void {
+  prepared(
+    db,
+    `INSERT INTO cost_component_definitions (
+       id, ou, kind, spread_method, stat_kind, label, account_code,
+       department_mode, fixed_department, increase_aware, sort_order,
+       base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
+       updated_at, deleted_at
+     ) VALUES (?, ?, 'HOLIDAY_ACCRUAL', NULL, NULL, 'Vacation Accrual', '',
+               'POSITION', NULL, 0, 3, NULL, NULL, NULL, NULL, NULL, ?, NULL)
+     ON CONFLICT(id) DO NOTHING`
+  ).run(holidayAccrualDefId(scope.ou), scope.ou, opts.now);
+}
+
+/**
+ * The vacation-cost head — the leave actually taken, which BASE_DEDUCT nets out
+ * of the salary line. Without this the money simply disappeared: base salary is
+ * reported net of vacation and nothing re-emitted the deduction.
+ *
+ * Deliberately NOT a new engine kind. It is a PERCENT_OF spread over the
+ * existing `{"kind":"VACATION"}` base selector, which resolves to the position's
+ * vacation-cost series (compile emits ACC_ADD_VAC; reference.ts mirrors it), with
+ * a per-position rate of 1. So this needs no opcode, no ComponentKind, and no
+ * migration of the `kind` CHECK constraint. `base_ref` carries the selector as
+ * JSON because base_selector_kind's CHECK cannot be widened in SQLite — the same
+ * escape hatch the CALENDAR/VACATION block bases already use.
+ *
+ * increase_aware is 0: the vacation series is already merit-scaled by the
+ * VACATION op (it reads inc[m]), so flagging it here would apply the raise twice.
+ */
+export function ensureVacationCostDef(
+  db: Db,
+  scope: OuScope,
+  opts: { now: string }
+): void {
+  prepared(
+    db,
+    `INSERT INTO cost_component_definitions (
+       id, ou, kind, spread_method, stat_kind, label, account_code,
+       department_mode, fixed_department, increase_aware, sort_order,
+       base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
+       updated_at, deleted_at
+     ) VALUES (?, ?, 'SPREAD', 'PERCENT_OF', NULL, 'Vacation Cost', '',
+               'POSITION', NULL, 0, 2, NULL, NULL, NULL, NULL, ?, ?, NULL)
+     ON CONFLICT(id) DO NOTHING`
+  ).run(
+    vacationCostDefId(scope.ou),
+    scope.ou,
+    JSON.stringify({ kind: "VACATION" }),
+    opts.now
+  );
+}
+
+/**
+ * Seed every permanently-present system definition for an OU, idempotently.
+ *
+ * These are the heads that exist regardless of what blocks the user has built,
+ * one for each posting account the Positions grid offers. All but the
+ * position-count head seed a BLANK account: the account arrives per position via
+ * applyPositionAccounts, so a row that has not picked one computes the line (and
+ * can still reference it as a base) without posting it.
+ *
+ * Call this wherever the structure read model is built — the grid's account
+ * columns are inert until the definitions they attach to exist.
+ */
+export function ensureSystemDefs(
+  db: Db,
+  scope: OuScope,
+  opts: { now: string }
+): void {
+  ensureBaseSalaryDef(db, scope, opts);
+  ensurePositionCountDef(db, scope, opts);
+  ensureSystemStatDef(db, scope, "HEADCOUNT", opts);
+  ensureSystemStatDef(db, scope, "HOURS", opts);
+  ensureHolidayAccrualDef(db, scope, opts);
+  ensureVacationCostDef(db, scope, opts);
 }

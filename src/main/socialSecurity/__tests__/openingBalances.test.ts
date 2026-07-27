@@ -106,7 +106,6 @@ function seedPosition(id = "pos-1", hiringDate?: string): void {
             jobTypeCode: "MGR",
             payType: "SALARIED",
             headcount: 1,
-            fte: 1,
             monthlyBaseSalary: 1000,
             seasonality: new Array(12).fill(1),
             vacationDays: 0,

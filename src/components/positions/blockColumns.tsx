@@ -13,6 +13,8 @@ import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
+import CheckIcon from "@mui/icons-material/Check";
+import CloseIcon from "@mui/icons-material/Close";
 import {
   GridColDef,
   GridColumnGroupingModel,
@@ -25,9 +27,12 @@ import {
   blockAccountKey,
   blockFieldKey,
   blockInputSlots,
+  blockTotalKey,
+  BOOLEAN_BLOCK_SLOTS,
   BlockSlot,
   blockStatsAccountKey,
 } from "../../shared/positions/blockRows";
+import { isPoolEligible } from "../../shared/positions/poolSpread";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
@@ -79,8 +84,13 @@ const MONTH_SHORT = Array.from({ length: 12 }, (_, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "short" })
 );
 
-/** Header text per input slot: the big line + the muted unit tag. */
-function slotPresentation(block: BlockDto, slot: BlockSlot): { short: string; unit: string } {
+/** Header text per input slot: the big line + the muted unit tag. Exported so
+ *  the position form labels the same cell the same way (it is the blocks
+ *  counterpart of headerMeta.headerPresentation). */
+export function slotPresentation(
+  block: BlockDto,
+  slot: BlockSlot
+): { short: string; unit: string } {
   if (slot === "rate") {
     return { short: "Multiplier", unit: "× base" };
   }
@@ -88,8 +98,27 @@ function slotPresentation(block: BlockDto, slot: BlockSlot): { short: string; un
   if (slot === "qty") return { short: "Count", unit: "per year" };
   if (slot === "unitRate") return { short: "Rate", unit: "per unit" };
   if (slot === "openingBase") return { short: "Opening base", unit: "prior year" };
+  if (slot === "eligible") {
+    return {
+      short: "In pool",
+      // "= config" is the same vocabulary a derived catalog column uses, so a
+      // locked cell reads as computed rather than broken.
+      unit: block.poolEligibilityMode === "RULE" ? "= config" : "shares pot",
+    };
+  }
   const month = Number(slot.slice(1));
   return { short: MONTH_SHORT[month - 1] ?? slot, unit: "amount" };
+}
+
+/** Plain-English summary of a pooled block's eligibility rule, for the cell
+ *  tooltip that explains why the tick is not editable. */
+function poolRuleSummary(block: BlockDto): string {
+  const parts: string[] = [];
+  const departments = block.poolDepartments ?? [];
+  const jobTypes = block.poolJobTypes ?? [];
+  if (departments.length > 0) parts.push(`departments ${departments.join(", ")}`);
+  if (jobTypes.length > 0) parts.push(`classifications ${jobTypes.join(", ")}`);
+  return parts.length > 0 ? parts.join(" and ") : "every position";
 }
 
 /** Same two-line header treatment as the catalog columns (columnFactory). */
@@ -140,10 +169,6 @@ function renderBlockHeader(short: string, unit: string) {
   );
 }
 
-export function blockTotalKey(block: BlockDto): string {
-  return `blk:${block.costDefId}:total`;
-}
-
 export function buildBlockColumns(
   blocks: BlockDto[],
   ctx: BlockColumnsContext
@@ -157,6 +182,79 @@ export function buildBlockColumns(
       const key = blockFieldKey(block.costDefId, slot);
       const headerClasses = ["pos-col--blocks"];
       if (index === 0) headerClasses.push("pos-col--sectionStart");
+
+      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
+        // The pool tick box. Under a RULE the block config owns eligibility, so
+        // the cell is read-only, derived from the rule, and muted like any other
+        // config-driven value (the Cluster Multiplier cell sets the precedent).
+        const ruled = block.poolEligibilityMode === "RULE";
+        const summary = poolRuleSummary(block);
+        columns.push({
+          field: key,
+          headerName: `${block.label} — ${short}`,
+          description: ruled
+            ? `${block.label}: set by the block configuration — ${summary}. Edit the block to change who shares the pot.`
+            : `${block.label}: tick each position that shares this pot.`,
+          width: 92,
+          type: "boolean",
+          align: "center",
+          headerAlign: "center",
+          editable: !ruled,
+          sortable: true,
+          headerClassName: headerClasses.join(" "),
+          cellClassName: [
+            index === 0 ? "pos-cell--sectionStart" : "",
+            ruled ? "pos-cell--derived" : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          renderHeader: renderBlockHeader(short, unit),
+          // Only the LOCKED cell gets a custom renderer. Left editable it uses
+          // the grid's own boolean cell, so it looks and behaves exactly like
+          // the Active column the user already knows.
+          ...(ruled
+            ? {
+                renderCell: (params) => {
+                  const on = params.value === true;
+                  return (
+                    <Tooltip
+                      title={`Set by the block configuration — ${summary}. This position ${
+                        on ? "shares" : "does not share"
+                      } the pot. Edit the block to change it.`}
+                    >
+                      <Box component="span" sx={{ display: "inline-flex" }}>
+                        {on ? (
+                          <CheckIcon fontSize="small" />
+                        ) : (
+                          <CloseIcon
+                            fontSize="small"
+                            sx={{ color: "text.disabled" }}
+                          />
+                        )}
+                      </Box>
+                    </Tooltip>
+                  );
+                },
+                valueGetter: (_value: unknown, row: PositionRow) =>
+                  !!row &&
+                  isPoolEligible(
+                    {
+                      eligibilityMode: "RULE",
+                      departments: block.poolDepartments ?? [],
+                      jobTypes: block.poolJobTypes ?? [],
+                    },
+                    {
+                      departmentCode: String(row.departmentCode ?? ""),
+                      jobTypeCode: String(row.jobTypeCode ?? ""),
+                    },
+                    false
+                  ),
+              }
+            : {}),
+        });
+        return;
+      }
+
       columns.push({
         field: key,
         headerName: `${block.label} — ${short}`,

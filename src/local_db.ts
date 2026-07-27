@@ -17,7 +17,10 @@ import {
 } from "./main/positions/schema";
 import { MAPPING_TABLES_SQL } from "./main/mappingTables/schema";
 import { BUDGET_IMPORT_SQL } from "./main/budgetImport/schema";
-import { KPI_DRIVERS_SQL } from "./main/kpiDrivers/schema";
+import {
+  KPI_DRIVERS_SQL,
+  applyKpiDriverMultiplier,
+} from "./main/kpiDrivers/schema";
 import { applyBlocksStructureV12 } from "./main/blocks/schema";
 import { applyHotelClustersV13 } from "./main/hotelClusters/schema";
 import { applyAllocations } from "./main/allocations/schema";
@@ -142,6 +145,8 @@ function applyBaselineSchema(handle: LocalDb): void {
   // KPI drivers + precalc cache (v9; kpi_driver_id/description now in the
   // constants above).
   handle.exec(KPI_DRIVERS_SQL);
+  // kpi_drivers.multiplier for stores predating it. Column-guarded, idempotent.
+  applyKpiDriverMultiplier(handle);
   // Blocks: block_configs + the block_id / base_ref columns on
   // cost_component_definitions (former v12). Column-guarded, so idempotent.
   applyBlocksStructureV12(handle);

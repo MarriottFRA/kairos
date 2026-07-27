@@ -186,6 +186,35 @@ describe("kpiDrivers repo — built-ins & CRUD", () => {
     expect(series[0].values[0]).toBe(22);
   });
 
+  it("bakes the multiplier into the cached series, defaulting to 1", () => {
+    seedRevenueBudget();
+    // D0010 revenue is 10 in Jan, 20 in Feb.
+    makeExplicit("d-raw", ["D0010"], ["A3"]);
+    expect(explicitSeries("d-raw").slice(0, 2)).toEqual([10, 20]);
+
+    saveDriver(db, {
+      id: "d-grat",
+      ou: OU,
+      label: "Gratuities",
+      deptMode: "EXPLICIT",
+      deptPatterns: ["D0010"],
+      accountPrefixes: ["A3"],
+      bucketIndex: 1,
+      multiplier: 0.12,
+      sortOrder: 1,
+      createdBy: null,
+      now: NOW,
+    });
+    expect(explicitSeries("d-grat").slice(0, 2)).toEqual([1.2, 2.4]);
+    expect(listDrivers(db, OU).find((d) => d.id === "d-grat")?.multiplier).toBe(
+      0.12
+    );
+    // Built-ins are never multiplied.
+    expect(
+      listDrivers(db, OU).find((d) => d.isBuiltin)?.multiplier
+    ).toBe(1);
+  });
+
   it("saves, lists (upper-cased), and soft-deletes a user driver", () => {
     saveDriver(db, {
       id: "u-1",

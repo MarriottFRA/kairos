@@ -32,6 +32,7 @@ import {
 import { loadOutputs, recalcOutputs } from "../../services/outputsService";
 import { listScenarios } from "../../services/scenarioService";
 import { ScenarioDto } from "../../shared/positions/ipc";
+import { resolvePlanningScenario } from "../../shared/positions/scenarioResolve";
 import {
   useBudgetYear,
   usePlanningScenarioId,
@@ -71,12 +72,8 @@ export default function Results() {
       try {
         const scenarios = await listScenarios(selectedHotelOu, budgetYear);
         if (cancelled) return;
-        const forYear = scenarios.filter((s) => s.year === budgetYear);
         setScenario(
-          forYear.find((s) => s.id === planningScenarioId) ??
-            forYear.find((s) => s.label === "Planning") ??
-            forYear[0] ??
-            null
+          resolvePlanningScenario(scenarios, budgetYear, planningScenarioId)
         );
       } catch (err) {
         console.error("Failed to resolve scenario for results:", err);
@@ -148,6 +145,16 @@ export default function Results() {
     return filtered.map((row) => ({ ...row, id: `${row.dept}|${row.account}` }));
   }, [outputs, kind]);
 
+  /** Components whose lines were computed but had no account to post to, worst
+   *  first — the "where did my number go" explanation. */
+  const unposted = useMemo(
+    () =>
+      Object.entries(outputs?.diagnostics?.unpostedByLabel ?? {}).sort(
+        (a, b) => b[1] - a[1] || a[0].localeCompare(b[0])
+      ),
+    [outputs]
+  );
+
   const columns = useMemo<GridColDef<ResultRow>[]>(() => {
     const numberColumn = (field: string, headerName: string, index?: number): GridColDef<ResultRow> => ({
       field,
@@ -159,7 +166,9 @@ export default function Results() {
       valueGetter:
         index === undefined
           ? undefined
-          : (_value, row) => (row ? row.months[index] : null),
+          : // Grouping adds auto-generated `dept` rows that carry no months —
+            // their value comes from the aggregation model, not this getter.
+            (_value, row) => row?.months?.[index] ?? null,
       valueFormatter: (value: number | null | undefined) => {
         const num = Number(value);
         if (!Number.isFinite(num) || num === 0) return num === 0 ? "–" : "";
@@ -208,8 +217,7 @@ export default function Results() {
         </Alert>
       )}
       {outputs?.diagnostics &&
-        (outputs.diagnostics.noAccountPositions > 0 ||
-          outputs.diagnostics.allZeroPositions > 0) && (
+        (unposted.length > 0 || outputs.diagnostics.allZeroPositions > 0) && (
           <Alert
             severity="warning"
             sx={{ mb: 2 }}
@@ -217,17 +225,17 @@ export default function Results() {
               setOutputs((prev) => (prev ? { ...prev, diagnostics: undefined } : prev))
             }
           >
-            {outputs.diagnostics.noAccountPositions > 0 && (
+            {unposted.length > 0 && (
               <>
-                {outputs.diagnostics.noAccountPositions} active position
-                {outputs.diagnostics.noAccountPositions === 1 ? "" : "s"} produced
-                no output — their posting accounts (Salary / Headcount / Hours) are
-                blank, so every line was dropped. Set the account codes on the
-                Positions grid, then recalculate.
+                Calculated but not posted — no account set on the Positions grid:{" "}
+                {unposted
+                  .map(([label, count]) => `${label} (${count} position${count === 1 ? "" : "s"})`)
+                  .join(", ")}
+                . These lines still feed any block that uses them as a base; set
+                their account codes to see them here.
               </>
             )}
-            {outputs.diagnostics.noAccountPositions > 0 &&
-              outputs.diagnostics.allZeroPositions > 0 && <br />}
+            {unposted.length > 0 && outputs.diagnostics.allZeroPositions > 0 && <br />}
             {outputs.diagnostics.allZeroPositions > 0 && (
               <>
                 {outputs.diagnostics.allZeroPositions} active position

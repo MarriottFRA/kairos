@@ -9,6 +9,7 @@
  *   blk:<defId>:qty        COUNT_RATE — the count
  *   blk:<defId>:unitRate   COUNT_RATE — the rate
  *   blk:<defId>:m1..m12    CUSTOM_MONTHLY — exploded months (monthlyValues)
+ *   blk:<defId>:eligible   POOL_SPREAD — shares the pot? (boolean)
  *
  * One source of truth: grid editing, optimistic updates and the live
  * simulation all read the row; the write path diffs these keys back into
@@ -18,7 +19,7 @@
 
 import { BlockDto } from "../blocks/ipc";
 import { ComponentValuePatch, ComponentValueRecord } from "./ipc";
-import { PositionRow } from "./rowModel";
+import { coerceBooleanCell, PositionRow } from "./rowModel";
 
 const MONTHS = 12;
 
@@ -28,7 +29,21 @@ export type BlockSlot =
   | "qty"
   | "unitRate"
   | "openingBase"
+  | "eligible"
   | `m${number}`;
+
+/**
+ * Slots the grid renders as a tick box rather than a number.
+ *
+ * "eligible" persists into the ComponentValue.rate column as 0/1 — that column
+ * is meaningless for POOL_SPREAD (its definition is DIRECT_ABS, never
+ * PERCENT_OF), so reusing it keeps the whole feature free of a secure-store
+ * migration. It also leaves room to reinterpret the number as a participation
+ * weight later (0 = out, 2 = a double share) without touching storage.
+ */
+export const BOOLEAN_BLOCK_SLOTS: ReadonlySet<BlockSlot> = new Set<BlockSlot>([
+  "eligible",
+]);
 
 export const BLOCK_KEY_PREFIX = "blk:";
 
@@ -51,6 +66,12 @@ export function blockInputSlots(block: BlockDto): BlockSlot[] {
       // Fully computed from salary + scheme, except the prior-year opening base:
       // a CUMULATIVE, non-January scheme carries one per (position, scheme).
       return block.ssCumulativeNonJan ? ["openingBase"] : [];
+    case "POOL_SPREAD":
+      // The column exists in both eligibility modes — under a RULE it is
+      // read-only and shows what the block config decided, which is the point:
+      // the user can always see who is in the pool. Only MANUAL mode stores a
+      // value (see buildBlockColumns, which locks the cell under a RULE).
+      return ["eligible"];
   }
 }
 
@@ -79,6 +100,16 @@ export function blockAccountRowKeys(block: BlockDto): string[] {
   return keys;
 }
 
+/**
+ * The block's read-only full-year Total. NOT a stored row key — the grid and
+ * the position form both resolve it from the live simulation's BlockResultsById
+ * (see blockColumns.buildBlockColumns / PositionFormDialog). It lives here so
+ * the pure form model can name the cell without importing the renderer.
+ */
+export function blockTotalKey(block: BlockDto): string {
+  return `${BLOCK_KEY_PREFIX}${block.costDefId}:total`;
+}
+
 // ---------------------------------------------------------------------------
 // Storage -> row
 // ---------------------------------------------------------------------------
@@ -104,6 +135,7 @@ export function applyComponentValuesToRow(
       else if (slot === "qty") row[key] = value.qty ?? null;
       else if (slot === "unitRate") row[key] = value.unitRate ?? null;
       else if (slot === "openingBase") row[key] = value.ssOpeningBase ?? null;
+      else if (slot === "eligible") row[key] = (value.rate ?? 0) > 0;
       else {
         const month = Number(slot.slice(1));
         row[key] = value.monthlyValues?.[month - 1] ?? null;
@@ -148,8 +180,20 @@ export function sanitizeBlockInputs(
 ): PositionRow {
   const out = { ...row };
   for (const block of blocks) {
-    for (const key of blockRowKeys(block)) {
+    for (const slot of blockInputSlots(block)) {
+      const key = blockFieldKey(block.costDefId, slot);
       const value = out[key];
+      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
+        // Only normalize a key the row actually carries. Materializing a `false`
+        // where there was nothing would read as a change on every unrelated
+        // edit, enqueueing a pointless write for every position.
+        if (!(key in out)) continue;
+        // Same normalization the catalog's BOOLEAN fields get in sanitizeRow —
+        // a pasted "TRUE"/"0"/"" must reach the grid as a real boolean or the
+        // checkbox renderer and the is-true filter disagree.
+        out[key] = coerceBooleanCell(value);
+        continue;
+      }
       if (value === undefined || value === null) continue;
       if (value === "") {
         out[key] = null;
@@ -197,6 +241,8 @@ export function blockPatchesFromRow(
     else if (slot === "qty") fields.qty = numberOrNull(row[key]);
     else if (slot === "unitRate") fields.unitRate = numberOrNull(row[key]);
     else if (slot === "openingBase") fields.ssOpeningBase = numberOrNull(row[key]);
+    // The tick box rides the rate column as 0/1 — see BOOLEAN_BLOCK_SLOTS.
+    else if (slot === "eligible") fields.rate = row[key] === true ? 1 : 0;
     else if (slot === "account") fields.accountCode = stringOrNull(row[key]);
     else if (slot === "statsAccount") fields.statsAccountCode = stringOrNull(row[key]);
     else if (/^m\d{1,2}$/.test(slot)) touchedMonthsByDef.add(defId);
@@ -246,6 +292,15 @@ export function rowToComponentValues(
     let hasValue = false;
     for (const slot of blockInputSlots(block)) {
       const value = row[blockFieldKey(block.costDefId, slot)];
+      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
+        // Only a ticked row is worth a record; an unticked one is indistinguishable
+        // from "never touched" as far as the pool spread is concerned.
+        if (value === true) {
+          record.rate = 1;
+          hasValue = true;
+        }
+        continue;
+      }
       const num =
         typeof value === "number" && Number.isFinite(value) ? value : null;
       if (num === null) continue;

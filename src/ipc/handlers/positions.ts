@@ -12,7 +12,11 @@
  */
 
 import { IpcHandler, IpcResult } from "../types";
-import { getCalendarYear, localDbHandle } from "../../local_db";
+import {
+  getCalendarYear,
+  getPositionDefaults,
+  localDbHandle,
+} from "../../local_db";
 import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import {
@@ -34,10 +38,11 @@ import {
   loadScenarioValues,
   scrubExtraValueKeys,
 } from "../../main/positions/positionsRepo";
+import { ensureSystemDefs } from "../../main/blocks/repo";
 import { loadScenarioInput } from "../../main/positions/loadScenarioInput";
 import {
   computeFingerprint,
-  OutputLineWrite,
+  projectOutputLines,
   readOutputs,
   writeRun,
 } from "../../main/positions/outputsRepo";
@@ -81,6 +86,22 @@ function requireScenarioId(request: { scenarioId?: unknown } | undefined): strin
   if (!scenarioId) throw new Error("A scenarioId is required");
   return scenarioId;
 }
+
+/**
+ * Calendars and position defaults were saved under whatever OU form the hotel
+ * switcher held at the time (bare 5-digit from the API, or the OU-prefixed
+ * form), so both lookups try the prefixed key and then the bare one. Defined
+ * once because the two engine-input call sites below must agree — a scenario
+ * that recalculates against one calendar and previews against another would
+ * disagree with itself.
+ */
+const getCalendarEitherForm = async (ou: string, year: number) =>
+  (await getCalendarYear(ou, year)) ??
+  (await getCalendarYear(ou.replace(/^OU/, ""), year));
+
+const getDefaultsEitherForm = async (ou: string, year: number) =>
+  (await getPositionDefaults(ou, year)) ??
+  (await getPositionDefaults(ou.replace(/^OU/, ""), year));
 
 export class PositionsHandlers {
   // ── Scenarios (plaintext store) ─────────────────────────────────
@@ -322,7 +343,18 @@ export class PositionsHandlers {
             )
           )
         : undefined;
-      return ok(batchWrite(secureDb(), scope, request, lookup, componentDefIds));
+      // The plaintext handle enables cluster-position sync: clusters, the other
+      // hotels' scenarios, their blocks and their field catalogs all live there.
+      return ok(
+        batchWrite(
+          secureDb(),
+          scope,
+          request,
+          lookup,
+          componentDefIds,
+          localDbHandle()
+        )
+      );
     } catch (error) {
       console.error("Failed to write positions batch:", error);
       return fail(error, null);
@@ -338,19 +370,14 @@ export class PositionsHandlers {
     try {
       const scope = resolveOuScope(request);
       const scenarioId = requireScenarioId(request);
-      // Calendars were saved under whatever OU form the hotel switcher held at
-      // the time (bare 5-digit from the API, or the OU-prefixed form), so look
-      // up both before falling back to the default calendar.
-      const getCalendarEitherForm = async (ou: string, year: number) =>
-        (await getCalendarYear(ou, year)) ??
-        (await getCalendarYear(ou.replace(/^OU/, ""), year));
       return ok(
         await loadScenarioInput(
           localDbHandle(),
           secureDb(),
           scope,
           scenarioId,
-          getCalendarEitherForm
+          getCalendarEitherForm,
+          getDefaultsEitherForm
         )
       );
     } catch (error) {
@@ -371,16 +398,19 @@ export class PositionsHandlers {
     try {
       const scope = resolveOuScope(request);
       const scenarioId = requireScenarioId(request);
-      const getCalendarEitherForm = async (ou: string, year: number) =>
-        (await getCalendarYear(ou, year)) ??
-        (await getCalendarYear(ou.replace(/^OU/, ""), year));
+      // The permanent system heads must exist before the definitions are read —
+      // otherwise a hotel that has never opened the Blocks page recalculates with
+      // no BASE_SALARY def (a hard compile error) and no head for any of the
+      // grid's posting accounts. Idempotent.
+      ensureSystemDefs(localDbHandle(), scope, { now: new Date().toISOString() });
 
       const input = await loadScenarioInput(
         localDbHandle(),
         secureDb(),
         scope,
         scenarioId,
-        getCalendarEitherForm
+        getCalendarEitherForm,
+        getDefaultsEitherForm
       );
       const compiled = compile(input);
       if ("errors" in compiled) {
@@ -391,36 +421,14 @@ export class PositionsHandlers {
       }
       const result = simulate(compiled.plan);
 
-      const lines: OutputLineWrite[] = [];
-      // Tally why a position contributed nothing so the Results page can say so
-      // instead of showing a silent blank (the top cause of "I added a row and
-      // nothing calculated"): every candidate line dropped for a blank account,
-      // or lines written but all zero (no salary/hours, or Count 0).
-      let noAccountPositions = 0;
-      let allZeroPositions = 0;
-      for (const position of input.positions) {
-        let wrote = 0;
-        let nonZero = 0;
-        for (const line of result.positionLines(position.id)) {
-          if (!line.account) continue; // calculation-only — never output
-          const months = Array.from(line.months);
-          let total = 0;
-          for (const value of months) total += value;
-          if (Math.abs(total) > 1e-9) nonZero++;
-          lines.push({
-            positionId: position.id as string,
-            componentDefId: line.component.id as string,
-            label: line.component.label,
-            dept: line.dept,
-            account: line.account,
-            months,
-            total,
-          });
-          wrote++;
-        }
-        if (wrote === 0) noAccountPositions++;
-        else if (nonZero === 0) allZeroPositions++;
-      }
+      // Blank-account lines are computed but not posted, and the drops are
+      // tallied so the Results page can explain a missing amount instead of
+      // showing a silent blank (the top cause of "I added a row and nothing
+      // calculated"). See projectOutputLines.
+      const { lines, unpostedByLabel, allZeroPositions } = projectOutputLines(
+        result,
+        input.positions
+      );
 
       // Fingerprint AFTER the load (same data the run saw).
       const fingerprint = computeFingerprint(
@@ -443,7 +451,7 @@ export class PositionsHandlers {
       const outputs = readOutputs(localDbHandle(), secureDb(), scope, scenarioId);
       return ok({
         ...outputs,
-        diagnostics: { noAccountPositions, allZeroPositions },
+        diagnostics: { unpostedByLabel, allZeroPositions },
       });
     } catch (error) {
       console.error("Failed to recalculate outputs:", error);

@@ -29,18 +29,25 @@ import {
   SocialSecurityScheme,
 } from "../engine/types";
 import {
+  applyPositionAccounts,
   applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
   KpiSeriesSlice,
+  readPositionAccounts,
   resolveBlockValues,
   resolveYearlyHoursWorked,
 } from "./engineInput";
+import {
+  EMPTY_FULL_TIME_REFERENCE,
+  FullTimeReference,
+} from "../positionDefaults";
 import { HotelClusterDto } from "../hotelClusters/ipc";
 import {
   clusterMapById,
   resolveHotelClusterWeight,
 } from "../hotelClusters/resolve";
+import { applyPoolSpread, buildPoolSpecs } from "./poolSpread";
 import { rowToComponentValues } from "./blockRows";
 import { HOTEL_CLUSTER_MULT_KEY, HOTEL_CLUSTER_KEY } from "./fields";
 import { PositionRow, rowToEnginePosition } from "./rowModel";
@@ -81,6 +88,10 @@ export function runLiveSim(args: {
   /** Hotel-cluster definitions (cross-OU reference data); omitted/empty means
    *  every assignment resolves DANGLING → weight 1. */
   hotelClusters?: HotelClusterDto[];
+  /** The hotel-year full-time yardstick every row's FTE is derived against
+   *  (mirror of loadScenarioInput). Omitted leaves every FTE at 0, which an
+   *  FTE-based pool spread would read as "nobody has a share". */
+  fullTime?: FullTimeReference;
 }): LiveSimResult {
   const { rows, blocks, definitions, ssSchemes, calendarYear, scenarioId } = args;
   if (blocks.length === 0 || rows.length === 0 || !calendarYear) return EMPTY;
@@ -99,7 +110,11 @@ export function runLiveSim(args: {
   const positions = rows
     .filter((row) => row.active !== false)
     .map((row) => {
-      const position = rowToEnginePosition(row, scenarioId);
+      const position = rowToEnginePosition(
+        row,
+        scenarioId,
+        args.fullTime ?? EMPTY_FULL_TIME_REFERENCE
+      );
       const resolved = resolveHotelClusterWeight(
         args.ou,
         typeof row[HOTEL_CLUSTER_KEY] === "string"
@@ -165,6 +180,28 @@ export function runLiveSim(args: {
       statsAccountLocked: block.statsAccountLocked,
     }))
   );
+  // Divide each pooled block's pot across its eligible positions (mirror of
+  // loadScenarioInput). Note this runs over the LIVE rows, so ticking someone
+  // into the pool immediately reduces everyone else's share in the grid.
+  const pooledValues = applyPoolSpread(
+    buildPoolSpecs(blocks, args.kpiSeries),
+    positions,
+    resolvedValues
+  );
+  // Mirror of loadScenarioInput. The accounts themselves never move a number —
+  // they only pick the aggregation key, and this sim reports block lines, not
+  // output rows. What matters here is the vacation-cost head's rate: without it
+  // a block using vacation cost as its base would show 0 in the grid while the
+  // persisted run showed the real figure.
+  const valuesWithAccounts = applyPositionAccounts(
+    args.ou,
+    pooledValues,
+    new Map(
+      rows
+        .filter((row) => row.active !== false)
+        .map((row) => [row.id, readPositionAccounts(row)] as const)
+    )
+  );
 
   const input: ScenarioInput = {
     scenario: {
@@ -179,7 +216,7 @@ export function runLiveSim(args: {
     definitions: defs,
     ssSchemes,
     positions,
-    componentValues: resolvedValues,
+    componentValues: valuesWithAccounts,
     buyouts: [],
   };
 

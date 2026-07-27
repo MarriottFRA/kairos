@@ -29,12 +29,25 @@ import type {
   ScenarioInput,
 } from "../../shared/engine/types";
 import {
+  applyPositionAccounts,
   applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
+  readPositionAccounts,
   resolveBlockValues,
+  resolveFte,
   resolveYearlyHoursWorked,
 } from "../../shared/positions/engineInput";
+import {
+  PositionDefaults,
+  buildDefaultPositionDefaults,
+  fullTimeReference,
+  resolvePositionDefaults,
+} from "../../shared/positionDefaults";
+import {
+  applyPoolSpread,
+  buildPoolSpecs,
+} from "../../shared/positions/poolSpread";
 import { listBlocks } from "../blocks/repo";
 import { listClusters } from "../hotelClusters/repo";
 import {
@@ -56,12 +69,15 @@ export type CalendarGetter = (
   year: number
 ) => Promise<CalendarYear | null>;
 
-/** The accrual account (a POSITION_EXTRA key) is the on/off switch for holiday
- *  accrual generation — set means "book it", empty means "don't". */
-function accrualAccountSet(extraValues: Record<string, unknown>): boolean {
-  const account = extraValues.accrualAccount;
-  return typeof account === "string" && account.trim() !== "";
-}
+/** Hotel-year safe-defaults lookup, injected the same way (the handler passes
+ *  local_db.getPositionDefaults). Supplies the full-time yardstick FTE is
+ *  derived against; null/omitted falls back to the built-in defaults resolved
+ *  against this scenario's calendar, which is what the Home page would show a
+ *  hotel that has never saved any. */
+export type PositionDefaultsGetter = (
+  ou: string,
+  year: number
+) => Promise<PositionDefaults | null>;
 
 // buildBankHolidayDefinition and the KPI/dual-block value resolution moved to
 // src/shared/positions/engineInput.ts — one implementation shared with the
@@ -73,7 +89,8 @@ export async function loadScenarioInput(
   valuesDb: Db,
   scope: OuScope,
   scenarioId: string,
-  getCalendarYear: CalendarGetter
+  getCalendarYear: CalendarGetter,
+  getPositionDefaults?: PositionDefaultsGetter
 ): Promise<ScenarioInput> {
   const scenarioRow = prepared(
     structureDb,
@@ -104,6 +121,19 @@ export async function loadScenarioInput(
     buildDefaultCalendar(scope.ou, scenario.year, DEFAULT_WEEKEND_MASK);
   const calendar = buildCalendarContext(calendarYear);
 
+  // The full-time contract every position's FTE is measured against. Linked
+  // defaults are resolved against the SAME calendar the engine is running on,
+  // so the yardstick and the positions can never be reading different years.
+  const storedDefaults = getPositionDefaults
+    ? await getPositionDefaults(scope.ou, scenario.year)
+    : null;
+  const fullTime = fullTimeReference(
+    resolvePositionDefaults(
+      storedDefaults ?? buildDefaultPositionDefaults(scope.ou, scenario.year),
+      calendarYear
+    )
+  );
+
   const values = loadScenarioValues(valuesDb, scope, scenarioId);
 
   // Hotel-cluster definitions (cross-OU, plaintext store). The stored value is
@@ -133,7 +163,19 @@ export async function loadScenarioInput(
       hotelClusterWeight: resolved.weight,
       payType: record.payType,
       headcount: record.headcount,
-      fte: record.fte,
+      // Derived from the row's Contract columns against the hotel's full-timer,
+      // never from the (now vestigial) fte column — see engineInput.deriveFte.
+      // The day counts are POSITION_EXTRA, hence extraValues. Mirrors
+      // rowToEnginePosition; liveSimParity pins the two.
+      fte: resolveFte(
+        {
+          vacationDays: record.vacationDays,
+          dailyContractHours: record.dailyContractHours,
+          seasonality: record.seasonality,
+        },
+        record.extraValues,
+        fullTime
+      ),
       seasonality: record.seasonality,
       monthlyBaseSalary: record.monthlyBaseSalary,
       hourlyRate: record.hourlyRate,
@@ -152,12 +194,12 @@ export async function loadScenarioInput(
       ),
       vacationDays: record.vacationDays,
       vacationMonthlyWeights: record.vacationMonthlyWeights,
-      // Accrual is auto-calculated (Yearly Days ÷ 12) and generated only when the
-      // position carries an accrual account; with none, feed 0 so the engine's
-      // accrualDays===0 guard suppresses the line. Mirrors rowToEnginePosition.
-      accrualDaysPerMonth: accrualAccountSet(record.extraValues)
-        ? record.vacationDays / 12
-        : 0,
+      // Accrual is auto-calculated (Yearly Days ÷ 12) and ALWAYS computed. The
+      // accrual account used to gate this, so a blank account produced no
+      // numbers at all; it now only decides whether the line is posted, leaving
+      // the value available to anything referencing it as a base. Mirrors
+      // rowToEnginePosition.
+      accrualDaysPerMonth: record.vacationDays / 12,
       updatedAt: record.updatedAt,
       deletedAt: null,
       };
@@ -219,13 +261,39 @@ export async function loadScenarioInput(
     }))
   );
 
+  // Divide each pooled block's pot across its eligible positions. After
+  // resolveBlockValues so per-row account overrides are already settled, and
+  // it can synthesize value rows for rule-eligible positions that have none.
+  // Mirror in runLiveSim — liveSimParity pins the two.
+  const pooledValues = applyPoolSpread(
+    buildPoolSpecs(blocks, (driverId) =>
+      getSeries(structureDb, scope.ou, driverId)
+    ),
+    positions,
+    resolvedValues
+  );
+
+  // Finally, route each position's own posting accounts (Salary, Headcount,
+  // Working Hours, Accrual, Vacation Benefits) onto the system heads. Last so it
+  // is independent of the block resolution above, which only rewrites values
+  // belonging to a block. Mirror in runLiveSim.
+  const accountsByPosition = new Map(
+    values.positions
+      .filter((record) => record.active)
+      .map((record) => [record.id, readPositionAccounts(record.extraValues)] as const)
+  );
+
   return {
     scenario,
     calendar,
     definitions,
     ssSchemes,
     positions,
-    componentValues: resolvedValues,
+    componentValues: applyPositionAccounts(
+      scope.ou,
+      pooledValues,
+      accountsByPosition
+    ),
     buyouts,
   };
 }

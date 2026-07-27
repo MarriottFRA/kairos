@@ -18,7 +18,11 @@
 
 import { uuidv7 } from "../engine/ids";
 import { referenceVacation } from "../engine/reference";
-import { deriveYearlyHoursWorked } from "./engineInput";
+import { deriveYearlyHoursWorked, resolveFte } from "./engineInput";
+import {
+  EMPTY_FULL_TIME_REFERENCE,
+  FullTimeReference,
+} from "../positionDefaults";
 import {
   CalendarContext,
   PayType,
@@ -27,6 +31,9 @@ import {
   ScenarioId,
 } from "../engine/types";
 import {
+  ANNUAL_DIVISOR_KEY,
+  AnnualDivisorBasis,
+  BASIC_SALARY_ANNUAL_KEY,
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
   ENGINE_SCALAR_COLUMNS,
@@ -35,10 +42,13 @@ import {
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
   PII_CORE_COLUMNS,
+  SALARY_ENTRY_MODE_KEY,
+  SalaryEntryMode,
   VECTOR_COLUMNS,
   VectorName,
   vectorKey,
 } from "./fields";
+import { CLUSTER_LINK_ROW_KEY } from "./clusterSync";
 import { PiiRecord, PositionCreate, PositionRecord } from "./ipc";
 
 export interface PositionRow {
@@ -67,6 +77,10 @@ export function buildFieldMap(catalog: FieldCatalog): Map<string, FieldDef> {
 export function toRow(position: PositionRecord, pii?: PiiRecord | null): PositionRow {
   const row: PositionRow = {
     id: position.id,
+    // Read-only marker: which cluster-position group this row belongs to, so the
+    // grid can show that edits here also land in the other member hotels. Not a
+    // catalog key, so it never reaches a patch.
+    [CLUSTER_LINK_ROW_KEY]: position.clusterLinkId ?? "",
     ...position.extraValues,
   };
 
@@ -88,6 +102,11 @@ export function toRow(position: PositionRecord, pii?: PiiRecord | null): Positio
     row.title = pii.title;
     Object.assign(row, pii.extraValues);
   }
+
+  // Settle the Annual/Monthly basic-salary pairing before the row is ever shown
+  // or diffed, so a pre-v19 row displays an Annual figure without that counting
+  // as an edit (changedFieldKeys compares hydrated rows on both sides).
+  hydrateBasicSalary(row);
 
   return row;
 }
@@ -154,10 +173,138 @@ export function changedFieldKeys(
 }
 
 // ---------------------------------------------------------------------------
+// Basic salary: the Annual <-> Monthly pairing
+// ---------------------------------------------------------------------------
+//
+// The engine reads exactly one salary input, monthlyBaseSalary, and that does
+// not change here. Annual Basic is the same figure wearing the unit contracts
+// are actually written in; Salary Entry says which one the user typed, and the
+// other is always recomputed from it. Both are stored, so nothing downstream —
+// the engine loaders, the live sim, the allocation spread bases — has to know
+// this feature exists.
+//
+// The divisor is Σ working months, not 12: a nine-month contract states nine
+// months' pay, so twelfths would understate every month it is actually paid in.
+// A row can opt into a flat 12 via Annual Basis. Because the divisor is part of
+// the row, a Working 1..12 edit re-derives too — sanitizeRow sees the whole row,
+// so that falls out for free.
+
+/** What Annual Basic divides by on this row. Σ seasonality unless the row opts
+ *  into a flat 12; 0 is possible (a position that never works) and callers must
+ *  guard, since the engine's own twm/twd normalization would be dividing by 0
+ *  in the same situation. */
+export function annualDivisorFor(row: PositionRow): number {
+  return divisorBasisOf(row) === "TWELVE" ? MONTHS : sumVector(row, "seasonality");
+}
+
+/** Which face the user types. Anything unrecognized — including the absent key
+ *  on a row written before v19 — is MONTHLY, which is what those rows meant. */
+export function salaryEntryModeOf(row: PositionRow): SalaryEntryMode {
+  return row[SALARY_ENTRY_MODE_KEY] === "ANNUAL" ? "ANNUAL" : "MONTHLY";
+}
+
+function divisorBasisOf(row: PositionRow): AnnualDivisorBasis {
+  return row[ANNUAL_DIVISOR_KEY] === "TWELVE" ? "TWELVE" : "WORKING_MONTHS";
+}
+
+/**
+ * Recompute the derived face of the pair, in place.
+ *
+ * Deliberately unconditional: it does not look at which cell changed, so a
+ * paste into a locked cell, a Working-months edit, or a Pay Basis flip all land
+ * on the same consistent result. Hourly rows have no basic salary at all —
+ * their base comes from rate × hours — so both faces are zeroed, matching what
+ * sanitizeRow already does to Monthly Basic.
+ */
+function deriveBasicSalary(row: PositionRow): void {
+  row[SALARY_ENTRY_MODE_KEY] = salaryEntryModeOf(row);
+  row[ANNUAL_DIVISOR_KEY] = divisorBasisOf(row);
+
+  if (row.payType === "HOURLY") {
+    row[BASIC_SALARY_MONTHLY_KEY] = 0;
+    row[BASIC_SALARY_ANNUAL_KEY] = 0;
+    return;
+  }
+
+  const divisor = annualDivisorFor(row);
+  if (salaryEntryModeOf(row) === "ANNUAL") {
+    // No working months = no month to book the salary in. Falls to 0 rather
+    // than dividing by zero, which would write Infinity into the engine input.
+    const annual = toNumber(row[BASIC_SALARY_ANNUAL_KEY], 0);
+    row[BASIC_SALARY_MONTHLY_KEY] = divisor > 0 ? annual / divisor : 0;
+  } else {
+    row[BASIC_SALARY_ANNUAL_KEY] =
+      toNumber(row[BASIC_SALARY_MONTHLY_KEY], 0) * divisor;
+  }
+}
+
+/**
+ * Is this Basic Salary cell read-only on this row? The single answer for both
+ * the grid's edit gate (PositionsGrid.isCellEditable) and the muted styling
+ * (columnFactory), so the two can never disagree about which cell is live.
+ *
+ * Pay Basis picks the outer pair (hourly locks both salary figures); Salary
+ * Entry picks the inner one (the derived face is locked).
+ */
+export function basicSalaryCellLocked(
+  row: PositionRow | undefined,
+  key: string
+): boolean {
+  if (!row) return false;
+  const hourly = row.payType === "HOURLY";
+  switch (key) {
+    case BASIC_SALARY_HOURLY_KEY:
+      return !hourly;
+    case BASIC_SALARY_MONTHLY_KEY:
+      return hourly || salaryEntryModeOf(row) === "ANNUAL";
+    case BASIC_SALARY_ANNUAL_KEY:
+      return hourly || salaryEntryModeOf(row) === "MONTHLY";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Fill in the pairing for a row loaded from storage.
+ *
+ * A row written before v19 has no Salary Entry, which reads as MONTHLY — the
+ * behaviour it was saved under — so its Annual face is derived for display and
+ * its stored monthly figure is left strictly alone. Never recomputes the
+ * monthly base: that is the engine's input, and loading a page must not move a
+ * budget number.
+ */
+function hydrateBasicSalary(row: PositionRow): void {
+  row[SALARY_ENTRY_MODE_KEY] = salaryEntryModeOf(row);
+  row[ANNUAL_DIVISOR_KEY] = divisorBasisOf(row);
+  row[BASIC_SALARY_ANNUAL_KEY] =
+    salaryEntryModeOf(row) === "ANNUAL"
+      ? toNumber(row[BASIC_SALARY_ANNUAL_KEY], 0)
+      : toNumber(row[BASIC_SALARY_MONTHLY_KEY], 0) * annualDivisorFor(row);
+}
+
+// ---------------------------------------------------------------------------
 // Sanitization (applied in processRowUpdate before anything is persisted)
 // ---------------------------------------------------------------------------
 
 const NUMERIC_TYPES = new Set(["NUMBER", "INTEGER", "PERCENT"]);
+
+/**
+ * Normalize a cell to a real boolean. Pasted cells arrive as text ("TRUE",
+ * "0", ""), and the grid's boolean renderer and its is-true filter both need
+ * an actual boolean to agree with each other. Shared with the block tick-box
+ * slots (blockRows.sanitizeBlockInputs) so both obey the same rule.
+ */
+export function coerceBooleanCell(value: unknown): boolean {
+  return !(
+    value === false ||
+    value === 0 ||
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    String(value).trim().toLowerCase() === "false" ||
+    String(value).trim() === "0"
+  );
+}
 
 export function sanitizeRow(
   row: PositionRow,
@@ -187,16 +334,7 @@ export function sanitizeRow(
       }
       out[def.key] = num;
     } else if (def.dataType === "BOOLEAN") {
-      // Pasted cells arrive as text ("TRUE", "0", ...); normalize so the grid's
-      // boolean renderer and the is-true filter both see a real boolean.
-      out[def.key] = !(
-        value === false ||
-        value === 0 ||
-        value === null ||
-        value === "" ||
-        String(value).trim().toLowerCase() === "false" ||
-        String(value).trim() === "0"
-      );
+      out[def.key] = coerceBooleanCell(value);
     } else if (value === "") {
       out[def.key] = null;
     }
@@ -212,14 +350,17 @@ export function sanitizeRow(
   }
 
   // Pay Basis is authoritative over which base input is live. SALARIED keeps
-  // Monthly Basic and zeros Hourly Rate; HOURLY the reverse — so toggling the
+  // the basic salary and zeros Hourly Rate; HOURLY the reverse — so toggling the
   // basis unlocks one field and clears the other, and only one is ever stored.
   // The engine keys off hourlyRate>0, which this keeps consistent with the basis.
-  if (out.payType === "HOURLY") {
-    out[BASIC_SALARY_MONTHLY_KEY] = 0;
-  } else {
+  if (out.payType !== "HOURLY") {
     out[BASIC_SALARY_HOURLY_KEY] = 0;
   }
+  // Then reconcile the salaried pair: whichever of Annual / Monthly Basic the
+  // row does not type is recomputed from the one it does (and both are zeroed
+  // for an hourly row). Runs after the numeric clamp above so it works on
+  // committed numbers, and after Pay Basis so it sees the settled basis.
+  deriveBasicSalary(out);
 
   // Hotel-cluster pair. The manual multiplier is only meaningful against the
   // row's current assignment — changing (or clearing) the cluster invalidates
@@ -280,20 +421,21 @@ export function toCreate(row: PositionRow, catalog: FieldCatalog): PositionCreat
 // Engine bridge — feed live grid rows through the real spread math
 // ---------------------------------------------------------------------------
 
-/** Accruals are generated only for a position with an accrual account set —
- *  its presence is the on/off switch (the account also routes the booking). */
-function accrualEnabled(row: PositionRow): boolean {
-  return typeof row.accrualAccount === "string" && row.accrualAccount.trim() !== "";
-}
-
 /**
  * Map a flat grid row to the engine's Position shape. Only the budgetable
  * fields carry through; identity/sync fields the engine ignores are stubbed.
  * Used to run the same vacation valuation the budget applies against rows the
  * user is still editing, without a round-trip to the store.
  */
-export function rowToEnginePosition(row: PositionRow, scenarioId: string): Position {
-  return {
+export function rowToEnginePosition(
+  row: PositionRow,
+  scenarioId: string,
+  /** The hotel-year full-time yardstick FTE is measured against. Omitted (or
+   *  unloaded) leaves FTE at 0 — fine for callers that only value vacation, but
+   *  runLiveSim must pass it or an FTE-based pool spread reads zero. */
+  fullTime: FullTimeReference = EMPTY_FULL_TIME_REFERENCE
+): Position {
+  const position: Position = {
     id: row.id as PositionId,
     scenarioId: scenarioId as ScenarioId,
     departmentCode: typeof row.departmentCode === "string" ? row.departmentCode : "",
@@ -305,7 +447,9 @@ export function rowToEnginePosition(row: PositionRow, scenarioId: string): Posit
     hotelClusterWeight: 1,
     payType: (row.payType === "HOURLY" ? "HOURLY" : "SALARIED") as PayType,
     headcount: toNumber(row.headcount, 0),
-    fte: toNumber(row.fte, 0),
+    // Filled below — deriveFte reads the seasonality/vacation/hours this object
+    // is carrying, so it needs the object built first.
+    fte: 0,
     seasonality: rowVector(row, "seasonality"),
     monthlyBaseSalary: toNumber(row.monthlyBaseSalary, 0),
     hourlyRate: toNumber(row.hourlyRate, 0),
@@ -317,13 +461,18 @@ export function rowToEnginePosition(row: PositionRow, scenarioId: string): Posit
     yearlyHoursWorked: toNumber(row.yearlyHoursWorked, 0),
     vacationDays: toNumber(row.vacationDays, 0),
     vacationMonthlyWeights: rowVector(row, "vacationMonthlyWeights"),
-    // Accrual is auto-calculated (Yearly Days ÷ 12) and only generated when the
-    // position has an accrual account; with none, feed 0 so the engine's
-    // accrualDays===0 guard suppresses the line. Mirror in loadScenarioInput.
-    accrualDaysPerMonth: accrualEnabled(row) ? toNumber(row.vacationDays, 0) / 12 : 0,
+    // Accrual is auto-calculated (Yearly Days ÷ 12) and ALWAYS computed — the
+    // accrual account decides whether the line is POSTED, not whether it is
+    // calculated. Mirror in loadScenarioInput.
+    accrualDaysPerMonth: toNumber(row.vacationDays, 0) / 12,
     updatedAt: "",
     deletedAt: null,
   };
+  // Derived, never stored — the row's Contract columns measured against the
+  // hotel's full-timer. Mirror of loadScenarioInput; the grid's FTE column shows
+  // this same number via fteById.
+  position.fte = resolveFte(position, row, fullTime);
+  return position;
 }
 
 /**
@@ -372,6 +521,24 @@ export function manhoursWorkedById(
   return out;
 }
 
+/**
+ * Derived FTE per row id, for the grid's read-only FTE column. Kept out of
+ * COMPUTES because the denominator is a hotel-year constant, not a row value —
+ * same reason Vacation Cost is a ctx map. A reference that hasn't loaded yet
+ * yields 0 for every row, so the column reads blank rather than wrong.
+ */
+export function fteById(
+  rows: PositionRow[],
+  fullTime: FullTimeReference | null
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!fullTime) return out;
+  for (const row of rows) {
+    out.set(row.id, rowToEnginePosition(row, "", fullTime).fte);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Computed columns
 // ---------------------------------------------------------------------------
@@ -412,18 +579,19 @@ function effectiveMonthlyBase(row: PositionRow, seasTotal: number): number {
 export const COMPUTES: Record<string, ComputeFn> = {
   totalWorkingMonths: (row) => sumVector(row, "seasonality"),
 
-  /** The universal position-count head: always mirrors Count and is always
-   *  booked (to A972540 in the engine — see ensurePositionCountDef), so heads
-   *  are never silently unreported when the per-row Headcount account is blank.
-   *  Read-only; Count 0 ⇒ 0. */
-  positionCount: (row) => toNumber(row.headcount, 1),
-
   vacationWeightsTotal: (row) => sumVector(row, "vacationMonthlyWeights"),
 
-  /** Monthly holiday-accrual entitlement: Yearly Days ÷ 12. Read-only — the
-   *  amount always shows, but whether it is booked is gated by the Accrual
-   *  account (see rowToEnginePosition / loadScenarioInput). */
+  /** Monthly holiday-accrual entitlement: Yearly Days ÷ 12. Read-only, and
+   *  always calculated — the Accrual account decides only whether the resulting
+   *  line is POSTED (see rowToEnginePosition / loadScenarioInput). */
   accrualDaysPerMonth: (row) => toNumber(row.vacationDays, 0) / 12,
+
+  /** Σ of the twelve Additional Cost months — the summary the family collapses
+   *  behind (see COLLAPSIBLE_MONTH_FAMILIES). Deliberately the raw sum, NOT the
+   *  seasonality-weighted figure Full Year Wage adds: this column stands in for
+   *  the twelve cells while they are hidden, so it has to equal what you would
+   *  read across them. What those entries actually cost is Full Year Wage's job. */
+  additionalCostsTotal: (row) => sumVector(row, "additionalMonthlyCosts"),
 
   /** Gross yearly wage before increases: base × working months + seasonal
    *  additional costs (matches Σ grossBase with no increase applied). In hourly

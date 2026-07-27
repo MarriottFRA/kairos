@@ -22,6 +22,8 @@
  * of Electron imports so tests can exec it in-memory.
  */
 
+import type Database from "better-sqlite3-multiple-ciphers";
+
 export const KPI_DRIVERS_SQL = `
   -- One row per user-defined driver, scoped to a hotel (OU). Built-in drivers
   -- are defined in code and UNIONed at read time, so they never appear here.
@@ -33,6 +35,11 @@ export const KPI_DRIVERS_SQL = `
       dept_mode    TEXT NOT NULL CHECK (dept_mode IN ('EXPLICIT','POSITION')),
       bucket_index INTEGER NOT NULL DEFAULT 1 CHECK (bucket_index BETWEEN 1 AND 3),
       aggregation  TEXT NOT NULL DEFAULT 'SUM' CHECK (aggregation IN ('SUM')),
+      -- Applied to the aggregated series at recompute time, so the cache (and
+      -- the KPI page) already holds the multiplied figure. Lets a driver name a
+      -- derived pot — "Gratuities" = F&B revenue accounts x 0.12 — rather than
+      -- forcing every consumer to re-apply the rate.
+      multiplier   REAL NOT NULL DEFAULT 1,
       sort_order   INTEGER NOT NULL DEFAULT 0,
       created_by   TEXT,
       updated_at   TEXT NOT NULL,
@@ -76,3 +83,21 @@ export const KPI_DRIVERS_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_kpi_values_lookup ON kpi_driver_values (ou, driver_id, dept_key);
 `;
+
+/**
+ * Backfill kpi_drivers.multiplier on stores created before it existed. Fresh
+ * installs get it from the DDL above; the DEFAULT 1 keeps every pre-existing
+ * driver numerically identical. Idempotent — guarded on the column check.
+ */
+export function applyKpiDriverMultiplier(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(kpi_drivers)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  if (columns.some((column) => column.name === "multiplier")) return;
+  handle.exec(
+    `ALTER TABLE kpi_drivers ADD COLUMN multiplier REAL NOT NULL DEFAULT 1`
+  );
+}

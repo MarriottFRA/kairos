@@ -217,6 +217,7 @@ export interface AssignedPositionRow {
   headcount: number;
   department_code: string;
   cluster_multiplier_override: number | null;
+  cluster_link_id: string;
   title: string | null;
 }
 
@@ -233,7 +234,8 @@ export function listAssignedPositionsAllOus(
   return prepared(
     valuesDb,
     `SELECT p.id, p.ou, p.scenario_id, p.active, p.headcount,
-            p.department_code, p.cluster_multiplier_override, pii.title
+            p.department_code, p.cluster_multiplier_override, p.cluster_link_id,
+            pii.title
        FROM positions p
        LEFT JOIN position_pii pii
               ON pii.position_id = p.id AND pii.deleted_at IS NULL
@@ -247,6 +249,11 @@ export function listAssignedPositionsAllOus(
  * multi-scope WRITE, used by delete (user-confirmed: deleting a cluster
  * auto-clears its positions back to no cluster / multiplier 1). Stamps
  * updated_at so the positions staleness probe catches the change.
+ *
+ * Also breaks up the cluster-position groups (cluster_link_id): with no cluster
+ * there is nothing left to keep the rows in step, so each hotel keeps its own
+ * row as an ordinary standalone position. The ROWS always survive — deleting a
+ * cluster definition must never delete budgeted cost.
  */
 export function clearAssignmentsAllOus(
   valuesDb: Db,
@@ -256,7 +263,8 @@ export function clearAssignmentsAllOus(
   const result = prepared(
     valuesDb,
     `UPDATE positions
-        SET cluster = '', cluster_multiplier_override = NULL, updated_at = ?
+        SET cluster = '', cluster_multiplier_override = NULL,
+            cluster_link_id = '', updated_at = ?
       WHERE cluster = ? AND deleted_at IS NULL`
   ).run(opts.now, clusterId);
   return result.changes;

@@ -17,7 +17,9 @@
  */
 
 import type Database from "better-sqlite3-multiple-ciphers";
+import { accountAllowed } from "../../shared/positions/fields";
 import { OutputAggRowDto, OutputsResponse } from "../../shared/positions/ipc";
+import { STATS_ACCOUNT_FILTER } from "../../shared/positions/systemAccounts";
 import { OuScope } from "./ouScope";
 import { prepared } from "./stmtCache";
 
@@ -33,6 +35,76 @@ export interface OutputLineWrite {
   account: string;
   months: number[];
   total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Projection (simulation → output lines)
+// ---------------------------------------------------------------------------
+
+/** The minimum of the engine's SimulationResult this projection needs — kept
+ *  structural so the projection has no dependency on the engine module. */
+interface ProjectableResult {
+  positionLines(id: never): Array<{
+    component: { id: unknown; label: string };
+    dept: string;
+    account: string;
+    months: ArrayLike<number> & Iterable<number>;
+  }>;
+}
+
+export interface OutputProjection {
+  lines: OutputLineWrite[];
+  /** Component label → how many position lines it had dropped for want of an
+   *  account. Surfaced on the Results page so the amount does not just vanish. */
+  unpostedByLabel: Record<string, number>;
+  /** Active positions all of whose posted lines came out zero — no salary or
+   *  hours entered, or Count 0. */
+  allZeroPositions: number;
+}
+
+/**
+ * Turn a simulation into the lines that get PERSISTED, applying the workbook's
+ * "Blank" contract: a line with no posting account is computed (and stays
+ * available as a base for other components) but is never output.
+ *
+ * Lives here, beside the write it feeds, rather than inline in the IPC handler
+ * that used to own it — it is a domain rule about what an output IS, and every
+ * consumer of stored outputs must agree on it.
+ */
+export function projectOutputLines(
+  result: ProjectableResult,
+  positions: Array<{ id: unknown }>
+): OutputProjection {
+  const lines: OutputLineWrite[] = [];
+  const unpostedByLabel: Record<string, number> = {};
+  let allZeroPositions = 0;
+
+  for (const position of positions) {
+    let nonZero = 0;
+    for (const line of result.positionLines(position.id as never)) {
+      if (!line.account) {
+        unpostedByLabel[line.component.label] =
+          (unpostedByLabel[line.component.label] ?? 0) + 1;
+        continue;
+      }
+      const months = Array.from(line.months);
+      let total = 0;
+      for (const value of months) total += value;
+      if (Math.abs(total) > 1e-9) nonZero++;
+      lines.push({
+        positionId: position.id as string,
+        componentDefId: line.component.id as string,
+        label: line.component.label,
+        dept: line.dept,
+        account: line.account,
+        months,
+        total,
+      });
+    }
+    if (nonZero === 0) allZeroPositions++;
+  }
+
+  return { lines, unpostedByLabel, allZeroPositions };
 }
 
 // ---------------------------------------------------------------------------
@@ -213,10 +285,12 @@ export function writeRun(
 // Read (Results page)
 // ---------------------------------------------------------------------------
 
-/** Legacy convention carried from the workbook: accounts starting "9" are
- *  statistics (counts/hours), everything else currency. Display-only. */
+/** Convention carried from the workbook: stats accounts (counts/hours/FTE) are
+ *  the A9… range, everything else is currency. Display-only — it drives the
+ *  Results page's Costs/Statistics toggle. Resolved through the shared filter
+ *  and matcher, so it cannot drift from what the account pickers offer. */
 function isStatsAccount(account: string): boolean {
-  return account.startsWith("9");
+  return accountAllowed(account, STATS_ACCOUNT_FILTER);
 }
 
 export function readOutputs(

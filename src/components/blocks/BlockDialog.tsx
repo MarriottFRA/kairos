@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import ButtonBase from "@mui/material/ButtonBase";
+import Checkbox from "@mui/material/Checkbox";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
@@ -31,14 +32,27 @@ import Grid3x3OutlinedIcon from "@mui/icons-material/Grid3x3Outlined";
 import PercentOutlinedIcon from "@mui/icons-material/PercentOutlined";
 import PaidOutlinedIcon from "@mui/icons-material/PaidOutlined";
 import AccountBalanceOutlinedIcon from "@mui/icons-material/AccountBalanceOutlined";
+import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
+import Autocomplete from "@mui/material/Autocomplete";
+import Chip from "@mui/material/Chip";
 import {
   BlockBaseRef,
   BlockDto,
   BlockInput,
   BlockSpread,
   BlockType,
+  POOL_MONTHS,
+  POOL_SPREAD_BASES,
+  POOL_SPREAD_BASE_META,
+  PoolEligibilityMode,
+  PoolSource,
+  PoolSpreadBase,
 } from "../../shared/blocks/ipc";
-import { AccountOption } from "../../shared/mappingTables/types";
+import { JOB_TYPE_OPTIONS } from "../../shared/positions/fieldSeed";
+import {
+  AccountOption,
+  DepartmentOption,
+} from "../../shared/mappingTables/types";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 
 export interface BlockDialogProps {
@@ -51,6 +65,8 @@ export interface BlockDialogProps {
   kpiDrivers: Array<{ id: string; label: string }>;
   /** Synced account cache for the account pickers; empty = free-text entry. */
   accounts: AccountOption[];
+  /** Department reference data for a pooled block's eligibility rule. */
+  departments?: DepartmentOption[];
   saving?: boolean;
   onClose: () => void;
   onSave: (input: BlockInput) => void;
@@ -97,11 +113,38 @@ const TYPE_TILES: Array<{
     blurb: "An employer contribution (NI, pension, levy…) charged as progressive rate bands over a contributory base you choose. One column per scheme.",
     icon: <AccountBalanceOutlinedIcon />,
   },
+  {
+    type: "POOL_SPREAD",
+    title: "Shared pool",
+    blurb: "One pot — a KPI or a typed amount — divided among the positions that earn it. Gratuities, service charge, a bonus fund.",
+    icon: <GroupsOutlinedIcon />,
+  },
 ];
 
-/** Encode a base ref as a stable Select value. */
+const MONTH_LABELS = Array.from({ length: POOL_MONTHS }, (_unused, m) =>
+  new Date(2000, m, 1).toLocaleString("en", { month: "short" })
+);
+
+const JOB_TYPE_CODES = JOB_TYPE_OPTIONS.map((option) => option.value);
+
+/**
+ * Encode a base ref as a stable Select value. A composite's contents change as
+ * the user ticks boxes, so it collapses to a sentinel — the Select only picks
+ * the KIND, and the checkbox list below it owns the members.
+ */
+const COMPOSITE_OPTION = "COMPOSITE";
 function baseValue(base: BlockBaseRef | undefined): string {
-  return base ? JSON.stringify(base) : "";
+  if (!base) return "";
+  return base.kind === "COMPOSITE" ? COMPOSITE_OPTION : JSON.stringify(base);
+}
+
+/** A composite with nothing ticked multiplies against zero — treat as unset. */
+function isEmptyComposite(base: BlockBaseRef | undefined): boolean {
+  return (
+    base?.kind === "COMPOSITE" &&
+    !base.includeBaseSalary &&
+    base.blockIds.length === 0
+  );
 }
 
 export default function BlockDialog({
@@ -110,6 +153,7 @@ export default function BlockDialog({
   blocks,
   kpiDrivers,
   accounts,
+  departments = [],
   saving,
   onClose,
   onSave,
@@ -126,6 +170,19 @@ export default function BlockDialog({
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
   const [increaseAware, setIncreaseAware] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Pooled-block config.
+  const [poolSource, setPoolSource] = useState<PoolSource>("KPI");
+  const [poolKpiDriverId, setPoolKpiDriverId] = useState("");
+  // Held as text so a half-typed "1200." survives the keystroke.
+  const [poolAmounts, setPoolAmounts] = useState<string[]>(
+    Array(POOL_MONTHS).fill("")
+  );
+  const [poolSpreadBase, setPoolSpreadBase] =
+    useState<PoolSpreadBase>("HEADCOUNT");
+  const [poolEligibilityMode, setPoolEligibilityMode] =
+    useState<PoolEligibilityMode>("MANUAL");
+  const [poolDepartments, setPoolDepartments] = useState<string[]>([]);
+  const [poolJobTypes, setPoolJobTypes] = useState<string[]>([]);
 
   // Seed the form each time the dialog opens.
   useEffect(() => {
@@ -139,6 +196,18 @@ export default function BlockDialog({
     setSpread(block?.spread ?? "ACTIVE_MONTHS");
     setIncreaseAware(block?.increaseAware ?? false);
     setConfirmingDelete(false);
+    setPoolSource(block?.poolSource ?? "KPI");
+    setPoolKpiDriverId(block?.poolKpiDriverId ?? "");
+    setPoolAmounts(
+      Array.from({ length: POOL_MONTHS }, (_unused, m) => {
+        const amount = block?.poolMonthlyAmounts?.[m];
+        return typeof amount === "number" && amount !== 0 ? String(amount) : "";
+      })
+    );
+    setPoolSpreadBase(block?.poolSpreadBase ?? "HEADCOUNT");
+    setPoolEligibilityMode(block?.poolEligibilityMode ?? "MANUAL");
+    setPoolDepartments(block?.poolDepartments ?? []);
+    setPoolJobTypes(block?.poolJobTypes ?? []);
   }, [open, block]);
 
   const baseOptions = useMemo(() => {
@@ -146,9 +215,43 @@ export default function BlockDialog({
     return { blockOptions, kpiDrivers };
   }, [blocks, block, kpiDrivers]);
 
+  const departmentNameByCode = useMemo(
+    () => new Map(departments.map((dept) => [dept.code, dept.name])),
+    [departments]
+  );
+  // A saved code the mapping tables no longer carry stays selectable, so
+  // editing something unrelated cannot silently drop it from the rule.
+  const departmentCodes = useMemo(() => {
+    const codes = departments.map((dept) => dept.code);
+    const known = new Set(codes);
+    return [...codes, ...poolDepartments.filter((code) => !known.has(code))];
+  }, [departments, poolDepartments]);
+  const jobTypeCodes = useMemo(() => {
+    const known = new Set(JOB_TYPE_CODES);
+    return [
+      ...JOB_TYPE_CODES,
+      ...poolJobTypes.filter((code) => !known.has(code)),
+    ];
+  }, [poolJobTypes]);
+
   const labelError = label.trim() === "";
-  const baseError = type === "MULTIPLIER" && !base;
-  const valid = !!type && !labelError && !baseError;
+  const baseError = type === "MULTIPLIER" && (!base || isEmptyComposite(base));
+  const isPool = type === "POOL_SPREAD";
+  const poolAmountValues = useMemo(
+    () =>
+      poolAmounts.map((text) => {
+        const value = Number(text.trim());
+        return text.trim() === "" ? 0 : value;
+      }),
+    [poolAmounts]
+  );
+  const poolAmountError =
+    isPool &&
+    poolSource === "MANUAL" &&
+    poolAmountValues.some((value) => !Number.isFinite(value));
+  const poolKpiError = isPool && poolSource === "KPI" && !poolKpiDriverId;
+  const valid =
+    !!type && !labelError && !baseError && !poolAmountError && !poolKpiError;
 
   const handleSave = () => {
     if (!type || !valid) return;
@@ -161,7 +264,20 @@ export default function BlockDialog({
       statsAccountCode: type === "COUNT_RATE" ? statsAccountCode : undefined,
       base: type === "MULTIPLIER" ? base : undefined,
       spread: type === "COUNT_RATE" ? spread : undefined,
-      increaseAware: type === "MULTIPLIER" ? undefined : increaseAware,
+      // A pooled block's share IS the pot; a merit increase would inflate it.
+      increaseAware:
+        type === "MULTIPLIER" || isPool ? undefined : increaseAware,
+      poolSource: isPool ? poolSource : undefined,
+      poolKpiDriverId:
+        isPool && poolSource === "KPI" ? poolKpiDriverId : undefined,
+      poolMonthlyAmounts:
+        isPool && poolSource === "MANUAL" ? poolAmountValues : undefined,
+      poolSpreadBase: isPool ? poolSpreadBase : undefined,
+      poolEligibilityMode: isPool ? poolEligibilityMode : undefined,
+      poolDepartments:
+        isPool && poolEligibilityMode === "RULE" ? poolDepartments : undefined,
+      poolJobTypes:
+        isPool && poolEligibilityMode === "RULE" ? poolJobTypes : undefined,
     });
   };
 
@@ -242,13 +358,20 @@ export default function BlockDialog({
                 select
                 label="Multiply against"
                 value={baseValue(base)}
-                onChange={(event) =>
-                  setBase(
-                    event.target.value
-                      ? (JSON.parse(event.target.value) as BlockBaseRef)
-                      : undefined
-                  )
-                }
+                onChange={(event) => {
+                  const picked = event.target.value;
+                  if (!picked) return setBase(undefined);
+                  if (picked === COMPOSITE_OPTION) {
+                    // Keep the members if the user is re-picking "several
+                    // things" after straying to another kind and back.
+                    return setBase(
+                      base?.kind === "COMPOSITE"
+                        ? base
+                        : { kind: "COMPOSITE", includeBaseSalary: true, blockIds: [] }
+                    );
+                  }
+                  setBase(JSON.parse(picked) as BlockBaseRef);
+                }}
                 error={baseError}
                 size="small"
                 fullWidth
@@ -257,6 +380,9 @@ export default function BlockDialog({
                 <ListSubheader>Salary</ListSubheader>
                 <MenuItem value={baseValue({ kind: "BASE_SALARY" })}>
                   Basic salary (gross)
+                </MenuItem>
+                <MenuItem value={COMPOSITE_OPTION}>
+                  Several things added together…
                 </MenuItem>
                 <ListSubheader>Days &amp; hours</ListSubheader>
                 <MenuItem value={baseValue({ kind: "CALENDAR", series: "PAY_DAYS" })}>
@@ -294,6 +420,56 @@ export default function BlockDialog({
               </TextField>
             )}
 
+            {type === "MULTIPLIER" && base?.kind === "COMPOSITE" && (
+              <Stack
+                spacing={0.25}
+                sx={{
+                  p: 1.5,
+                  borderRadius: 1,
+                  border: (theme) => `1px solid ${theme.palette.divider}`,
+                }}
+              >
+                <Typography variant="subtitle2">Add up</Typography>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={base.includeBaseSalary}
+                      onChange={(event) =>
+                        setBase({ ...base, includeBaseSalary: event.target.checked })
+                      }
+                    />
+                  }
+                  label="Basic salary (gross)"
+                />
+                {baseOptions.blockOptions.map((candidate) => (
+                  <FormControlLabel
+                    key={candidate.id}
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={base.blockIds.includes(candidate.id)}
+                        onChange={(event) =>
+                          setBase({
+                            ...base,
+                            blockIds: event.target.checked
+                              ? [...base.blockIds, candidate.id]
+                              : base.blockIds.filter((id) => id !== candidate.id),
+                          })
+                        }
+                      />
+                    }
+                    label={candidate.label}
+                  />
+                ))}
+                <Typography variant="caption" color="text.secondary" sx={{ pt: 0.5 }}>
+                  {baseError
+                    ? "Tick at least one thing to multiply against."
+                    : "The multiplier applies to the sum of everything ticked, month by month."}
+                </Typography>
+              </Stack>
+            )}
+
             {type === "COUNT_RATE" && (
               <Stack spacing={1}>
                 <Typography variant="subtitle2">Spread the year's figures</Typography>
@@ -306,15 +482,204 @@ export default function BlockDialog({
                   <ToggleButton value="ACTIVE_MONTHS">Evenly over months</ToggleButton>
                   <ToggleButton value="DAYS">By days in month</ToggleButton>
                   <ToggleButton value="VACATION_PATTERN">Like vacation</ToggleButton>
+                  <ToggleButton value="WEIGHTED_BASE">Like salary</ToggleButton>
                 </ToggleButtonGroup>
                 <Typography variant="caption" color="text.secondary">
                   {spread === "ACTIVE_MONTHS"
                     ? "The yearly total is split evenly across each position's working months."
                     : spread === "DAYS"
                       ? "Months with more working days carry proportionally more."
-                      : "Follows each position's vacation pattern — the months leave is taken in."}
+                      : spread === "WEIGHTED_BASE"
+                        ? "Follows each position's basic salary curve, so a mid-year raise pulls more of the total into the later months."
+                        : "Follows each position's vacation pattern — the months leave is taken in."}
                 </Typography>
               </Stack>
+            )}
+
+            {isPool && (
+              <>
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">The pot</Typography>
+                  <ToggleButtonGroup
+                    exclusive
+                    size="small"
+                    value={poolSource}
+                    onChange={(_event, next: PoolSource | null) =>
+                      next && setPoolSource(next)
+                    }
+                  >
+                    <ToggleButton value="KPI">From a KPI</ToggleButton>
+                    <ToggleButton value="MANUAL">Typed amounts</ToggleButton>
+                  </ToggleButtonGroup>
+
+                  {poolSource === "KPI" ? (
+                    <>
+                      <TextField
+                        select
+                        label="KPI"
+                        value={poolKpiDriverId}
+                        onChange={(event) =>
+                          setPoolKpiDriverId(event.target.value)
+                        }
+                        error={poolKpiError}
+                        size="small"
+                        fullWidth
+                      >
+                        {kpiDrivers.map((driver) => (
+                          <MenuItem key={driver.id} value={driver.id}>
+                            {driver.label}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                      <Typography variant="caption" color="text.secondary">
+                        The KPI's monthly value is the pot for that month. Give
+                        the KPI its own multiplier to turn a revenue figure into
+                        a fund — 0.12 over the F&amp;B revenue accounts is a
+                        gratuity pot.
+                      </Typography>
+                    </>
+                  ) : (
+                    <>
+                      <Box
+                        sx={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(4, 1fr)",
+                          gap: 1,
+                        }}
+                      >
+                        {poolAmounts.map((amount, index) => (
+                          <TextField
+                            key={MONTH_LABELS[index]}
+                            label={MONTH_LABELS[index]}
+                            value={amount}
+                            onChange={(event) =>
+                              setPoolAmounts((current) =>
+                                current.map((existing, m) =>
+                                  m === index ? event.target.value : existing
+                                )
+                              )
+                            }
+                            size="small"
+                          />
+                        ))}
+                      </Box>
+                      <Button
+                        size="small"
+                        onClick={() =>
+                          setPoolAmounts((current) =>
+                            Array(POOL_MONTHS).fill(current[0] ?? "")
+                          )
+                        }
+                        sx={{ alignSelf: "flex-start" }}
+                      >
+                        Copy January to every month
+                      </Button>
+                      {poolAmountError && (
+                        <Typography variant="caption" color="error">
+                          Every month must be a number (or blank for nothing).
+                        </Typography>
+                      )}
+                    </>
+                  )}
+                </Stack>
+
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">Divide it by</Typography>
+                  <TextField
+                    select
+                    value={poolSpreadBase}
+                    onChange={(event) =>
+                      setPoolSpreadBase(event.target.value as PoolSpreadBase)
+                    }
+                    size="small"
+                    fullWidth
+                    helperText={POOL_SPREAD_BASE_META[poolSpreadBase].hint}
+                  >
+                    {POOL_SPREAD_BASES.map((option) => (
+                      <MenuItem key={option} value={option}>
+                        {POOL_SPREAD_BASE_META[option].label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <Typography variant="caption" color="text.secondary">
+                    Each position's share also follows its working months and
+                    hotel-cluster share, and the whole pot is always spread — if
+                    someone drops out of a month, the others take more.
+                  </Typography>
+                </Stack>
+
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">Who shares it</Typography>
+                  <ToggleButtonGroup
+                    exclusive
+                    size="small"
+                    value={poolEligibilityMode}
+                    onChange={(_event, next: PoolEligibilityMode | null) =>
+                      next && setPoolEligibilityMode(next)
+                    }
+                  >
+                    <ToggleButton value="MANUAL">Tick each position</ToggleButton>
+                    <ToggleButton value="RULE">By department / classification</ToggleButton>
+                  </ToggleButtonGroup>
+
+                  {poolEligibilityMode === "MANUAL" ? (
+                    <Typography variant="caption" color="text.secondary">
+                      The grid gets a tick box column — tick the positions that
+                      share this pot.
+                    </Typography>
+                  ) : (
+                    <>
+                      <Autocomplete
+                        multiple
+                        size="small"
+                        options={departmentCodes}
+                        value={poolDepartments}
+                        onChange={(_event, next) => setPoolDepartments(next)}
+                        getOptionLabel={(code) =>
+                          departmentNameByCode.get(code)
+                            ? `${code} — ${departmentNameByCode.get(code)}`
+                            : code
+                        }
+                        renderValue={(value, getItemProps) =>
+                          value.map((code, index) => (
+                            <Chip
+                              size="small"
+                              label={code}
+                              {...getItemProps({ index })}
+                              key={code}
+                            />
+                          ))
+                        }
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label="Departments"
+                            placeholder="Any department"
+                          />
+                        )}
+                      />
+                      <Autocomplete
+                        multiple
+                        size="small"
+                        options={jobTypeCodes}
+                        value={poolJobTypes}
+                        onChange={(_event, next) => setPoolJobTypes(next)}
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label="Classifications"
+                            placeholder="Any classification"
+                          />
+                        )}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        Leave a list empty to mean "any". The grid's tick box
+                        becomes read-only and shows who this rule selects.
+                      </Typography>
+                    </>
+                  )}
+                </Stack>
+              </>
             )}
 
             <Divider />
@@ -369,7 +734,7 @@ export default function BlockDialog({
               </Stack>
             )}
 
-            {type !== "MULTIPLIER" && (
+            {type !== "MULTIPLIER" && !isPool && (
               <FormControlLabel
                 control={
                   <Switch

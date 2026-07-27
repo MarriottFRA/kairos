@@ -27,6 +27,7 @@ import HourglassTopRoundedIcon from '@mui/icons-material/HourglassTopRounded';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import InputAdornment from '@mui/material/InputAdornment';
 import IconButton from '@mui/material/IconButton';
+import KairosMark from '../components/KairosMark';
 
 // Styled Components — Kairos teal aesthetic (lightweight, no WebGL / liquid orbs)
 const PageRoot = styled('div')(({ theme }) => ({
@@ -306,20 +307,11 @@ const Login: React.FC = () => {
                 alignItems: "center",
                 mb: 4
               }}>
-              <Box
-                sx={{
-                  width: 56,
-                  height: 56,
-                  borderRadius: '50%',
-                  background: theme.palette.primary.main,
-                  boxShadow: `0 20px 40px ${alpha(theme.palette.primary.main, 0.4)}`,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <LoginIcon sx={{ color: theme.palette.primary.contrastText, fontSize: 28 }} />
-              </Box>
+              <KairosMark
+                size={56}
+                accent={theme.palette.primary.main}
+                ring={alpha(theme.palette.text.primary, 0.16)}
+              />
               <Typography
                 variant="h4"
                 sx={{

@@ -16,6 +16,7 @@ import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import PersonAddAltIcon from "@mui/icons-material/PersonAddAlt";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import EditIcon from "@mui/icons-material/Edit";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -37,6 +38,13 @@ export interface ClusterCardProps {
   /** Assigned positions (null while loading), plus the failure mode if any. */
   assignments: ClusterPositionRefDto[] | null;
   assignmentsState: AssignmentsState;
+  /** Start a cluster position from here: opens the Positions grid at the
+   *  cluster's first member hotel with a new row already assigned to it. */
+  onAddPosition?: (cluster: HotelClusterDto) => void;
+  /** Link a standalone row into an existing cluster-position group. */
+  onAdopt?: (position: ClusterPositionRefDto, clusterLinkId: string) => void;
+  /** The position id currently being linked, if any. */
+  adopting?: string | null;
   busy?: boolean;
   onEdit: (cluster: HotelClusterDto) => void;
   onDuplicate: (cluster: HotelClusterDto) => void;
@@ -50,6 +58,9 @@ export default function ClusterCard({
   hotelName,
   assignments,
   assignmentsState,
+  onAddPosition,
+  onAdopt,
+  adopting,
   busy,
   onEdit,
   onDuplicate,
@@ -126,6 +137,16 @@ export default function ClusterCard({
 
           <Box sx={{ flexGrow: 1 }} />
 
+          {onAddPosition && (
+            <Button
+              size="small"
+              startIcon={<PersonAddAltIcon />}
+              onClick={act(() => onAddPosition(cluster))}
+              disabled={busy}
+            >
+              Add position
+            </Button>
+          )}
           <Button
             size="small"
             startIcon={<ContentCopyIcon />}
@@ -159,6 +180,8 @@ export default function ClusterCard({
           hotelName={hotelName}
           assignments={assignments}
           state={assignmentsState}
+          onAdopt={onAdopt}
+          adopting={adopting}
         />
       </AccordionDetails>
     </Accordion>

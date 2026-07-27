@@ -9,6 +9,7 @@ export * from "./positionDefaults";
 export * from "./data";
 export * from "./mappingTables";
 export * from "./budgetImport";
+export * from "./legacyImport";
 export * from "./kpiDrivers";
 export * from "./manualInput";
 export * from "./blocks";

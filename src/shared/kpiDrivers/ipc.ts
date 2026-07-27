@@ -42,6 +42,13 @@ export interface KpiDriver {
   accountPrefixes: string[];
   /** Budget bucket to read from (1..3, default 1). */
   bucketIndex: number;
+  /**
+   * Factor applied to the aggregated series at recompute time (1 = as-is).
+   * Lets a driver name a derived pot rather than a raw budget roll-up —
+   * "Gratuities" = the F&B revenue accounts x 0.12. Because it is baked into
+   * the cache, the KPI page and every consumer see the same final figure.
+   */
+  multiplier: number;
   aggregation: KpiAggregation;
   sortOrder: number;
   /** Code-defined default (read-only), derived at read time — never stored. */
@@ -76,6 +83,8 @@ export interface KpiDriverInput {
   deptPatterns: string[];
   accountPrefixes: string[];
   bucketIndex: number;
+  /** Omitted or non-finite stores 1 (no change to the aggregated series). */
+  multiplier?: number;
 }
 
 /** A driver plus its computed series — the read model the tab renders. */

@@ -92,6 +92,7 @@ export function createKpiDriversHandlers(): Record<string, IpcHandler> {
         deptPatterns: input.deptPatterns ?? [],
         accountPrefixes: input.accountPrefixes ?? [],
         bucketIndex: input.bucketIndex,
+        multiplier: input.multiplier,
         sortOrder: isNew ? nextSortOrder(db, scope.ou) : 0,
         createdBy,
         now,

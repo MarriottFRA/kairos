@@ -22,17 +22,24 @@ import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import AddIcon from "@mui/icons-material/Add";
+import LinkIcon from "@mui/icons-material/Link";
+import KeyboardDoubleArrowLeftIcon from "@mui/icons-material/KeyboardDoubleArrowLeft";
+import KeyboardDoubleArrowRightIcon from "@mui/icons-material/KeyboardDoubleArrowRight";
 import TuneIcon from "@mui/icons-material/Tune";
 import {
+  gridColumnVisibilityModelSelector,
   GridColDef,
   GridColumnGroupingModel,
   GridRenderEditCellParams,
   useGridApiContext,
+  useGridSelector,
 } from "@mui/x-data-grid-premium";
 import {
   AccountFilter,
+  BASIC_SALARY_ANNUAL_KEY,
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
+  COLLAPSIBLE_MONTH_FAMILIES,
   DropdownSource,
   FieldCatalog,
   FieldDef,
@@ -40,6 +47,8 @@ import {
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
   SectionId,
+  vectorKeys,
+  VectorName,
 } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
@@ -48,7 +57,12 @@ import {
   ResolvedClusterWeight,
   resolveHotelClusterWeight,
 } from "../../shared/hotelClusters/resolve";
-import { COMPUTES, PositionRow } from "../../shared/positions/rowModel";
+import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
+import {
+  basicSalaryCellLocked,
+  COMPUTES,
+  PositionRow,
+} from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import { headerPresentation } from "./headerMeta";
 
@@ -74,6 +88,10 @@ export interface ColumnFactoryContext {
    *  vacation × daily hours). Shown when the cell carries no manual override;
    *  empty while the calendar is loading. */
   manhoursWorkedById: ReadonlyMap<string, number>;
+  /** Derived FTE per row id — the row's contract measured against the hotel-year
+   *  full-time reference (see engineInput.deriveFte). Empty until the hotel's
+   *  position defaults load, which leaves the read-only FTE column blank. */
+  fteById: ReadonlyMap<string, number>;
   /** Hotel-cluster definitions for the Cluster picker + Multiplier column.
    *  Empty until loaded — the Cluster field then degrades to read-only text,
    *  like an unsynced departments picker. */
@@ -81,6 +99,10 @@ export interface ColumnFactoryContext {
   /** The selected hotel — whose weight inside an assigned cluster is the
    *  row's multiplier. */
   currentOu: string | null;
+  /** OU -> hotel name, for naming the hotels a cluster position is shared with.
+   *  Optional and best-effort: without it the tooltip falls back to raw OUs,
+   *  which is worse to read but never wrong. */
+  hotelNames?: ReadonlyMap<string, string>;
 }
 
 const MONTH_SELECT_OPTIONS = [
@@ -272,10 +294,91 @@ function SelectEditCell(
   );
 }
 
+/**
+ * Above this many options a menu stops being a menu — you scroll it looking for
+ * something you could have typed in two keystrokes. Static dropdowns this long
+ * (Standard Title) get the type-ahead editor instead; the short ones
+ * (Classification, Pay Basis) keep the plain Select, where a list you can see
+ * all of at once is faster than a search box. Reference-data dropdowns
+ * (departments, accounts) have their own type-ahead editors and never reach this.
+ */
+const SEARCHABLE_OPTION_THRESHOLD = 12;
+
+type SelectOption = { value: string | number; label: string };
+
+const filterOptionsByLabel = createFilterOptions<SelectOption>({
+  limit: 50,
+  stringify: (option) => option.label,
+});
+
+/**
+ * Type-ahead editor for a long static dropdown.
+ *
+ * Same commit-on-pick contract as the department/account editors — chain
+ * stopCellEditMode after setEditCellValue, or the pick sets the edit value and
+ * leaves the cell open, so processRowUpdate never runs. A stored value the list
+ * no longer offers is injected as its own option: shortening the standard-title
+ * list must never blank a column of positions that were filled in under it.
+ */
+function OptionEditCell(
+  props: GridRenderEditCellParams<PositionRow> & { options: SelectOption[] }
+) {
+  const { id, field, value, options, hasFocus } = props;
+  const apiRef = useGridApiContext();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const known = options.find((option) => option.value === value) ?? null;
+  const orphan =
+    !known && value !== null && value !== undefined && value !== ""
+      ? { value: value as string, label: String(value) }
+      : null;
+  const selectable = orphan ? [orphan, ...options] : options;
+
+  useEffect(() => {
+    if (hasFocus) inputRef.current?.focus();
+  }, [hasFocus]);
+
+  return (
+    <Autocomplete<SelectOption>
+      options={selectable}
+      value={known ?? orphan}
+      openOnFocus
+      autoHighlight
+      fullWidth
+      filterOptions={filterOptionsByLabel}
+      getOptionLabel={(option) => option.label}
+      isOptionEqualToValue={(option, picked) => option.value === picked.value}
+      renderOption={(optionProps, option) => (
+        <Box component="li" {...optionProps} key={String(option.value)}>
+          {option.label}
+        </Box>
+      )}
+      onChange={(_event, picked) => {
+        void Promise.resolve(
+          apiRef.current.setEditCellValue({ id, field, value: picked?.value ?? "" })
+        ).then(() => apiRef.current.stopCellEditMode({ id, field }));
+      }}
+      slotProps={{ paper: { sx: { minWidth: 280 } } }}
+      renderInput={(params) => (
+        <TextField
+          {...params}
+          inputRef={inputRef}
+          variant="standard"
+          placeholder="Search…"
+          sx={{ px: 1 }}
+        />
+      )}
+      sx={{ width: "100%" }}
+    />
+  );
+}
+
 function widthFor(def: FieldDef): number {
   // Month columns only ever show "Jan" over a tag, so they can run narrow —
   // which is what lets a whole 12-month family sit on screen at once.
   if (def.monthIndex) return 84;
+  // A summary column gives up ~20px of its header to the expand chevron.
+  if (COLLAPSIBLE_MONTH_FAMILIES[def.key]) return 142;
   switch (def.dataType) {
     case "BOOLEAN":
       return 84;
@@ -295,18 +398,87 @@ function widthFor(def: FieldDef): number {
 }
 
 /**
+ * The chevron that folds a twelve-month family away behind its summary column.
+ *
+ * Collapsing is layout, not data: it drives the grid's own columnVisibilityModel
+ * (so it rides along with the saved layout, and the column menu's per-month
+ * checkboxes stay a valid second route) and never touches the catalog or the
+ * stored values. Reading the state back off that same model is what keeps the
+ * chevron honest — unfold a single month from the column menu and it flips to
+ * "expanded", because it is describing the grid rather than remembering a click.
+ */
+function MonthFamilyToggle({
+  vector,
+  label,
+}: {
+  vector: VectorName;
+  /** The summary column's full name, for the tooltip and the a11y label. */
+  label: string;
+}) {
+  const apiRef = useGridApiContext();
+  const visibility = useGridSelector(apiRef, gridColumnVisibilityModelSelector);
+  const keys = vectorKeys(vector);
+  // The model only carries explicit entries — an absent key is visible.
+  const expanded = keys.some((key) => visibility[key] !== false);
+  const title = expanded
+    ? `Hide the monthly ${label} columns`
+    : `Show ${label} month by month — twelve Jan–Dec columns you can type into`;
+
+  return (
+    <Tooltip title={title}>
+      <IconButton
+        size="small"
+        aria-label={title}
+        aria-expanded={expanded}
+        // The header cell owns click (sort) and mousedown (reorder drag); without
+        // both stopped, expanding the family also re-sorts or drags the column.
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          apiRef.current.setColumnVisibilityModel({
+            ...visibility,
+            ...Object.fromEntries(keys.map((key) => [key, !expanded])),
+          });
+        }}
+        sx={{
+          flexShrink: 0,
+          width: 20,
+          height: 20,
+          mr: 0.25,
+          color: "text.secondary",
+          border: (theme) => `1px solid ${theme.palette.divider}`,
+          borderRadius: 0.75,
+          bgcolor: "background.paper",
+        }}
+      >
+        {expanded ? (
+          <KeyboardDoubleArrowLeftIcon sx={{ fontSize: 13 }} />
+        ) : (
+          <KeyboardDoubleArrowRightIcon sx={{ fontSize: 13 }} />
+        )}
+      </IconButton>
+    </Tooltip>
+  );
+}
+
+/**
  * Two-line header: the short name over a muted unit tag.
  *
  * The unit line is what turns a wall of numeric columns into something you can
  * read a row of — "Daily Hours / hrs per day" cannot be confused with "Yearly
  * Days / days per year" the way two columns both reading "CONTRACT ..." can.
+ *
+ * A summary column for a collapsible month family also carries the expand
+ * chevron, pinned to the leading edge so the two lines keep the width they had.
  */
 function renderHeaderCell(
   def: FieldDef,
-  alignRight: boolean
+  alignRight: boolean,
+  /** Set when this column stands in for a folded-away twelve-month family. */
+  collapses?: VectorName
 ): NonNullable<GridColDef<PositionRow>["renderHeader"]> {
   const { short, unit } = headerPresentation(def);
-  return () => (
+  const stack = (
     <Box
       sx={{
         display: "flex",
@@ -315,7 +487,8 @@ function renderHeaderCell(
         alignItems: alignRight ? "flex-end" : "flex-start",
         lineHeight: 1.15,
         overflow: "hidden",
-        width: "100%",
+        minWidth: 0,
+        flexGrow: 1,
       }}
     >
       <Box
@@ -351,6 +524,21 @@ function renderHeaderCell(
           {unit}
         </Box>
       )}
+    </Box>
+  );
+
+  if (!collapses) return () => stack;
+  return () => (
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        width: "100%",
+        overflow: "hidden",
+      }}
+    >
+      <MonthFamilyToggle vector={collapses} label={fieldLabel(def)} />
+      {stack}
     </Box>
   );
 }
@@ -393,6 +581,131 @@ function autofilledCodeKeys(
     }
   }
   return keys;
+}
+
+/**
+ * May this cell be edited on THIS row?
+ *
+ * `column.editable` answers the row-independent half (COMPUTED columns, a
+ * mirrored department code, a block Total, a RULE-mode pool tick). The three
+ * rules below need the row itself, so they cannot live on the colDef — and they
+ * are exactly the rules a second editing surface would get wrong. The grid's
+ * isCellEditable and the position form's field controls both call this, so
+ * there is one answer rather than two that drift.
+ */
+export interface EditabilityContext {
+  /** PII mask state — masked maskable cells are read-only, not just hidden. */
+  masked: boolean;
+  maskableKeys: ReadonlySet<string>;
+  hotelClusters: HotelClusterDto[];
+  currentOu: string | null;
+  /** Optional id -> cluster index. The grid calls cellEditable for EVERY
+   *  rendered cell on EVERY grid store update (see GridCell's isCellEditable
+   *  subscription), so the cluster lookup below must not be a linear scan.
+   *  Callers that already hold a map pass it; the form path may omit it. */
+  clusterById?: ReadonlyMap<string, HotelClusterDto>;
+}
+
+/**
+ * Per-row cluster weight, resolved at most once per row.
+ *
+ * The two cluster columns ask for the same answer repeatedly on a single cell
+ * render — the multiplier column alone resolves four times (valueGetter,
+ * cellClassName, and twice while building its tooltip). Multiply that by every
+ * rendered cell on every grid store update and it is real work for a value that
+ * cannot change without the row object changing.
+ *
+ * Keyed on the row object, which is safe because rows are copy-on-write
+ * everywhere: sanitizeRow and sanitizeBlockInputs both spread into a new object,
+ * and every setRows call maps to fresh objects rather than mutating in place.
+ * The cache is per column-build (keyed on ctx), so a new OU or a changed cluster
+ * set builds a new ctx and therefore a new, empty cache.
+ */
+/**
+ * Do this row's vacation weights drift from 100%?
+ *
+ * All twelve vacw_* columns ask this in their cellClassName, and the answer sums
+ * twelve keys — so an uncached row costs 144 property reads per render, for one
+ * boolean that is identical across all twelve cells. Same immutability argument
+ * as the cluster cache above; a row is never edited in place.
+ */
+const vacationDrift = new WeakMap<PositionRow, boolean>();
+
+function vacationWeightsDrift(row: PositionRow): boolean {
+  const hit = vacationDrift.get(row);
+  if (hit !== undefined) return hit;
+  const drift = Math.abs(COMPUTES.vacationWeightsTotal(row) - 1) > 0.001;
+  vacationDrift.set(row, drift);
+  return drift;
+}
+
+const clusterResolvers = new WeakMap<
+  object,
+  (row: PositionRow | undefined) => ResolvedClusterWeight
+>();
+
+function clusterResolverFor(
+  ctx: ColumnFactoryContext
+): (row: PositionRow | undefined) => ResolvedClusterWeight {
+  const existing = clusterResolvers.get(ctx);
+  if (existing) return existing;
+
+  const clusterById = clusterMapById(ctx.hotelClusters);
+  const ou = ctx.currentOu ?? "";
+  const cache = new WeakMap<PositionRow, ResolvedClusterWeight>();
+  const resolve = (row: PositionRow | undefined): ResolvedClusterWeight => {
+    if (!row) return resolveHotelClusterWeight(ou, "", null, clusterById);
+    const hit = cache.get(row);
+    if (hit) return hit;
+    const resolved = resolveHotelClusterWeight(
+      ou,
+      typeof row[HOTEL_CLUSTER_KEY] === "string"
+        ? (row[HOTEL_CLUSTER_KEY] as string)
+        : "",
+      typeof row[HOTEL_CLUSTER_MULT_KEY] === "number"
+        ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
+        : null,
+      clusterById
+    );
+    cache.set(row, resolved);
+    return resolved;
+  };
+  clusterResolvers.set(ctx, resolve);
+  return resolve;
+}
+
+export function cellEditable(
+  row: PositionRow | undefined,
+  column: Pick<GridColDef, "field" | "editable">,
+  ctx: EditabilityContext
+): boolean {
+  if (column.editable === false) return false;
+  // Blind edits and blind pastes into hidden fields are a data-integrity
+  // hazard. Reveal to edit.
+  if (ctx.masked && ctx.maskableKeys.has(column.field)) return false;
+  // Basic salary: a row only ever types ONE of Annual / Monthly / Hourly. Pay
+  // Basis picks the outer pair and Salary Entry the inner one; the two faces it
+  // locks are derived from the one it leaves live.
+  if (basicSalaryCellLocked(row, column.field)) return false;
+  // Only a single-hotel cluster's multiplier may be overridden by hand — with
+  // several member hotels the cluster's weights ARE the spread, and a manual
+  // number would silently break the split.
+  if (column.field === HOTEL_CLUSTER_MULT_KEY) {
+    const id =
+      typeof row?.[HOTEL_CLUSTER_KEY] === "string"
+        ? (row[HOTEL_CLUSTER_KEY] as string)
+        : "";
+    if (!id) return false;
+    const cluster = ctx.clusterById
+      ? ctx.clusterById.get(id)
+      : ctx.hotelClusters.find((candidate) => candidate.id === id);
+    return (
+      !!cluster &&
+      cluster.members.length === 1 &&
+      cluster.members[0].ou === (ctx.currentOu ?? "")
+    );
+  }
+  return true;
 }
 
 export function buildColumns(
@@ -438,7 +751,11 @@ function buildColumn(
     def.dataType === "NUMBER" ||
     def.dataType === "INTEGER" ||
     def.dataType === "PERCENT" ||
-    (def.storage === "COMPUTED" && def.dataType !== "TEXT");
+    // Derived columns are numbers by default — except an ACCOUNT_CODE, which is
+    // a code string however it was arrived at (see HC Stats below).
+    (def.storage === "COMPUTED" &&
+      def.dataType !== "TEXT" &&
+      def.dataType !== "ACCOUNT_CODE");
 
   if (numeric) {
     column.type = "number";
@@ -514,9 +831,14 @@ function buildColumn(
         // the *display* (value -> label) and filtering; the custom edit cell only
         // replaces the editor, so a pick commits on the first click.
         Object.assign(column, { type: "singleSelect", valueOptions: options });
-        column.renderEditCell = (params) => (
-          <SelectEditCell {...params} options={options} />
-        );
+        // Months stay a plain menu however many they are — a list of twelve you
+        // already know the order of beats a search box.
+        const searchable =
+          def.dropdownSource?.kind === "static" &&
+          options.length > SEARCHABLE_OPTION_THRESHOLD;
+        column.renderEditCell = searchable
+          ? (params) => <OptionEditCell {...params} options={options} />
+          : (params) => <SelectEditCell {...params} options={options} />;
       }
       break;
     }
@@ -528,32 +850,58 @@ function buildColumn(
   // it reads from the per-id map ctx builds by running the same spread math the
   // budget uses, so a vacation day is priced against the merit ramp and weights.
   const isEngineCost = def.computeKey === "vacationEstimate";
+  // FTE is derived like the row-only computes, but its denominator is a
+  // hotel-year constant rather than anything on the row, so it comes from a ctx
+  // map too (see rowModel.fteById).
+  const isFte = def.computeKey === "fte";
   if (
     def.storage === "COMPUTED" &&
     def.computeKey &&
-    (isEngineCost || COMPUTES[def.computeKey])
+    (isEngineCost || isFte || COMPUTES[def.computeKey])
   ) {
     const compute = COMPUTES[def.computeKey];
+    const derivedMap = isEngineCost
+      ? ctx.vacationCostById
+      : isFte
+        ? ctx.fteById
+        : null;
     column.editable = false;
-    column.valueGetter = isEngineCost
+    column.valueGetter = derivedMap
       ? (_value: unknown, row: PositionRow) =>
-          row ? ctx.vacationCostById.get(row.id) ?? 0 : 0
+          row ? derivedMap.get(row.id) ?? 0 : 0
       : (_value: unknown, row: PositionRow) => (row ? compute(row) : 0);
     column.cellClassName = "pos-cell--num pos-cell--derived";
-    column.valueFormatter = (value: number | null | undefined) => {
-      const num = Number(value);
-      return Number.isFinite(num)
-        ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
-        : "";
-    };
+    // A PERCENT-typed derived column keeps the % formatter the switch above
+    // installed (Total Weights reads "100%", matching the twelve cells it sums);
+    // every other derived column is a plain number.
+    if (def.dataType !== "PERCENT") {
+      column.valueFormatter = (value: number | null | undefined) => {
+        const num = Number(value);
+        return Number.isFinite(num)
+          ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          : "";
+      };
+    }
 
-    // Weights must sum to 1 — tint the total when it drifts.
+    // Weights must sum to 1 (shown as 100%) — tint the total when it drifts.
     if (def.computeKey === "vacationWeightsTotal") {
       column.cellClassName = (params) =>
         Math.abs(Number(params.value) - 1) > 0.001
           ? "pos-cell--num pos-cell--warn"
           : "pos-cell--num pos-cell--derived";
     }
+  }
+
+  // HC Stats: the account the permanent position-count head always books to.
+  // A constant, not a formula — hence no computeKey and no COMPUTES entry (those
+  // return numbers; this is a code). Rendered read-only and muted like any derived
+  // cell so it reads as "the system decided this", which is the whole point: it
+  // tells the user where the A972540 rows in Results come from.
+  if (def.storage === "COMPUTED" && def.dataType === "ACCOUNT_CODE") {
+    const fixed = typeof def.defaultValue === "string" ? def.defaultValue : "";
+    column.editable = false;
+    column.valueGetter = () => fixed;
+    column.cellClassName = "pos-cell--derived";
   }
 
   // Manhours Worked: shows the row's EFFECTIVE worked hours — a positive manual
@@ -670,17 +1018,7 @@ function buildColumn(
     ctx.hotelClusters.length > 0
   ) {
     const clusterById = clusterMapById(ctx.hotelClusters);
-    const resolveRow = (row: PositionRow | undefined): ResolvedClusterWeight =>
-      resolveHotelClusterWeight(
-        ctx.currentOu ?? "",
-        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
-          ? (row[HOTEL_CLUSTER_KEY] as string)
-          : "",
-        typeof row?.[HOTEL_CLUSTER_MULT_KEY] === "number"
-          ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
-          : null,
-        clusterById
-      );
+    const resolveRow = clusterResolverFor(ctx);
     const options = [
       { value: "", label: "None" },
       ...ctx.hotelClusters.map((cluster) => ({
@@ -720,14 +1058,49 @@ function buildColumn(
             (column.valueFormatter as (value: unknown) => string)(params.value)
           )
         : "";
-      if (!resolved.warning) return <span>{label}</span>;
-      const title =
-        resolved.warning === "DANGLING"
-          ? "This cluster no longer exists — the position gets multiplier ×1. Pick None or another cluster."
-          : `This hotel is not a member of “${resolved.clusterName}” — the position gets multiplier ×1. Add it on the Clusters tab.`;
+
+      if (resolved.warning) {
+        const title =
+          resolved.warning === "DANGLING"
+            ? "This cluster no longer exists — the position gets multiplier ×1. Pick None or another cluster."
+            : `This hotel is not a member of “${resolved.clusterName}” — the position gets multiplier ×1. Add it on the Clusters tab.`;
+        return (
+          <Tooltip title={title}>
+            <span>{label}</span>
+          </Tooltip>
+        );
+      }
+
+      // A linked row is one person held by several hotels: the link icon says
+      // so, and the tooltip names them, because "my edit also changed two other
+      // hotels' budgets" must never be a surprise.
+      const linkId =
+        typeof params.row?.[CLUSTER_LINK_ROW_KEY] === "string"
+          ? (params.row[CLUSTER_LINK_ROW_KEY] as string)
+          : "";
+      if (!linkId) return <span>{label}</span>;
+
+      const cluster = clusterById.get(
+        typeof params.value === "string" ? params.value : ""
+      );
+      const others = (cluster?.members ?? [])
+        .filter((member) => member.ou !== (ctx.currentOu ?? ""))
+        .map((member) => ctx.hotelNames?.get(member.ou) ?? member.ou);
+      const title = others.length
+        ? `Shared with ${others.join(", ")} — edits here apply to all of them. FTE and the multiplier stay per-hotel.`
+        : "A cluster position — edits apply to every member hotel's copy.";
+
       return (
         <Tooltip title={title}>
-          <span>{label}</span>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}>
+            <LinkIcon sx={{ fontSize: 14, color: "text.secondary", flexShrink: 0 }} />
+            <Box
+              component="span"
+              sx={{ overflow: "hidden", textOverflow: "ellipsis" }}
+            >
+              {label}
+            </Box>
+          </Box>
         </Tooltip>
       );
     };
@@ -741,17 +1114,7 @@ function buildColumn(
   // here mirrors that rule so locked cells read as derived.
   if (def.key === HOTEL_CLUSTER_MULT_KEY) {
     const clusterById = clusterMapById(ctx.hotelClusters);
-    const resolveRow = (row: PositionRow | undefined): ResolvedClusterWeight =>
-      resolveHotelClusterWeight(
-        ctx.currentOu ?? "",
-        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
-          ? (row[HOTEL_CLUSTER_KEY] as string)
-          : "",
-        typeof row?.[HOTEL_CLUSTER_MULT_KEY] === "number"
-          ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
-          : null,
-        clusterById
-      );
+    const resolveRow = clusterResolverFor(ctx);
     const overridable = (row: PositionRow | undefined): boolean => {
       const id =
         typeof row?.[HOTEL_CLUSTER_KEY] === "string"
@@ -825,20 +1188,24 @@ function buildColumn(
         resolved.weight !== 1
           ? " Scales hours, costs and statistics — not Count."
           : "";
-      const clusterWeight = resolveHotelClusterWeight(
-        ctx.currentOu ?? "",
-        typeof params.row?.[HOTEL_CLUSTER_KEY] === "string"
-          ? (params.row[HOTEL_CLUSTER_KEY] as string)
-          : "",
-        null,
-        clusterById
-      ).weight;
+      // Only the OVERRIDE branch needs the cluster's own weight, and resolving
+      // it is a second full resolve — so do it there rather than up front, where
+      // every cell would pay for a string most of them never show.
+      const clusterWeight = () =>
+        resolveHotelClusterWeight(
+          ctx.currentOu ?? "",
+          typeof params.row?.[HOTEL_CLUSTER_KEY] === "string"
+            ? (params.row[HOTEL_CLUSTER_KEY] as string)
+            : "",
+          null,
+          clusterById
+        ).weight;
       const title = resolved.warning
         ? resolved.warning === "DANGLING"
           ? "The assigned cluster no longer exists — multiplier ×1."
           : `This hotel is not a member of “${resolved.clusterName}” — multiplier ×1.`
         : resolved.source === "OVERRIDE"
-          ? `Manual override — the cluster weight is ×${clusterWeight.toFixed(2)}. Clear the cell to fall back.${flexNote}`
+          ? `Manual override — the cluster weight is ×${clusterWeight().toFixed(2)}. Clear the cell to fall back.${flexNote}`
           : overridable(params.row)
             ? `Manual override allowed (single-hotel cluster). Clear the cell to fall back to the cluster weight.${flexNote}`
             : `From cluster “${resolved.clusterName}” — this hotel's weight. Overridable only for single-hotel clusters.${flexNote}`;
@@ -850,26 +1217,28 @@ function buildColumn(
     };
   }
 
-  // Basic salary: Pay Basis decides which of Monthly Basic / Hourly Rate is live.
-  // Mute whichever cell the current basis locks (the functional read-only gate
-  // lives in PositionsGrid.isCellEditable). Row-aware, so the muting follows the
-  // Pay Basis toggle. HOURLY → Monthly Basic muted; SALARIED → Hourly Rate muted.
-  if (def.key === BASIC_SALARY_MONTHLY_KEY || def.key === BASIC_SALARY_HOURLY_KEY) {
-    const liveWhenHourly = def.key === BASIC_SALARY_HOURLY_KEY;
-    column.cellClassName = (params) => {
-      const isHourly = params.row?.payType === "HOURLY";
-      const locked = liveWhenHourly ? !isHourly : isHourly;
-      return locked ? "pos-cell--num pos-cell--derived" : "pos-cell--num";
-    };
+  // Basic salary: only one of Annual / Monthly / Hourly is live per row (Pay
+  // Basis picks the outer pair, Salary Entry the inner one). Mute the two the
+  // row derives, reading the same predicate as the functional read-only gate in
+  // PositionsGrid.isCellEditable — row-aware, so the muting follows both toggles.
+  if (
+    def.key === BASIC_SALARY_MONTHLY_KEY ||
+    def.key === BASIC_SALARY_HOURLY_KEY ||
+    def.key === BASIC_SALARY_ANNUAL_KEY
+  ) {
+    column.cellClassName = (params) =>
+      basicSalaryCellLocked(params.row, def.key)
+        ? "pos-cell--num pos-cell--derived"
+        : "pos-cell--num";
   }
 
   // Vacation weights are relative proportions the engine normalizes by their
   // total (see reference.vacationCost). Redden the weight cells while the row's
-  // total drifts from 1 — a nudge to tidy up, though the math self-corrects.
+  // total drifts from 1 (100%) — a nudge to tidy up, though the math
+  // self-corrects. Compared on the stored fraction, not the shown percentage.
   if (def.vector === "vacationMonthlyWeights") {
     column.cellClassName = (params) =>
-      params.row &&
-      Math.abs(COMPUTES.vacationWeightsTotal(params.row) - 1) > 0.001
+      params.row && vacationWeightsDrift(params.row)
         ? "pos-cell--num pos-cell--warn"
         : "pos-cell--num";
   }
@@ -883,8 +1252,13 @@ function buildColumn(
   }
 
   // After the type branches, so the singleSelect case (which drops headerAlign)
-  // is reflected in how the two-line header stacks.
-  column.renderHeader = renderHeaderCell(def, column.headerAlign === "right");
+  // is reflected in how the two-line header stacks. A summary column for a
+  // collapsible month family also gets the expand chevron.
+  column.renderHeader = renderHeaderCell(
+    def,
+    column.headerAlign === "right",
+    COLLAPSIBLE_MONTH_FAMILIES[def.key]
+  );
 
   if (isSectionStart) {
     const base = column.cellClassName;

@@ -15,9 +15,10 @@ import Box from "@mui/material/Box";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
 import MenuItem from "@mui/material/MenuItem";
-import { alpha } from "@mui/material/styles";
+import { alpha, SxProps, Theme } from "@mui/material/styles";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlined";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlined";
 import {
@@ -30,33 +31,173 @@ import {
   GridColDef,
   GridInitialState,
   GridRenderCellParams,
+  GridRowClassNameParams,
   GridRowId,
   GridRowSelectionModel,
   MuiEvent,
   useGridApiRef,
 } from "@mui/x-data-grid-premium";
 import {
-  BASIC_SALARY_HOURLY_KEY,
-  BASIC_SALARY_MONTHLY_KEY,
+  COLLAPSIBLE_MONTH_FAMILIES,
+  collapsibleMonthKeys,
   FieldCatalog,
-  HOTEL_CLUSTER_KEY,
-  HOTEL_CLUSTER_MULT_KEY,
   SectionId,
+  vectorKey,
 } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
+import { clusterMapById } from "../../shared/hotelClusters/resolve";
 import { BlockDto } from "../../shared/blocks/ipc";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
-import { buildColumnGroupingModel, buildColumns } from "./columnFactory";
+import {
+  buildColumnGroupingModel,
+  buildColumns,
+  cellEditable,
+} from "./columnFactory";
 import { buildBlockColumns, buildBlockGroupingEntries } from "./blockColumns";
+import {
+  healCollapsedFamilies,
+  healNewColumn,
+  healPinnedBand,
+} from "./gridLayout";
 
 export const ROW_HEIGHT = 36;
 /** Two lines: the short name (up to 2 rows) over the muted unit tag. */
 export const HEADER_HEIGHT = 54;
 /** One short line — plus room for the "Add column" button the PII band carries. */
 export const GROUP_HEADER_HEIGHT = 34;
+
+// ── Stable prop identities ──
+// MUI is explicit that "all non-primitive props should maintain a stable
+// reference between renders" (mui.com/x/react-data-grid/performance). Every
+// object literal handed to the grid inline is a NEW identity each render, and
+// the grid reacts to identity, not content — most damagingly filterModel, whose
+// controlled-model effect compares by reference and re-runs the whole filter
+// pipeline (filter -> aggregate -> prune selection -> re-sort) over every row.
+// At a thousand positions that turns any incidental parent render into real
+// lag, so these live at module scope or behind a memo, never inline.
+
+const NO_GROUPING: string[] = [];
+const DEPT_GROUPING = ["departmentCode"];
+const NO_FILTER_ITEMS: { field: string; operator: string; value: string }[] = [];
+// Inactive positions are hidden rather than removed — they stay in the store,
+// roll forward to next year, and come back with the toggle.
+const ACTIVE_ONLY_ITEMS = [
+  { field: "active", operator: "is", value: "true" },
+];
+const NO_QUICK_FILTER: string[] = [];
+
+function getRowClassName(params: GridRowClassNameParams): string {
+  return (params.row as PositionRow | undefined)?.active === false
+    ? "pos-row--inactive"
+    : "";
+}
+
+const GRID_SX: SxProps<Theme> = {
+  borderRadius: 2,
+  // renderHeader owns the column title's typography (see columnFactory);
+  // this only styles the titles the grid draws itself — the group bands.
+  "& .MuiDataGrid-columnHeader": { padding: "0 8px" },
+  "& .pos-band .MuiDataGrid-columnHeaderTitle": {
+    fontWeight: 700,
+    fontSize: "0.6875rem",
+    letterSpacing: "0.09em",
+    textTransform: "uppercase",
+  },
+  "& .MuiDataGrid-columnHeaderTitleContainer": { overflow: "hidden" },
+  // Section banners: the group row is centered over its columns and
+  // tinted ~3x the columns below it, so the hierarchy reads at a glance.
+  "& .pos-band": {
+    justifyContent: "center",
+    "& .MuiDataGrid-columnHeaderTitleContainer": {
+      justifyContent: "center",
+    },
+  },
+  // Section boundaries run the full height of the grid, so you always
+  // know which block the cell you are editing belongs to.
+  "& .pos-col--sectionStart, & .pos-cell--sectionStart": {
+    borderLeft: (theme) => `2px solid ${theme.palette.divider}`,
+  },
+  "& .pos-cell--num": {
+    fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: "0.8125rem",
+  },
+  "& .pos-cell--derived": { color: "text.secondary" },
+  "& .pos-cell--warn": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.25),
+    fontWeight: 700,
+  },
+  // Retained but not budgeted — visibly out of the plan without being
+  // unreadable, since you still edit these rows before switching them on.
+  "& .pos-row--inactive": {
+    opacity: 0.55,
+    fontStyle: "italic",
+  },
+  "& .pos-cell--masked": {
+    fontFamily: "'IBM Plex Mono', monospace",
+    color: "text.disabled",
+    letterSpacing: 2,
+  },
+  // Section tints — one hue per section, strong on the banner and faint
+  // on the columns it spans, which is what ties the two rows together.
+  "& .pos-band--pii": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.22),
+  },
+  "& .pos-col--pii": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.07),
+  },
+  // Employee is PII's sibling band — same hue, half the strength, so the
+  // two read as related without the identity block losing its emphasis.
+  "& .pos-band--employee": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.11),
+  },
+  "& .pos-col--employee": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.035),
+  },
+  "& .pos-band--contract": {
+    bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.22),
+  },
+  "& .pos-col--contract": {
+    bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.06),
+  },
+  "& .pos-band--seasonality": {
+    bgcolor: (theme) => alpha(theme.palette.info.main, 0.22),
+  },
+  "& .pos-col--seasonality": {
+    bgcolor: (theme) => alpha(theme.palette.info.main, 0.06),
+  },
+  "& .pos-band--basicSalary": {
+    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.22),
+  },
+  "& .pos-col--basicSalary": {
+    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.06),
+  },
+  "& .pos-band--vacation": {
+    bgcolor: (theme) => alpha(theme.palette.success.main, 0.22),
+  },
+  "& .pos-col--vacation": {
+    bgcolor: (theme) => alpha(theme.palette.success.main, 0.06),
+  },
+  // Blocks get their own hue outside the section palette (violet), so
+  // user-defined calculation bands read as such at a glance.
+  "& .pos-band--blocks": {
+    bgcolor: alpha("#7e57c2", 0.24),
+  },
+  "& .pos-col--blocks": {
+    bgcolor: alpha("#7e57c2", 0.07),
+  },
+  // Editable cells read as inputs (same affordance as the calendar grid).
+  "& .MuiDataGrid-cell--editable": {
+    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04),
+    cursor: "text",
+    "&:hover": {
+      bgcolor: (theme) => alpha(theme.palette.primary.main, 0.1),
+    },
+  },
+  "& .MuiDataGrid-cell:focus-within": { outlineOffset: -2 },
+};
 
 export interface PositionsGridProps {
   rows: PositionRow[];
@@ -71,11 +212,15 @@ export interface PositionsGridProps {
   /** Calendar-derived Manhours Worked per row id — shown when the cell has no
    *  manual override. */
   manhoursWorkedById: ReadonlyMap<string, number>;
+  /** Derived FTE per row id — feeds the read-only FTE column. */
+  fteById: ReadonlyMap<string, number>;
   /** Hotel-cluster definitions for the Cluster picker + Multiplier column;
    *  empty until loaded (the Cluster field then degrades to plain text). */
   hotelClusters: HotelClusterDto[];
   /** The selected hotel — whose weight in an assigned cluster flexes a row. */
   currentOu: string | null;
+  /** OU -> hotel name, for naming the hotels a cluster position is shared with. */
+  hotelNames?: ReadonlyMap<string, string>;
   /** The hotel's blocks — each renders as a column band after the sections. */
   blocks: BlockDto[];
   /** Live-sim results feeding every block's Total column; null while loading. */
@@ -96,6 +241,9 @@ export interface PositionsGridProps {
   onSelectionChange: (ids: string[]) => void;
   onDuplicate: (row: PositionRow) => void;
   onDelete: (row: PositionRow) => void;
+  /** Opens the row as a form. `field` is the cell the user was on, so the
+   *  dialog can focus it — the grid itself stays fully editable either way. */
+  onEditRow: (row: PositionRow, field?: string) => void;
   onPasteStart: () => void;
   onPasteEnd: () => void;
   /** "+" on an extendable section banner (Employee PII). */
@@ -134,36 +282,6 @@ function RemoveColumnMenuItem(props: {
   );
 }
 
-/**
- * A column group that straddles the pinned/scrolling boundary is drawn once on
- * EACH side, so its band header appears twice. Bands that live in the frozen
- * block are therefore pinned all-or-nothing: if any of a band's columns is
- * pinned left, they all are, contiguously, in catalog order.
- *
- * The band lands where its first pinned member already was, so healing one band
- * never reshuffles the ones around it — which matters once the gutter holds
- * more than one. Also heals layouts saved before a band existed.
- */
-function healPinnedBand(
-  state: GridInitialState,
-  bandKeys: string[]
-): GridInitialState {
-  const left = state.pinnedColumns?.left;
-  if (!left || bandKeys.length === 0) return state;
-  const at = left.findIndex((field) => bandKeys.includes(field));
-  if (at < 0) return state;
-  const rest = left.filter((field) => !bandKeys.includes(field));
-  // `at` indexes the original array; clamp it into the filtered one.
-  const insertAt = Math.min(at, rest.length);
-  return {
-    ...state,
-    pinnedColumns: {
-      ...state.pinnedColumns,
-      left: [...rest.slice(0, insertAt), ...bandKeys, ...rest.slice(insertAt)],
-    },
-  };
-}
-
 function partition<T>(items: T[], predicate: (item: T) => boolean): [T[], T[]] {
   const yes: T[] = [];
   const no: T[] = [];
@@ -200,8 +318,10 @@ export default function PositionsGrid({
   accounts,
   vacationCostById,
   manhoursWorkedById,
+  fteById,
   hotelClusters,
   currentOu,
+  hotelNames,
   blocks,
   blockResults,
   masked,
@@ -217,6 +337,7 @@ export default function PositionsGrid({
   onSelectionChange,
   onDuplicate,
   onDelete,
+  onEditRow,
   onPasteStart,
   onPasteEnd,
   onAddField,
@@ -288,6 +409,14 @@ export default function PositionsGrid({
     // Both row actions live behind the one overflow menu in the gutter — an
     // inline duplicate icon would double the gutter's width for an action
     // nobody reaches for mid-scan.
+    // The gutter is pinned, so this cell renders for every visible row and never
+    // virtualizes away — and MUI calls getActions on every render of it, then
+    // clones each item again for the menu. The items only depend on the row and
+    // the three handlers, none of which change without rebuilding this column,
+    // so build them once per row instead of on every render. Deliberately still
+    // a `type: "actions"` column: the roving-tabindex keyboard handling and the
+    // menu's focus management come with it, and are not worth reimplementing.
+    const actionItems = new WeakMap<PositionRow, React.ReactElement[]>();
     const actionsColumn: GridColDef<PositionRow> = {
       field: "_actions",
       type: "actions",
@@ -295,27 +424,40 @@ export default function PositionsGrid({
       width: 44,
       minWidth: 44,
       disableReorder: true,
-      getActions: (params) => [
-        <GridActionsCellItem
-          key="duplicate"
-          icon={<ContentCopyIcon fontSize="small" />}
-          label="Duplicate position"
-          onClick={() => onDuplicate(params.row)}
-          showInMenu
-        />,
-        <GridActionsCellItem
-          key="delete"
-          icon={<DeleteOutlineIcon fontSize="small" />}
-          label="Delete position"
-          onClick={() => onDelete(params.row)}
-          showInMenu
-        />,
-      ],
+      getActions: (params) => {
+        const cached = actionItems.get(params.row);
+        if (cached) return cached;
+        const items = [
+          <GridActionsCellItem
+            key="edit"
+            icon={<EditOutlinedIcon fontSize="small" />}
+            label="Edit position (Alt+Enter)"
+            onClick={() => onEditRow(params.row)}
+            showInMenu
+          />,
+          <GridActionsCellItem
+            key="duplicate"
+            icon={<ContentCopyIcon fontSize="small" />}
+            label="Duplicate position"
+            onClick={() => onDuplicate(params.row)}
+            showInMenu
+          />,
+          <GridActionsCellItem
+            key="delete"
+            icon={<DeleteOutlineIcon fontSize="small" />}
+            label="Delete position"
+            onClick={() => onDelete(params.row)}
+            showInMenu
+          />,
+        ];
+        actionItems.set(params.row, items);
+        return items;
+      },
     };
 
     // The gutter's members lead the array too, so unpinning keeps them together.
     const [controlColumns, dataColumns] = partition(
-      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, hotelClusters, currentOu }),
+      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames }),
       (column) => controlKeys.has(column.field)
     );
 
@@ -324,7 +466,7 @@ export default function PositionsGrid({
     const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, hotelClusters, currentOu, blocks, blockResults, statusByRow, onDuplicate, onDelete]);
+  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow]);
 
   const columnGroupingModel = useMemo(
     () => [
@@ -334,43 +476,26 @@ export default function PositionsGrid({
     [catalog, onAddField, onManageColumns, blocks, onEditBlock]
   );
 
-  // Only a single-hotel cluster's multiplier may be overridden by hand — with
-  // several member hotels the cluster's weights ARE the spread, and a manual
-  // number would silently break the split.
-  const clusterOverridable = useCallback(
-    (row: PositionRow | undefined): boolean => {
-      const id =
-        typeof row?.[HOTEL_CLUSTER_KEY] === "string"
-          ? (row[HOTEL_CLUSTER_KEY] as string)
-          : "";
-      if (!id) return false;
-      const cluster = hotelClusters.find((candidate) => candidate.id === id);
-      return (
-        !!cluster &&
-        cluster.members.length === 1 &&
-        cluster.members[0].ou === (currentOu ?? "")
-      );
-    },
-    [hotelClusters, currentOu]
+  // The row-aware half of "can this be edited" (masked PII, the locked basic-
+  // salary faces, the single-hotel cluster rule) lives in columnFactory so the
+  // Edit Position form applies exactly the same rules to the same row.
+  const editabilityCtx = useMemo(
+    () => ({
+      masked,
+      maskableKeys,
+      hotelClusters,
+      currentOu,
+      // cellEditable runs per rendered cell per grid store update — a click
+      // alone fires two or three — so the cluster lookup it does must be O(1).
+      clusterById: clusterMapById(hotelClusters),
+    }),
+    [masked, maskableKeys, hotelClusters, currentOu]
   );
 
-  // Masked PII cells are read-only: blind edits and blind pastes into hidden
-  // fields are a data-integrity hazard. Reveal to edit.
   const isCellEditable = useCallback(
-    (params: GridCellParams) => {
-      if (masked && maskableKeys.has(params.field)) return false;
-      // Basic salary: Pay Basis decides which base input is live, so a row only
-      // ever drives its base from one field. HOURLY locks Monthly Basic; SALARIED
-      // locks Hourly Rate. Flip the Pay Basis toggle to switch which is editable.
-      const isHourly = params.row?.payType === "HOURLY";
-      if (params.field === BASIC_SALARY_MONTHLY_KEY && isHourly) return false;
-      if (params.field === BASIC_SALARY_HOURLY_KEY && !isHourly) return false;
-      if (params.field === HOTEL_CLUSTER_MULT_KEY && !clusterOverridable(params.row)) {
-        return false;
-      }
-      return params.colDef.editable !== false;
-    },
-    [masked, maskableKeys, clusterOverridable]
+    (params: GridCellParams) =>
+      cellEditable(params.row as PositionRow, params.colDef, editabilityCtx),
+    [editabilityCtx]
   );
 
   // The read-only Department (code) cell is a mirror of the Dept Name pick, so
@@ -416,6 +541,14 @@ export default function PositionsGrid({
 
   const handleCellKeyDown = useCallback(
     (params: GridCellParams, event: MuiEvent<React.KeyboardEvent>) => {
+      // Alt+Enter opens the row as a form, focused on the cell you were on.
+      // Deliberately a modifier: the redirect below swallows bare printable
+      // keys for type-to-edit, so a plain letter would collide with it.
+      if (event.altKey && event.key === "Enter") {
+        event.defaultMuiPrevented = true;
+        onEditRow(params.row as PositionRow, params.field);
+        return;
+      }
       const target = editRedirect.get(params.field);
       if (!target) return;
       // Leave shortcuts (Ctrl/⌘+C to copy the code, etc.) to the grid.
@@ -427,7 +560,7 @@ export default function PositionsGrid({
         openPicker(params.id, target);
       }
     },
-    [editRedirect, openPicker]
+    [editRedirect, openPicker, onEditRow]
   );
 
   // v9 reports selection as {type, ids}: an "exclude" model means everything
@@ -443,6 +576,25 @@ export default function PositionsGrid({
     [rows, onSelectionChange]
   );
 
+  // Identity matters more than content for all four of these: the grid diffs
+  // them by reference and re-runs real work when they change (see the module
+  // constants above). Kept behind memos so an unrelated parent render — a save
+  // status tick, a toast, a dialog opening — costs the grid nothing.
+  const slots = useMemo(() => ({ columnMenu: ColumnMenu }), [ColumnMenu]);
+
+  const rowGroupingModel = useMemo(
+    () => (groupByDept ? DEPT_GROUPING : NO_GROUPING),
+    [groupByDept]
+  );
+
+  const filterModel = useMemo(
+    () => ({
+      items: showInactive ? NO_FILTER_ITEMS : ACTIVE_ONLY_ITEMS,
+      quickFilterValues: quickFilter ? quickFilter.split(/\s+/) : NO_QUICK_FILTER,
+    }),
+    [showInactive, quickFilter]
+  );
+
   const initialState = useMemo<GridInitialState>(() => {
     const keysOfSection = (section: string) =>
       catalog.fields
@@ -453,7 +605,17 @@ export default function PositionsGrid({
     const controlKeys = keysOfSection("control");
     const piiKeys = keysOfSection("pii");
 
+    // Twelve Additional Cost columns is a lot of width for a family most rows
+    // leave empty — they start folded behind their summary column and expand
+    // from the chevron on its header (see COLLAPSIBLE_MONTH_FAMILIES).
+    const monthKeys = collapsibleMonthKeys();
+
     const defaults: GridInitialState = {
+      columns: {
+        columnVisibilityModel: Object.fromEntries(
+          monthKeys.map((key) => [key, false])
+        ),
+      },
       pinnedColumns: {
         left: [
           GRID_CHECKBOX_SELECTION_FIELD,
@@ -475,7 +637,17 @@ export default function PositionsGrid({
     // Deliberately computed once per mount: the grid only reads initialState
     // on mount, so later changes to restoredState must not retrigger this.
     const merged = restoredState ? { ...defaults, ...restoredState } : defaults;
-    return healPinnedBand(healPinnedBand(merged, controlKeys), piiKeys);
+    // A restored `columns` replaces the defaults wholesale, so the collapse
+    // default and the summary column's slot are re-applied over it here.
+    let healed = healCollapsedFamilies(merged, monthKeys);
+    for (const [summaryKey, vector] of Object.entries(COLLAPSIBLE_MONTH_FAMILIES)) {
+      healed = healNewColumn(healed, summaryKey, vectorKey(vector, 1));
+    }
+    // Standard Title arrived with seed v22, so any layout saved before it lists
+    // every other column and not this one — which strands it at the far right,
+    // past Vacation, instead of beside the Job Title it belongs to.
+    healed = healNewColumn(healed, "standardJobTitle", "payType");
+    return healPinnedBand(healPinnedBand(healed, controlKeys), piiKeys);
   }, []);
 
   return (
@@ -485,8 +657,8 @@ export default function PositionsGrid({
       columns={columns}
       loading={loading}
       columnGroupingModel={columnGroupingModel}
-      slots={{ columnMenu: ColumnMenu }}
-      rowGroupingModel={groupByDept ? ["departmentCode"] : []}
+      slots={slots}
+      rowGroupingModel={rowGroupingModel}
       cellSelection
       checkboxSelection
       // Clicking a cell must not clear a selection the user built to act on.
@@ -503,122 +675,9 @@ export default function PositionsGrid({
       onClipboardPasteStart={onPasteStart}
       onClipboardPasteEnd={onPasteEnd}
       initialState={initialState}
-      getRowClassName={(params) =>
-        (params.row as PositionRow | undefined)?.active === false
-          ? "pos-row--inactive"
-          : ""
-      }
-      filterModel={{
-        // Inactive positions are hidden rather than removed — they stay in the
-        // store, roll forward to next year, and come back with the toggle.
-        items: showInactive
-          ? []
-          : [{ field: "active", operator: "is", value: "true" }],
-        quickFilterValues: quickFilter ? quickFilter.split(/\s+/) : [],
-      }}
-      sx={{
-        borderRadius: 2,
-        // renderHeader owns the column title's typography (see columnFactory);
-        // this only styles the titles the grid draws itself — the group bands.
-        "& .MuiDataGrid-columnHeader": { padding: "0 8px" },
-        "& .pos-band .MuiDataGrid-columnHeaderTitle": {
-          fontWeight: 700,
-          fontSize: "0.6875rem",
-          letterSpacing: "0.09em",
-          textTransform: "uppercase",
-        },
-        "& .MuiDataGrid-columnHeaderTitleContainer": { overflow: "hidden" },
-        // Section banners: the group row is centered over its columns and
-        // tinted ~3x the columns below it, so the hierarchy reads at a glance.
-        "& .pos-band": {
-          justifyContent: "center",
-          "& .MuiDataGrid-columnHeaderTitleContainer": {
-            justifyContent: "center",
-          },
-        },
-        // Section boundaries run the full height of the grid, so you always
-        // know which block the cell you are editing belongs to.
-        "& .pos-col--sectionStart, & .pos-cell--sectionStart": {
-          borderLeft: (theme) => `2px solid ${theme.palette.divider}`,
-        },
-        "& .pos-cell--num": {
-          fontFamily: "'IBM Plex Mono', monospace",
-          fontSize: "0.8125rem",
-        },
-        "& .pos-cell--derived": { color: "text.secondary" },
-        "& .pos-cell--warn": {
-          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.25),
-          fontWeight: 700,
-        },
-        // Retained but not budgeted — visibly out of the plan without being
-        // unreadable, since you still edit these rows before switching them on.
-        "& .pos-row--inactive": {
-          opacity: 0.55,
-          fontStyle: "italic",
-        },
-        "& .pos-cell--masked": {
-          fontFamily: "'IBM Plex Mono', monospace",
-          color: "text.disabled",
-          letterSpacing: 2,
-        },
-        // Section tints — one hue per section, strong on the banner and faint
-        // on the columns it spans, which is what ties the two rows together.
-        "& .pos-band--pii": {
-          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.22),
-        },
-        "& .pos-col--pii": {
-          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.07),
-        },
-        // Employee is PII's sibling band — same hue, half the strength, so the
-        // two read as related without the identity block losing its emphasis.
-        "& .pos-band--employee": {
-          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.11),
-        },
-        "& .pos-col--employee": {
-          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.035),
-        },
-        "& .pos-band--contract": {
-          bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.22),
-        },
-        "& .pos-col--contract": {
-          bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.06),
-        },
-        "& .pos-band--seasonality": {
-          bgcolor: (theme) => alpha(theme.palette.info.main, 0.22),
-        },
-        "& .pos-col--seasonality": {
-          bgcolor: (theme) => alpha(theme.palette.info.main, 0.06),
-        },
-        "& .pos-band--basicSalary": {
-          bgcolor: (theme) => alpha(theme.palette.primary.main, 0.22),
-        },
-        "& .pos-col--basicSalary": {
-          bgcolor: (theme) => alpha(theme.palette.primary.main, 0.06),
-        },
-        "& .pos-band--vacation": {
-          bgcolor: (theme) => alpha(theme.palette.success.main, 0.22),
-        },
-        "& .pos-col--vacation": {
-          bgcolor: (theme) => alpha(theme.palette.success.main, 0.06),
-        },
-        // Blocks get their own hue outside the section palette (violet), so
-        // user-defined calculation bands read as such at a glance.
-        "& .pos-band--blocks": {
-          bgcolor: alpha("#7e57c2", 0.24),
-        },
-        "& .pos-col--blocks": {
-          bgcolor: alpha("#7e57c2", 0.07),
-        },
-        // Editable cells read as inputs (same affordance as the calendar grid).
-        "& .MuiDataGrid-cell--editable": {
-          bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04),
-          cursor: "text",
-          "&:hover": {
-            bgcolor: (theme) => alpha(theme.palette.primary.main, 0.1),
-          },
-        },
-        "& .MuiDataGrid-cell:focus-within": { outlineOffset: -2 },
-      }}
+      getRowClassName={getRowClassName}
+      filterModel={filterModel}
+      sx={GRID_SX}
     />
   );
 }

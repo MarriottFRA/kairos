@@ -15,13 +15,6 @@
 
 import type Database from "better-sqlite3-multiple-ciphers";
 import {
-  ENGINE_SCALAR_COLUMNS,
-  FieldDef,
-  PII_CORE_COLUMNS,
-  VECTOR_COLUMNS,
-  VectorName,
-} from "../../shared/positions/fields";
-import {
   BuyoutRecord,
   ComponentValueRecord,
   PiiRecord,
@@ -30,14 +23,27 @@ import {
   PositionsBatchWriteResponse,
   PositionsLoadResponse,
 } from "../../shared/positions/ipc";
+import { ClusterSyncResult } from "../../shared/positions/clusterSync";
+import { RowBefore, runClusterSync } from "./clusterSync";
 import { OuScope } from "./ouScope";
+import {
+  FieldLookup,
+  applyUpdate,
+  coerceVector,
+  splitPiiFields,
+  splitPositionFields,
+} from "./positionWrites";
 import { prepared } from "./stmtCache";
 
 type Db = InstanceType<typeof Database>;
 
 const MONTHS = 12;
 
-export type FieldLookup = Map<string, FieldDef>;
+// Re-exported so the many existing importers of positionsRepo keep working;
+// the definitions live in positionWrites so clusterSync can share them without
+// a cycle back through this module.
+export type { FieldLookup, SplitFields } from "./positionWrites";
+export { applyUpdate, splitPiiFields, splitPositionFields } from "./positionWrites";
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -45,7 +51,8 @@ export type FieldLookup = Map<string, FieldDef>;
 
 const POSITION_COLUMNS = `
   id, scenario_id, lineage_id, active,
-  department_code, job_type_code, cluster, cluster_multiplier_override, pay_type,
+  department_code, job_type_code, cluster, cluster_multiplier_override,
+  cluster_link_id, pay_type,
   headcount, fte, seasonality, monthly_base_salary, hourly_rate,
   additional_monthly_costs,
   merit_increase_pct, manual_yearly_increase, increase_month,
@@ -92,6 +99,7 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     cluster: row.cluster as string,
     clusterMultiplierOverride:
       (row.cluster_multiplier_override as number | null) ?? null,
+    clusterLinkId: (row.cluster_link_id as string) ?? "",
     payType: row.pay_type as PositionRecord["payType"],
     headcount: row.headcount as number,
     fte: row.fte as number,
@@ -273,168 +281,6 @@ export function scrubExtraValueKeys(db: Db, scope: OuScope, keys: string[]): num
 // Batch write
 // ---------------------------------------------------------------------------
 
-interface SplitFields {
-  /** SQL column -> coerced value (identifiers only ever from the static maps). */
-  columns: Map<string, unknown>;
-  /** Keys destined for the extra_values JSON blob. */
-  extras: Record<string, unknown>;
-}
-
-/**
- * Empty-cell values for engine columns whose schema default is not the type's
- * zero. Clearing "Increase Month" must mean "no increase" (13), not "increase
- * from month 0 onward"; a headcount/FTE cleared to 0 would silently zero the
- * position's whole cost rather than fall back to one. A cleared cluster
- * multiplier override MUST persist as NULL ("use the cluster's weight") — the
- * numeric-zero fallback would zero the position's whole cost instead.
- */
-const ENGINE_EMPTY_OVERRIDES: Readonly<Record<string, unknown>> = {
-  increaseMonth: 13,
-  headcount: 1,
-  fte: 1,
-  active: 1,
-  clusterMultiplierOverride: null,
-};
-
-/**
- * Coerce one engine scalar. Every column this feeds is NOT NULL (see
- * POSITIONS_VALUE_TABLES_SQL) except cluster_multiplier_override (nullable by
- * design, cleared via its ENGINE_EMPTY_OVERRIDES entry), so a cleared or
- * absent cell resolves to the column's default — returning an unmapped null
- * here fails the whole batch transaction.
- */
-function coerceScalar(key: string, def: FieldDef | undefined, value: unknown): unknown {
-  if (value === undefined || value === null || value === "") {
-    if (key in ENGINE_EMPTY_OVERRIDES) return ENGINE_EMPTY_OVERRIDES[key];
-    switch (def?.dataType) {
-      case "NUMBER":
-      case "PERCENT":
-      case "INTEGER":
-        return 0;
-      default:
-        return "";
-    }
-  }
-  switch (def?.dataType) {
-    case "NUMBER":
-    case "PERCENT": {
-      const num = Number(value);
-      return Number.isFinite(num) ? num : 0;
-    }
-    case "INTEGER": {
-      const num = Math.trunc(Number(value));
-      return Number.isFinite(num) ? num : 0;
-    }
-    // SQLite has no boolean type — the column is INTEGER 0/1.
-    case "BOOLEAN":
-      return value === false || value === 0 || value === "false" ? 0 : 1;
-    default:
-      return typeof value === "string" ? value : JSON.stringify(value);
-  }
-}
-
-function coerceVector(value: unknown): string {
-  const out: number[] = new Array(MONTHS).fill(0);
-  if (Array.isArray(value)) {
-    for (let m = 0; m < MONTHS; m++) {
-      const num = Number(value[m]);
-      out[m] = Number.isFinite(num) ? num : 0;
-    }
-  }
-  return JSON.stringify(out);
-}
-
-/**
- * Split catalog-keyed fields into typed columns + extras for the positions
- * table. Vector names ("seasonality", ...) are accepted alongside catalog
- * keys. Unknown keys throw — accuracy over silent loss.
- */
-function splitPositionFields(
-  fields: Record<string, unknown>,
-  lookup: FieldLookup
-): SplitFields {
-  const columns = new Map<string, unknown>();
-  const extras: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(fields)) {
-    if (key in VECTOR_COLUMNS) {
-      columns.set(VECTOR_COLUMNS[key as VectorName], coerceVector(value));
-      continue;
-    }
-    const def = lookup.get(key);
-    if (!def) throw new Error(`Unknown position field: ${key}`);
-
-    if (def.storage === "ENGINE") {
-      const column = ENGINE_SCALAR_COLUMNS[key];
-      if (!column) throw new Error(`Field '${key}' has no engine column mapping`);
-      // The pay_type CHECK would reject junk; normalize here instead.
-      if (key === "payType") {
-        columns.set(column, value === "HOURLY" ? "HOURLY" : "SALARIED");
-      } else {
-        columns.set(column, coerceScalar(key, def, value));
-      }
-    } else if (def.storage === "POSITION_EXTRA") {
-      extras[key] = value === undefined ? null : value;
-    } else {
-      throw new Error(`Field '${key}' does not belong on the positions table`);
-    }
-  }
-
-  return { columns, extras };
-}
-
-function splitPiiFields(
-  fields: Record<string, unknown>,
-  lookup: FieldLookup
-): SplitFields {
-  const columns = new Map<string, unknown>();
-  const extras: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(fields)) {
-    const def = lookup.get(key);
-    if (!def) throw new Error(`Unknown PII field: ${key}`);
-    if (def.storage === "PII_CORE") {
-      const column = PII_CORE_COLUMNS[key];
-      if (!column) throw new Error(`Field '${key}' has no PII column mapping`);
-      columns.set(column, value === undefined || value === "" ? null : value);
-    } else if (def.storage === "PII_EXTRA") {
-      extras[key] = value === undefined ? null : value;
-    } else {
-      throw new Error(`Field '${key}' does not belong on the PII table`);
-    }
-  }
-
-  return { columns, extras };
-}
-
-/** Dynamic sparse UPDATE with sorted columns for statement-cache reuse. */
-function applyUpdate(
-  db: Db,
-  table: "positions" | "position_pii",
-  idColumn: string,
-  id: string,
-  scope: OuScope,
-  split: SplitFields,
-  stamp: string
-): number {
-  const columnNames = [...split.columns.keys()].sort();
-  const hasExtras = Object.keys(split.extras).length > 0;
-  if (columnNames.length === 0 && !hasExtras) return 0;
-
-  const sets = columnNames.map((name) => `${name} = ?`);
-  if (hasExtras) sets.push(`extra_values = json_patch(extra_values, ?)`);
-  sets.push(`updated_at = ?`);
-
-  const sql = `UPDATE ${table} SET ${sets.join(", ")}
-     WHERE ${idColumn} = ? AND ou = ? AND deleted_at IS NULL`;
-
-  const params: unknown[] = columnNames.map((name) => split.columns.get(name));
-  if (hasExtras) params.push(JSON.stringify(split.extras));
-  params.push(stamp, id, scope.ou);
-
-  return prepared(db, sql).run(...params).changes;
-}
-
 /** Wire-field → column map for component_values patches. Column names come
  *  exclusively from here — never from the IPC payload. */
 const COMPONENT_VALUE_COLUMNS: Record<string, string> = {
@@ -458,13 +304,19 @@ export function batchWrite(
   lookup: FieldLookup,
   /** Valid component-definition ids for this OU (from the plaintext store).
    *  Patches referencing anything else throw — accuracy over silent loss. */
-  componentDefIds?: ReadonlySet<string>
+  componentDefIds?: ReadonlySet<string>,
+  /** The plaintext store. Supplied by the handler to enable cluster-position
+   *  sync: without it a write is an ordinary single-hotel write, which is what
+   *  the tests that predate the feature (and any caller that has no structure
+   *  handle) get. */
+  structureDb?: Db
 ): PositionsBatchWriteResponse {
   const scenarioId = String(request.scenarioId ?? "");
   if (!scenarioId) throw new Error("A scenarioId is required");
 
   const stamp = new Date().toISOString();
   let applied = 0;
+  let clusterSync: ClusterSyncResult | undefined;
 
   // A position created in the grid starts its own lineage; only a scenario
   // clone carries an existing lineage_id forward.
@@ -483,6 +335,13 @@ export function batchWrite(
   );
 
   db.transaction(() => {
+    // Cluster assignment BEFORE the batch, for every row it touches: joining,
+    // leaving or switching a cluster is only detectable by comparison, and the
+    // snapshot has to be taken inside the transaction that changes it.
+    const before = structureDb
+      ? snapshotClusterState(db, scope, request)
+      : new Map<string, RowBefore>();
+
     for (const create of request.creates ?? []) {
       ensurePosition.run(create.id, scope.ou, scenarioId, create.id, stamp);
       applied += applyUpdate(
@@ -596,9 +455,84 @@ export function batchWrite(
           WHERE position_id = ? AND ou = ? AND deleted_at IS NOT NULL`
       ).run(stamp, id, scope.ou);
     }
+
+    // Cluster positions last, inside the same transaction: the sibling hotels'
+    // rows and the user's own edit land together or not at all.
+    if (structureDb) {
+      clusterSync = runClusterSync(
+        { structureDb, valuesDb: db, stamp },
+        {
+          sourceScope: scope,
+          scenarioId,
+          before,
+          positionFields: fieldsById(request, "position"),
+          piiFields: fieldsById(request, "pii"),
+          componentPatches: request.componentValuePatches ?? [],
+          softDeleteIds: request.softDeleteIds ?? [],
+          restoreIds: request.restoreIds ?? [],
+          sourceLookup: lookup,
+        }
+      );
+    }
   })();
 
-  return { updatedAt: stamp, applied };
+  return { updatedAt: stamp, applied, clusterSync };
+}
+
+/** Cluster assignment + group of every row this request touches, read before
+ *  any of it is applied. */
+function snapshotClusterState(
+  db: Db,
+  scope: OuScope,
+  request: PositionsBatchWriteRequest
+): Map<string, RowBefore> {
+  const ids = new Set<string>([
+    ...(request.creates ?? []).map((create) => create.id),
+    ...(request.positionPatches ?? []).map((patch) => patch.id),
+    ...(request.piiPatches ?? []).map((patch) => patch.positionId),
+    ...(request.componentValuePatches ?? []).map((patch) => patch.positionId),
+    ...(request.softDeleteIds ?? []),
+    ...(request.restoreIds ?? []),
+  ]);
+
+  const before = new Map<string, RowBefore>();
+  const read = prepared(
+    db,
+    `SELECT cluster, cluster_link_id FROM positions WHERE id = ? AND ou = ?`
+  );
+  for (const id of ids) {
+    const row = read.get(id, scope.ou) as
+      | { cluster: string; cluster_link_id: string }
+      | undefined;
+    before.set(id, {
+      cluster: row?.cluster ?? "",
+      clusterLinkId: row?.cluster_link_id ?? "",
+    });
+  }
+  return before;
+}
+
+/** Merge creates and patches into one catalog-keyed payload per row — what a
+ *  sibling needs to receive, regardless of which lane it arrived in. */
+function fieldsById(
+  request: PositionsBatchWriteRequest,
+  lane: "position" | "pii"
+): Map<string, Record<string, unknown>> {
+  const out = new Map<string, Record<string, unknown>>();
+  const add = (id: string, fields?: Record<string, unknown>) => {
+    if (!fields) return;
+    out.set(id, { ...(out.get(id) ?? {}), ...fields });
+  };
+
+  for (const create of request.creates ?? []) {
+    add(create.id, lane === "position" ? create.fields : create.pii);
+  }
+  if (lane === "position") {
+    for (const patch of request.positionPatches ?? []) add(patch.id, patch.fields);
+  } else {
+    for (const patch of request.piiPatches ?? []) add(patch.positionId, patch.fields);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,10 +596,15 @@ export function cloneScenarioValues(
 
     const insertPosition = prepared(
       db,
+      // cluster_link_id carries forward so next year's rows stay one cluster
+      // group across the hotels (each hotel clones its own scenario, and the
+      // shared id is what re-joins them). Sibling sync always resolves its
+      // targets to one scenario per hotel for the row's YEAR, so the older
+      // year's rows — which hold the same link id — are never written to.
       `INSERT INTO positions (
          id, ou, scenario_id, lineage_id, active,
          department_code, job_type_code, cluster, cluster_multiplier_override,
-         pay_type, headcount, fte,
+         cluster_link_id, pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
@@ -673,7 +612,7 @@ export function cloneScenarioValues(
          extra_values, updated_at, deleted_at)
        SELECT ?, ou, ?, lineage_id, active,
          department_code, job_type_code, cluster, cluster_multiplier_override,
-         pay_type, headcount, fte,
+         cluster_link_id, pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,

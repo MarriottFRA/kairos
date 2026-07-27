@@ -9,7 +9,11 @@
  */
 
 import { IpcHandler, IpcResult } from "../types";
-import { getCalendarYear, localDbHandle } from "../../local_db";
+import {
+  getCalendarYear,
+  getPositionDefaults,
+  localDbHandle,
+} from "../../local_db";
 import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import { getSsSchemes } from "../../main/positions/structureRepo";
@@ -95,10 +99,14 @@ export function createSocialSecurityHandlers(): Record<string, IpcHandler> {
       if (!scenarioId) throw new Error("Missing scenario id.");
       const ssSchemeId = request?.ssSchemeId as string | undefined;
       if (!ssSchemeId) throw new Error("Missing scheme id.");
-      // Calendars were saved under either OU form (mirrors the recalc handler).
+      // Calendars and position defaults were saved under either OU form
+      // (mirrors the recalc handler).
       const getCalendarEitherForm = async (ou: string, year: number) =>
         (await getCalendarYear(ou, year)) ??
         (await getCalendarYear(ou.replace(/^OU/, ""), year));
+      const getDefaultsEitherForm = async (ou: string, year: number) =>
+        (await getPositionDefaults(ou, year)) ??
+        (await getPositionDefaults(ou.replace(/^OU/, ""), year));
       const result = await computeNiOpeningBalances(
         localDbHandle(),
         secureDb(),
@@ -106,7 +114,8 @@ export function createSocialSecurityHandlers(): Record<string, IpcHandler> {
         scenarioId,
         ssSchemeId,
         getCalendarEitherForm,
-        new Date().toISOString()
+        new Date().toISOString(),
+        getDefaultsEitherForm
       );
       return ok(result);
     } catch (error) {

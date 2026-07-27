@@ -22,6 +22,7 @@ import {
   PositionsBatchWriteRequest,
   SECURE_DB_LOCKED,
 } from "../shared/positions/ipc";
+import { ClusterSyncResult } from "../shared/positions/clusterSync";
 import { RowPatch } from "../shared/positions/rowModel";
 import { batchWrite } from "./positionsService";
 
@@ -110,7 +111,11 @@ export class PositionsWriteQueue {
   constructor(
     private readonly ou: string,
     private readonly scenarioId: string,
-    private readonly onChange: (snapshot: QueueSnapshot) => void
+    private readonly onChange: (snapshot: QueueSnapshot) => void,
+    /** Called when a flush reported cluster-position effects in OTHER hotels
+     *  (rows mirrored out, values that could not be mirrored). Optional: the
+     *  queue's job is the write, and reporting it is the page's. */
+    private readonly onClusterSync?: (result: ClusterSyncResult) => void
   ) {}
 
   // ── Enqueue ─────────────────────────────────────────────────────
@@ -291,7 +296,17 @@ export class PositionsWriteQueue {
 
     this.flushing = (async () => {
       try {
-        await batchWrite(request);
+        const response = await batchWrite(request);
+        const sync = response?.clusterSync;
+        // Only surface a sync that actually did something cross-hotel: every
+        // write to a clustered row returns a (usually empty) result.
+        if (
+          sync &&
+          this.onClusterSync &&
+          (sync.created.length > 0 || sync.skips.length > 0 || sync.unlinked > 0)
+        ) {
+          this.onClusterSync(sync);
+        }
         this.retryCount = 0;
         this.lastError = null;
         for (const rowId of this.rowIdsOf(work)) {

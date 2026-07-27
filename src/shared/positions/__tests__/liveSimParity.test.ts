@@ -9,11 +9,18 @@ import { beforeEach, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import {
   buildDefaultCalendar,
+  calendarTotals,
   DEFAULT_WEEKEND_MASK,
 } from "../../calendar";
+import {
+  buildDefaultPositionDefaults,
+  fullTimeReference,
+  resolvePositionDefaults,
+} from "../../positionDefaults";
 import { compile, simulate } from "../../engine/simulate";
 import { PositionId } from "../../engine/types";
 import { applyBlocksStructureV12 } from "../../../main/blocks/schema";
+import { KPI_DRIVERS_SQL } from "../../../main/kpiDrivers/schema";
 import {
   ensureBaseSalaryDef,
   listBlocks,
@@ -51,6 +58,44 @@ const NOW = { now: "2026-01-01T00:00:00.000Z" };
 const YEAR = 2027;
 const CALENDAR = buildDefaultCalendar(SCOPE.ou, YEAR, DEFAULT_WEEKEND_MASK);
 
+// The full-time contract FTE is derived against. The loader builds this itself
+// from the hotel-year defaults (falling back to the built-in ones resolved
+// against the scenario calendar, which is what these fixtures get, having saved
+// none); the renderer reads it from the same handler and hands it to the sim.
+// Parity requires the two to be the SAME reference — a live sim measuring
+// against a different full-timer would silently disagree on every FTE-based
+// pool and every FTE stat.
+const FULL_TIME = fullTimeReference(
+  resolvePositionDefaults(buildDefaultPositionDefaults(SCOPE.ou, YEAR), CALENDAR)
+);
+
+/** Contract day counts that make a full-year row exactly one FTE: the same
+ *  productive year the reference is built from, at the full-time day length. */
+const CAL_TOTALS = calendarTotals(CALENDAR);
+const FULL_TIME_CONTRACT = {
+  contractYearlyDays: CAL_TOTALS.calendarDays,
+  contractDaysOff: CAL_TOTALS.weekendDays,
+  contractPubHolidays: CAL_TOTALS.publicHolidays,
+  dailyContractHours: FULL_TIME.dailyHours,
+};
+
+/** The gratuity pot: a KPI driver whose cached series is already multiplied. */
+const GRAT_DRIVER = "kpi-gratuities";
+const GRAT_SERIES = new Array(12).fill(1200);
+
+/** Seed the KPI precalc cache the loader reads (the renderer gets the same
+ *  numbers from its own drivers list — see the kpiSeries lambda below). */
+function seedKpiSeries(db: Db): void {
+  const insert = db.prepare(
+    `INSERT INTO kpi_driver_values
+       (driver_id, ou, dept_key, period, value, source_import_id, computed_at)
+     VALUES (?, ?, '*', ?, ?, NULL, ?)`
+  );
+  for (let period = 1; period <= 12; period++) {
+    insert.run(GRAT_DRIVER, SCOPE.ou, period, GRAT_SERIES[period - 1], NOW.now);
+  }
+}
+
 let structureDb: Db;
 let valuesDb: Db;
 let scenarioId: string;
@@ -60,6 +105,9 @@ beforeEach(() => {
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   applyBlocksStructureV12(structureDb);
   applyHotelClustersV13(structureDb);
+  // The pooled block reads a KPI's cached series through the loader, so the
+  // parity fixture needs the KPI tables the plaintext store carries.
+  structureDb.exec(KPI_DRIVERS_SQL);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
   scenarioId = saveScenario(structureDb, SCOPE, { year: YEAR, label: "Planning" }).id;
@@ -112,6 +160,29 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     { blockType: "CUSTOM_MONTHLY", label: "Seasonal", accountCode: "518000", accountLocked: true, increaseAware: true },
     NOW
   );
+  // A pooled block whose pot comes from a KPI and whose eligibility is a rule
+  // with no filters — every position shares it, nothing is stored per row.
+  seedKpiSeries(structureDb);
+  const poolKpiId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "POOL_SPREAD", label: "Gratuities", accountCode: "601000",
+      accountLocked: true, poolSource: "KPI", poolKpiDriverId: GRAT_DRIVER,
+      poolSpreadBase: "HEADCOUNT", poolEligibilityMode: "RULE",
+    },
+    NOW
+  );
+  // …and one with a typed pot, shared only by the rows that are ticked.
+  const poolManualId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "POOL_SPREAD", label: "Service charge", accountCode: "602000",
+      accountLocked: true, poolSource: "MANUAL",
+      poolMonthlyAmounts: new Array(12).fill(600),
+      poolSpreadBase: "FTE", poolEligibilityMode: "MANUAL",
+    },
+    NOW
+  );
 
   const blocks = listBlocks(structureDb, SCOPE);
   const lookup = buildFieldMap(getFieldCatalog(structureDb, SCOPE));
@@ -123,25 +194,36 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       ou: SCOPE.ou,
       scenarioId,
       creates: [
+        // pos-1 fills in its posting accounts, pos-2 leaves them blank — so the
+        // parity check covers both the routed and the calculate-but-don't-post
+        // path through applyPositionAccounts.
         {
           id: "pos-1",
           fields: {
             departmentCode: "0410", jobTypeCode: "MGR", cluster: "Rooms",
-            payType: "SALARIED", headcount: 2, fte: 1, monthlyBaseSalary: 3200,
+            payType: "SALARIED", headcount: 2, monthlyBaseSalary: 3200,
             seasonality: [1, 1, 1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1],
             vacationMonthlyWeights: [0, 0, 0.5, 0, 0, 0.25, 0, 0, 0.25, 0, 0, 0],
-            vacationDays: 21, dailyContractHours: 8, yearlyHoursWorked: 1900,
+            // Contract days feed the derived FTE, which the FTE-based pooled
+            // block below spreads over — a row without them is 0 FTE and gets
+            // no share.
+            ...FULL_TIME_CONTRACT,
+            vacationDays: 21, yearlyHoursWorked: 1900,
             meritIncreasePct: 0.06, increaseMonth: 7,
+            salaryAccountCode: "A511000", headCountAccount: "A972100",
+            workingHoursAccount: "A972200", accrualAccount: "A512000",
+            benefitsAccountCode: "A513000",
           },
         },
         {
           id: "pos-2",
           fields: {
             departmentCode: "1310", jobTypeCode: "ASC", cluster: "F&B",
-            payType: "HOURLY", headcount: 1, fte: 0.8, hourlyRate: 21.5,
+            payType: "HOURLY", headcount: 1, hourlyRate: 21.5,
             seasonality: new Array(12).fill(1),
             vacationMonthlyWeights: new Array(12).fill(1 / 12),
-            vacationDays: 14, dailyContractHours: 8, yearlyHoursWorked: 1700,
+            ...FULL_TIME_CONTRACT,
+            vacationDays: 14, yearlyHoursWorked: 1700,
           },
         },
       ],
@@ -165,6 +247,9 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         { positionId: "pos-2", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 85 } },
         { positionId: "pos-2", componentDefId: `${multSalaryId}:cost`, fields: { rate: 0.08 } },
         { positionId: "pos-2", componentDefId: `${countRateId}:cost`, fields: { qty: 22, unitRate: 4 } },
+        // The pool tick box rides the rate slot: pos-2 is in the service-charge
+        // pool, pos-1 is deliberately not (and has no row at all).
+        { positionId: "pos-2", componentDefId: `${poolManualId}:cost`, fields: { rate: 1 } },
       ],
     },
     lookup,
@@ -200,9 +285,15 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     definitions: getComponentDefinitions(structureDb, SCOPE),
     ssSchemes: getSsSchemes(structureDb, SCOPE),
     calendarYear: CALENDAR,
-    kpiSeries: () => [],
+    // The renderer's own copy of the cached series — same numbers the loader
+    // reads out of kpi_driver_values, which is what parity is testing.
+    kpiSeries: (driverId) =>
+      driverId === GRAT_DRIVER
+        ? [{ deptKey: "*", values: GRAT_SERIES }]
+        : [],
     scenarioId,
     ou: SCOPE.ou,
+    fullTime: FULL_TIME,
   });
   expect(live.errors).toBeNull();
 
@@ -234,8 +325,8 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 8 blocks + 1 dual stat line, × 2 positions.
-  expect(comparedLines).toBe(18);
+  // 10 blocks + 1 dual stat line, × 2 positions.
+  expect(comparedLines).toBe(22);
 
   // Per-row account override (unlocked Meals cost account): pos-1 posts to its
   // own account, pos-2 falls back to the block default — visible in the
@@ -258,6 +349,28 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   // excluded only from persisted output).
   const vacLevy = live.results.get("pos-1")!.get(`${multVacId}:cost`)!;
   expect(vacLevy.total).toBeGreaterThan(0);
+
+  // The pooled gratuity fund: 1200/month split by headcount (pos-1 counts 2,
+  // pos-2 counts 1) and gated by working months. The whole pot always lands.
+  const gratOne = live.results.get("pos-1")!.get(`${poolKpiId}:cost`)!;
+  const gratTwo = live.results.get("pos-2")!.get(`${poolKpiId}:cost`)!;
+  expect(gratOne.months[0]).toBeCloseTo(800, 9); // Jan: 1200 × 2/3
+  expect(gratTwo.months[0]).toBeCloseTo(400, 9); // Jan: 1200 × 1/3
+  expect(gratOne.months[3]).toBeCloseTo(600, 9); // Apr: pos-1 half-active → 1/2
+  expect(gratOne.months[4]).toBe(0); // May: pos-1 dark…
+  expect(gratTwo.months[4]).toBeCloseTo(1200, 9); // …so pos-2 takes it all
+  for (let m = 0; m < 12; m++) {
+    expect(gratOne.months[m] + gratTwo.months[m]).toBeCloseTo(1200, 9);
+  }
+  // Merit does not touch a share of a fixed pot (contrast Uniforms above).
+  expect(gratOne.months[7] + gratTwo.months[7]).toBeCloseTo(1200, 9);
+
+  // The manual pool: only pos-2 is ticked, so it takes the whole 600 and
+  // pos-1 books nothing despite being the bigger row.
+  expect(live.results.get("pos-1")!.get(`${poolManualId}:cost`)!.total).toBe(0);
+  expect(
+    live.results.get("pos-2")!.get(`${poolManualId}:cost`)!.months[0]
+  ).toBeCloseTo(600, 9);
 });
 
 it("resolves a hotel-cluster weight identically in both paths and flexes block totals", async () => {
@@ -299,10 +412,13 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
           id: "pos-1",
           fields: {
             departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
-            payType: "SALARIED", headcount: 1, fte: 1, monthlyBaseSalary: 3000,
+            payType: "SALARIED", headcount: 1, monthlyBaseSalary: 3000,
             seasonality: new Array(12).fill(1),
             vacationMonthlyWeights: new Array(12).fill(1 / 12),
-            dailyContractHours: 8, yearlyHoursWorked: 1800,
+            // A full-time, full-year contract — so the derived FTE is exactly
+            // 1 and the flexed stat below is purely the cluster weight.
+            ...FULL_TIME_CONTRACT,
+            yearlyHoursWorked: 1800,
           },
         },
         {
@@ -311,10 +427,11 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
           fields: {
             departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
             clusterMultiplierOverride: 0.9,
-            payType: "SALARIED", headcount: 1, fte: 1, monthlyBaseSalary: 3000,
+            payType: "SALARIED", headcount: 1, monthlyBaseSalary: 3000,
             seasonality: new Array(12).fill(1),
             vacationMonthlyWeights: new Array(12).fill(1 / 12),
-            dailyContractHours: 8, yearlyHoursWorked: 1800,
+            ...FULL_TIME_CONTRACT,
+            yearlyHoursWorked: 1800,
           },
         },
       ],
@@ -365,6 +482,7 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
     scenarioId,
     ou: SCOPE.ou,
     hotelClusters,
+    fullTime: FULL_TIME,
   });
   expect(live.errors).toBeNull();
 

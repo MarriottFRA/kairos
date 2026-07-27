@@ -72,6 +72,51 @@ export function dailyHoursFromWeekly(weeklyHours: number): number {
 }
 
 /**
+ * The full-time yardstick every position's FTE is measured against — the two
+ * constants the VBA held on the Menu sheet (`Menu!$O$14` and `FT_Hours`).
+ *
+ * They are not a new setting: the hotel-year defaults already state exactly this
+ * (what a full-time contract at this hotel looks like), so FTE reads off the
+ * same numbers a new position is seeded with. Keeping one source means a hotel
+ * that moves to a 39-hour week changes it in one place and every FTE follows.
+ */
+export interface FullTimeReference {
+  /** Productive days a full-timer has: Yearly Days − Days Off − Public Holidays. */
+  productiveDays: number;
+  /** Hours a full-timer works a day: Weekly Hours ÷ 5. */
+  dailyHours: number;
+}
+
+/** An FTE reference that yields 0 — what a row shows before defaults load. */
+export const EMPTY_FULL_TIME_REFERENCE: FullTimeReference = {
+  productiveDays: 0,
+  dailyHours: 0,
+};
+
+/**
+ * Read the full-time yardstick out of a hotel-year's defaults. Pass the
+ * *resolved* set (see resolvePositionDefaults) so linked fields carry the
+ * calendar's numbers rather than whatever was last persisted.
+ *
+ * Note this deliberately ignores the defaults' own Daily Hours field: that one
+ * is per-position seed material and can be pinned away from the week, whereas
+ * the FTE denominator has to stay the hotel's standard full-time day.
+ */
+export function fullTimeReference(
+  defaults: PositionDefaults | null | undefined
+): FullTimeReference {
+  if (!defaults) return EMPTY_FULL_TIME_REFERENCE;
+  const productiveDays =
+    defaults.fields.yearlyDays.value -
+    defaults.fields.daysOff.value -
+    defaults.fields.pubHolidays.value;
+  return {
+    productiveDays: productiveDays > 0 ? productiveDays : 0,
+    dailyHours: dailyHoursFromWeekly(defaults.weeklyHours),
+  };
+}
+
+/**
  * A brand-new defaults set for (ou, year): every field linked, weekly hours at
  * the 40h default. Values are placeholders until `resolvePositionDefaults` runs
  * them against a calendar.

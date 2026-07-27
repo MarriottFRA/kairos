@@ -1,0 +1,411 @@
+/**
+ * One line of the Edit Position form.
+ *
+ * Picks a control from the column's own type and options, seeds it from the
+ * column's valueGetter, and commits through its valueParser + valueSetter (see
+ * gridValueBridge). It therefore inherits every field rule the grid has — the
+ * PERCENT scale, ISO dates, the auto/override drop rules, PII dots — instead of
+ * restating any of them.
+ *
+ * Two conventions carry the form's speed:
+ *   - read-only lines are `tabIndex={-1}`, so Tab visits only the fields you can
+ *     actually change (the grid, by contrast, stops on every locked cell);
+ *   - text and numbers are held as a draft STRING while focused and committed on
+ *     blur/Enter, so a half-typed "0." is never normalised out from under the
+ *     caret (the same trick KpiDriverDialog uses for its multiplier).
+ */
+
+import { useEffect, useState } from "react";
+import Autocomplete, { createFilterOptions } from "@mui/material/Autocomplete";
+import Box from "@mui/material/Box";
+import InputAdornment from "@mui/material/InputAdornment";
+import MenuItem from "@mui/material/MenuItem";
+import Switch from "@mui/material/Switch";
+import TextField from "@mui/material/TextField";
+import Tooltip from "@mui/material/Tooltip";
+import Typography from "@mui/material/Typography";
+import IconButton from "@mui/material/IconButton";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import type { GridColDef } from "@mui/x-data-grid-premium";
+import { FieldDef } from "../../shared/positions/fields";
+import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { PositionRow } from "../../shared/positions/rowModel";
+import AccountAutocomplete from "../common/AccountAutocomplete";
+import {
+  commitValue,
+  dayToDate,
+  displayValue,
+  editValue,
+  optionsOf,
+  rawEditText,
+} from "./gridValueBridge";
+
+/** Above this many choices a plain menu stops being faster than typing.
+ *  Same threshold the grid's edit cells use. */
+const SEARCHABLE_OPTION_THRESHOLD = 12;
+
+const filterDepartments = createFilterOptions<DepartmentOption>({
+  limit: 50,
+  stringify: (option) => `${option.code} ${option.name}`,
+});
+
+/** Fields that show a derived value until you type over them, and fall back to
+ *  it when cleared. The form gives them an explicit "revert to auto" button —
+ *  clearing the cell is the grid's only gesture for this and it is easy to
+ *  miss, since sanitizeRow puts the old number straight back on most numerics. */
+const AUTO_FIELDS: ReadonlySet<string> = new Set([
+  "yearlyHoursWorked",
+  "clusterMultiplierOverride",
+]);
+
+export interface PositionFormFieldProps {
+  column: GridColDef<PositionRow>;
+  /** Absent for block slots, which have no catalog def. */
+  def?: FieldDef;
+  /** Always the live row from page state, never a local draft copy. */
+  row: PositionRow;
+  label: string;
+  unit?: string | null;
+  hint?: string | null;
+  editable: boolean;
+  /** Extra explanation for a locked field — why it is locked, not what it is. */
+  lockNote?: string | null;
+  /** Flags a value that needs attention (vacation weights off 100%). */
+  warn?: boolean;
+  /** Month cells: label above, tighter box. */
+  dense?: boolean;
+  departments: DepartmentOption[];
+  accounts: AccountOption[];
+  /**
+   * Hands the dialog a function that applies this edit, rather than a finished
+   * row. The dialog holds the authoritative row and calls it, so two commits
+   * landing in the same tick (Enter blurs one field and focuses the next)
+   * compose instead of the second silently reverting the first.
+   */
+  onCommit: (apply: (current: PositionRow) => PositionRow) => void;
+}
+
+export default function PositionFormField({
+  column,
+  def,
+  row,
+  label,
+  unit,
+  hint,
+  editable,
+  lockNote,
+  warn,
+  dense,
+  departments,
+  accounts,
+  onCommit,
+}: PositionFormFieldProps) {
+  // null = not being edited, so the box shows the formatted cell value.
+  const [draft, setDraft] = useState<string | null>(null);
+  // A row swap under a focused input (Alt+Down to the next position) must not
+  // carry the previous row's half-typed text across.
+  useEffect(() => {
+    setDraft(null);
+  }, [row.id]);
+
+  // The column's setter returns the row untouched when it decides the edit is a
+  // no-op (an echoed cluster weight or derived manhours), and the dialog skips
+  // the write on that identity — so "focus a field, tab straight out" never
+  // enqueues anything.
+  const commit = (raw: unknown) => {
+    onCommit((current) => commitValue(column, current, raw));
+  };
+
+  const commitDraft = () => {
+    if (draft === null) return;
+    const text = draft.trim();
+    setDraft(null);
+    commit(text === "" ? null : text);
+  };
+
+  const shared = { size: "small" as const, fullWidth: true };
+  const rowProps = { field: column.field, label, unit, hint, dense };
+
+  if (!editable) {
+    return (
+      <FieldRow {...rowProps}>
+        <Tooltip title={lockNote ?? hint ?? ""} placement="top-start">
+          <Typography
+            variant="body2"
+            tabIndex={-1}
+            sx={{
+              px: 0.75,
+              py: 0.5,
+              minHeight: 30,
+              color: warn ? "error.main" : "text.secondary",
+              fontVariantNumeric: "tabular-nums",
+              borderBottom: "1px dashed",
+              borderColor: "divider",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {displayValue(column, row) || "—"}
+          </Typography>
+        </Tooltip>
+      </FieldRow>
+    );
+  }
+
+  const value = editValue(column, row);
+  const options = optionsOf(column);
+  const source = def?.dropdownSource;
+
+  // ── Boolean ─────────────────────────────────────────────────────────
+  if (def?.dataType === "BOOLEAN" || column.type === "boolean") {
+    return (
+      <FieldRow {...rowProps}>
+        <Switch
+          size="small"
+          checked={value === true || value === 1}
+          slotProps={{ input: { "aria-label": label } }}
+          onChange={(event) => commit(event.target.checked)}
+        />
+      </FieldRow>
+    );
+  }
+
+  // ── Accounts ────────────────────────────────────────────────────────
+  // Block account cells have no catalog def; they offer every account, matching
+  // the grid's BlockAccountEditCell.
+  const isAccountCell =
+    source?.kind === "accounts" ||
+    (!def && /:(?:account|statsAccount)$/.test(column.field));
+  if (isAccountCell && accounts.length > 0) {
+    return (
+      <FieldRow {...rowProps}>
+        <AccountAutocomplete
+          options={accounts}
+          filter={source?.kind === "accounts" ? source.filter : null}
+          value={typeof value === "string" ? value : ""}
+          onChange={(code) => commit(code)}
+          size="small"
+          openOnFocus
+          sx={{ "& .MuiInputBase-root": { fontSize: "0.8125rem" } }}
+        />
+      </FieldRow>
+    );
+  }
+
+  // ── Departments ─────────────────────────────────────────────────────
+  if (source?.kind === "departments" && departments.length > 0) {
+    const name = typeof value === "string" ? value : "";
+    const known = name ? departments.find((option) => option.name === name) : null;
+    // A name from unsynced/legacy data stays selectable rather than vanishing.
+    const orphan = name && !known ? { code: "", name } : null;
+    return (
+      <FieldRow {...rowProps}>
+        <Autocomplete<DepartmentOption>
+          options={orphan ? [orphan, ...departments] : departments}
+          value={known ?? orphan}
+          openOnFocus
+          autoHighlight
+          filterOptions={filterDepartments}
+          getOptionLabel={(option) => option.name}
+          isOptionEqualToValue={(option, picked) => option.name === picked.name}
+          onChange={(_event, picked) => commit(picked?.name ?? "")}
+          slotProps={{ paper: { sx: { minWidth: 340 } } }}
+          renderInput={(params) => (
+            <TextField {...params} {...shared} placeholder="Search department…" />
+          )}
+        />
+      </FieldRow>
+    );
+  }
+
+  // ── Closed lists ────────────────────────────────────────────────────
+  if (options) {
+    if (options.length > SEARCHABLE_OPTION_THRESHOLD) {
+      const current = options.find((option) => option.value === value) ?? null;
+      return (
+        <FieldRow {...rowProps}>
+          <Autocomplete
+            options={options}
+            value={current}
+            openOnFocus
+            autoHighlight
+            getOptionLabel={(option) => option.label}
+            isOptionEqualToValue={(option, picked) => option.value === picked.value}
+            onChange={(_event, picked) => commit(picked?.value ?? null)}
+            slotProps={{ paper: { sx: { minWidth: 300 } } }}
+            renderInput={(params) => <TextField {...params} {...shared} />}
+          />
+        </FieldRow>
+      );
+    }
+    return (
+      <FieldRow {...rowProps}>
+        <TextField
+          {...shared}
+          select
+          value={options.some((option) => option.value === value) ? value : ""}
+          onChange={(event) => commit(event.target.value)}
+        >
+          {options.map((option) => (
+            <MenuItem key={String(option.value)} value={option.value as string | number}>
+              {option.label}
+            </MenuItem>
+          ))}
+        </TextField>
+      </FieldRow>
+    );
+  }
+
+  // ── Date ────────────────────────────────────────────────────────────
+  if (def?.dataType === "DATE" || column.type === "date") {
+    return (
+      <FieldRow {...rowProps}>
+        <TextField
+          {...shared}
+          type="date"
+          value={value instanceof Date ? rawEditText(column, def, row) : ""}
+          onChange={(event) => {
+            const text = event.target.value;
+            commit(text === "" ? null : dayToDate(text));
+          }}
+        />
+      </FieldRow>
+    );
+  }
+
+  // ── Text / numbers ──────────────────────────────────────────────────
+  const numeric =
+    def?.dataType === "NUMBER" ||
+    def?.dataType === "INTEGER" ||
+    def?.dataType === "PERCENT" ||
+    (!def && column.type === "number");
+  const isAuto = AUTO_FIELDS.has(column.field);
+  const overridden =
+    isAuto && row[column.field] !== null && row[column.field] !== undefined;
+
+  return (
+    <FieldRow {...rowProps}>
+      <TextField
+        {...shared}
+        value={draft ?? displayValue(column, row)}
+        error={warn}
+        onFocus={() => setDraft(rawEditText(column, def, row))}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commitDraft}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitDraft();
+            return;
+          }
+          if (event.key === "Escape" && draft !== null) {
+            // Revert this field; leave the dialog open. Without stopping it the
+            // keystroke would bubble to Dialog.onClose and lose the row.
+            event.stopPropagation();
+            setDraft(null);
+          }
+        }}
+        slotProps={{
+          htmlInput: {
+            inputMode: numeric ? ("decimal" as const) : undefined,
+            style: numeric
+              ? { textAlign: "right", fontVariantNumeric: "tabular-nums" }
+              : undefined,
+          },
+          input: overridden
+            ? {
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <Tooltip title="Revert to the auto-calculated value">
+                      <IconButton
+                        size="small"
+                        edge="end"
+                        tabIndex={-1}
+                        onClick={() => {
+                          setDraft(null);
+                          commit(null);
+                        }}
+                      >
+                        <RestartAltIcon fontSize="inherit" />
+                      </IconButton>
+                    </Tooltip>
+                  </InputAdornment>
+                ),
+              }
+            : undefined,
+        }}
+      />
+    </FieldRow>
+  );
+}
+
+/**
+ * Label on the left, control on the right — the form's one row shape.
+ *
+ * The wrapper carries `data-form-field` (rather than the input, which is not a
+ * plain DOM node for every control) so the dialog can find a field by key when
+ * it restores focus after stepping to the next position.
+ */
+function FieldRow({
+  field,
+  label,
+  unit,
+  hint,
+  dense,
+  children,
+}: {
+  field: string;
+  label: string;
+  unit?: string | null;
+  hint?: string | null;
+  dense?: boolean;
+  children: React.ReactNode;
+}) {
+  if (dense) {
+    return (
+      <Box data-form-field={field} sx={{ minWidth: 0 }}>
+        <Typography
+          variant="caption"
+          sx={{ color: "text.secondary", display: "block", lineHeight: 1.2 }}
+        >
+          {label}
+        </Typography>
+        {children}
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      data-form-field={field}
+      sx={{
+        display: "grid",
+        gridTemplateColumns: "minmax(90px, 40%) 1fr",
+        alignItems: "center",
+        columnGap: 1,
+        minWidth: 0,
+      }}
+    >
+      <Tooltip title={hint ?? ""} placement="top-start" enterDelay={600}>
+        <Typography
+          variant="caption"
+          sx={{
+            color: "text.secondary",
+            lineHeight: 1.2,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            cursor: hint ? "help" : "default",
+          }}
+        >
+          {label}
+          {unit ? (
+            <Box component="span" sx={{ color: "text.disabled", ml: 0.5 }}>
+              {unit}
+            </Box>
+          ) : null}
+        </Typography>
+      </Tooltip>
+      <Box sx={{ minWidth: 0 }}>{children}</Box>
+    </Box>
+  );
+}

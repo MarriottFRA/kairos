@@ -149,6 +149,12 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       -- Manual multiplier, honored only while the assigned cluster has
       -- exactly one member hotel. NULL = use the cluster's member weight.
       cluster_multiplier_override REAL,
+      -- Cluster-position group. '' = a standalone row. A non-empty id is shared
+      -- by every sibling row of ONE shared person across the cluster's member
+      -- hotels (and so spans OUs and each hotel's own scenario). Never
+      -- user-editable and never a field-catalog key: it is minted when a row is
+      -- first assigned to a cluster and only ever set by clusterSync.ts.
+      cluster_link_id          TEXT NOT NULL DEFAULT '',
       pay_type                 TEXT NOT NULL DEFAULT 'SALARIED'
                                  CHECK (pay_type IN ('HOURLY','SALARIED')),
       headcount                REAL NOT NULL DEFAULT 1,
@@ -176,6 +182,9 @@ export const POSITIONS_VALUE_TABLES_SQL = `
   -- The explicit multi-scope reads (hotel-cluster membership view / clear)
   -- filter on the assignment alone, across OUs.
   CREATE INDEX IF NOT EXISTS idx_positions_cluster ON positions (cluster);
+  -- Sibling lookup for cluster-position sync — also cross-OU by design.
+  CREATE INDEX IF NOT EXISTS idx_positions_cluster_link
+    ON positions (cluster_link_id);
 
   -- PII sidecar. Never joined into a ScenarioInput; only the dedicated
   -- positions:pii-get channel reads it.
@@ -412,6 +421,37 @@ export function applyValueStoreV11(
   }
   handle.exec(
     `CREATE INDEX IF NOT EXISTS idx_positions_cluster ON positions (cluster)`
+  );
+}
+
+/**
+ * Add positions.cluster_link_id — the cluster-position group (secure v2).
+ *
+ * Deliberately links NOTHING retroactively: rows that were hand-duplicated
+ * across the member hotels before this feature stay standalone ('') and are
+ * adopted into a group explicitly from the Clusters screen. Auto-matching live
+ * cost data on a title string is the one guess this feature must not make.
+ * Fresh installs get the column from the DDL above; this backfills upgraded
+ * stores. Idempotent — ALTER TABLE ADD COLUMN is not `IF NOT EXISTS`, so the
+ * column check has to be the guard.
+ */
+export function applyValueStoreV12(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("cluster_link_id")) {
+    handle.exec(
+      `ALTER TABLE positions ADD COLUMN cluster_link_id TEXT NOT NULL DEFAULT ''`
+    );
+  }
+  handle.exec(
+    `CREATE INDEX IF NOT EXISTS idx_positions_cluster_link
+       ON positions (cluster_link_id)`
   );
 }
 

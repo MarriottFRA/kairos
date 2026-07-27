@@ -14,7 +14,8 @@
  * to guidance (not an error) while locked.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -31,7 +32,9 @@ import {
   HotelClusterInput,
 } from "../../shared/hotelClusters/ipc";
 import { SECURE_DB_LOCKED } from "../../shared/positions/ipc";
+import { useSettingsStore } from "../../store/settings";
 import {
+  adoptClusterPosition,
   clusterMembersView,
   deleteCluster,
   listClusters,
@@ -71,6 +74,10 @@ export default function HotelClusters() {
     duplicate: false,
   });
   const [deleteTarget, setDeleteTarget] = useState<HotelClusterDto | null>(null);
+  /** The position id currently being linked into a group, if any. */
+  const [adopting, setAdopting] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const setSelectedHotelOu = useSettingsStore((state) => state.setSelectedHotelOu);
   const [toast, setToast] = useState<Toast>(null);
 
   // The assigned-positions view is a second, independently-failing load — a
@@ -139,8 +146,66 @@ export default function HotelClusters() {
     };
   }, [loadPage]);
 
+  // Mirror, so handleAdopt can refresh the view without depending on the list
+  // identity (which changes on every save).
+  const clustersRef = useRef<HotelClusterDto[]>([]);
+  clustersRef.current = clusters;
+
   const hotelByOu = new Map(hotels.map((hotel) => [hotel.ou, hotel]));
   const hotelName = (ou: string) => hotelByOu.get(ou)?.hotel_name ?? ou;
+
+  /**
+   * Join a hand-made duplicate to an existing cluster position.
+   *
+   * The row keeps its id and its hotel — it is adopted, not replaced — and
+   * takes the group's shared values so the two stop disagreeing. Its block
+   * inputs and user columns are left alone: those legitimately differ per
+   * hotel.
+   */
+  const handleAdopt = useCallback(
+    async (position: ClusterPositionRefDto, clusterLinkId: string) => {
+      setAdopting(position.positionId);
+      try {
+        await adoptClusterPosition(clusterLinkId, position.positionId, position.ou);
+        setToast({
+          severity: "success",
+          message: "Linked — this position now moves with the cluster.",
+        });
+        await loadAssignments(clustersRef.current);
+      } catch (error) {
+        setToast({ severity: "error", message: (error as Error).message });
+      } finally {
+        setAdopting(null);
+      }
+    },
+    [loadAssignments]
+  );
+
+  /**
+   * Start a cluster position from the Clusters screen.
+   *
+   * A cluster hire belongs to no single hotel, so making the user pick one and
+   * remember to set the Cluster column is the wrong shape. This switches to the
+   * cluster's first member hotel and opens the grid with the assignment already
+   * made — the row then mirrors into the rest as soon as it is saved. The
+   * details are still typed in the grid, which is where a position's data
+   * lives; only the "which hotel, which cluster" part is answered here.
+   */
+  const handleAddPosition = useCallback(
+    async (cluster: HotelClusterDto) => {
+      const seat = cluster.members[0];
+      if (!seat) return;
+      try {
+        await setSelectedHotelOu(seat.ou);
+        navigate("/signed-in-landing/positions", {
+          state: { newPositionInCluster: cluster.id },
+        });
+      } catch (error) {
+        setToast({ severity: "error", message: (error as Error).message });
+      }
+    },
+    [navigate, setSelectedHotelOu]
+  );
 
   const openNew = () => setDialog({ open: true, cluster: null, duplicate: false });
   const openEdit = (cluster: HotelClusterDto) =>
@@ -271,6 +336,9 @@ export default function HotelClusters() {
               hotelName={hotelName}
               assignments={assignments?.get(cluster.id) ?? null}
               assignmentsState={assignmentsState}
+              onAddPosition={handleAddPosition}
+              onAdopt={handleAdopt}
+              adopting={adopting}
               busy={busy}
               onEdit={openEdit}
               onDuplicate={openDuplicate}

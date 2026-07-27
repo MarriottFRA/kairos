@@ -60,6 +60,9 @@ export default function KpiDriverDialog({
   const [deptPatterns, setDeptPatterns] = useState<string[]>([]);
   const [accountPrefixes, setAccountPrefixes] = useState<string[]>([]);
   const [bucketIndex, setBucketIndex] = useState(1);
+  // Held as text so a half-typed "0." doesn't get normalized out from under the
+  // caret; parsed once on save.
+  const [multiplier, setMultiplier] = useState("1");
 
   // Editing an existing user driver overwrites it; duplicating or creating makes
   // a new one. A duplicate seeds every field from the source but drops the id.
@@ -74,12 +77,17 @@ export default function KpiDriverDialog({
     setDeptPatterns(driver?.deptPatterns ?? []);
     setAccountPrefixes(driver?.accountPrefixes ?? []);
     setBucketIndex(driver?.bucketIndex ?? 1);
+    setMultiplier(String(driver?.multiplier ?? 1));
   }, [open, driver, duplicate]);
 
   const labelError = label.trim() === "";
   const accountError = accountPrefixes.length === 0;
   const patternError = deptMode === "EXPLICIT" && deptPatterns.length === 0;
-  const valid = !labelError && !accountError && !patternError;
+  const multiplierValue = Number(multiplier);
+  const multiplierError =
+    multiplier.trim() === "" || !Number.isFinite(multiplierValue);
+  const valid =
+    !labelError && !accountError && !patternError && !multiplierError;
 
   const bucketOptions = useMemo(() => [1, 2, 3], []);
 
@@ -94,6 +102,7 @@ export default function KpiDriverDialog({
       deptPatterns: deptMode === "EXPLICIT" ? deptPatterns : [],
       accountPrefixes,
       bucketIndex,
+      multiplier: multiplierValue,
     });
   };
 
@@ -191,6 +200,20 @@ export default function KpiDriverDialog({
               );
             })}
           </TextField>
+
+          <TextField
+            label="Multiplier"
+            value={multiplier}
+            onChange={(e) => setMultiplier(e.target.value)}
+            error={multiplierError}
+            size="small"
+            sx={{ maxWidth: 320 }}
+            helperText={
+              multiplierError
+                ? "Enter a number — 1 leaves the aggregated total unchanged."
+                : "Applied to the aggregated total. Leave at 1 to measure the accounts as-is, or use it to derive a pot — 0.12 over the F&B revenue accounts gives a gratuity fund."
+            }
+          />
         </Stack>
       </DialogContent>
       <DialogActions>

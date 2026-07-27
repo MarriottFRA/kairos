@@ -34,6 +34,8 @@ interface ResolvedDriverDef {
   deptPatterns: string[];
   accountPrefixes: string[];
   bucketIndex: number;
+  /** Applied to every aggregated period before caching; 1 = as-is. */
+  multiplier: number;
 }
 
 interface DriverRow {
@@ -43,6 +45,7 @@ interface DriverRow {
   description: string | null;
   dept_mode: KpiDeptMode;
   bucket_index: number;
+  multiplier: number | null;
   aggregation: string;
   sort_order: number;
   created_by: string | null;
@@ -52,6 +55,13 @@ interface DriverRow {
 
 function scopeOf(ou: string): string {
   return normalizeOu(ou) ?? ou;
+}
+
+/** A stored/typed multiplier coerced to a usable factor; anything unusable
+ *  (null from a pre-column store, NaN from a bad payload) falls back to 1. */
+function normMultiplier(raw: unknown): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 1;
 }
 
 function loadPatterns(db: LocalDb, driverId: string): string[] {
@@ -129,6 +139,7 @@ function toDriver(
     deptPatterns: row.dept_mode === "EXPLICIT" ? loadPatterns(db, row.id) : [],
     accountPrefixes: loadAccounts(db, row.id),
     bucketIndex: row.bucket_index,
+    multiplier: normMultiplier(row.multiplier),
     aggregation: "SUM",
     sortOrder: row.sort_order,
     isBuiltin: false,
@@ -150,6 +161,7 @@ export function listDrivers(db: LocalDb, ou: string): KpiDriver[] {
     deptPatterns: b.deptMode === "EXPLICIT" ? b.deptPatterns : [],
     accountPrefixes: b.accountPrefixes,
     bucketIndex: b.bucketIndex,
+    multiplier: 1, // built-ins are raw roll-ups; only user drivers derive a pot
     aggregation: "SUM",
     sortOrder: index,
     isBuiltin: true,
@@ -180,14 +192,20 @@ function resolveDriver(
       deptPatterns: builtin.deptPatterns,
       accountPrefixes: builtin.accountPrefixes,
       bucketIndex: builtin.bucketIndex,
+      multiplier: 1,
     };
   }
   const row = db
     .prepare(
-      "SELECT id, dept_mode, bucket_index FROM kpi_drivers WHERE id = ? AND ou = ? AND deleted_at IS NULL"
+      "SELECT id, dept_mode, bucket_index, multiplier FROM kpi_drivers WHERE id = ? AND ou = ? AND deleted_at IS NULL"
     )
     .get(driverId, scoped) as
-    | { id: string; dept_mode: KpiDeptMode; bucket_index: number }
+    | {
+        id: string;
+        dept_mode: KpiDeptMode;
+        bucket_index: number;
+        multiplier: number | null;
+      }
     | undefined;
   if (!row) return null;
   return {
@@ -196,6 +214,7 @@ function resolveDriver(
     deptPatterns: loadPatterns(db, row.id),
     accountPrefixes: loadAccounts(db, row.id),
     bucketIndex: row.bucket_index,
+    multiplier: normMultiplier(row.multiplier),
   };
 }
 
@@ -207,16 +226,18 @@ function resolveAllDrivers(db: LocalDb, scoped: string): ResolvedDriverDef[] {
     deptPatterns: b.deptPatterns,
     accountPrefixes: b.accountPrefixes,
     bucketIndex: b.bucketIndex,
+    multiplier: 1,
   }));
   const users = (
     db
       .prepare(
-        "SELECT id, dept_mode, bucket_index FROM kpi_drivers WHERE ou = ? AND deleted_at IS NULL"
+        "SELECT id, dept_mode, bucket_index, multiplier FROM kpi_drivers WHERE ou = ? AND deleted_at IS NULL"
       )
       .all(scoped) as Array<{
       id: string;
       dept_mode: KpiDeptMode;
       bucket_index: number;
+      multiplier: number | null;
     }>
   ).map((row) => ({
     id: row.id,
@@ -224,6 +245,7 @@ function resolveAllDrivers(db: LocalDb, scoped: string): ResolvedDriverDef[] {
     deptPatterns: loadPatterns(db, row.id),
     accountPrefixes: loadAccounts(db, row.id),
     bucketIndex: row.bucket_index,
+    multiplier: normMultiplier(row.multiplier),
   }));
   return [...builtins, ...users];
 }
@@ -302,7 +324,16 @@ function writeSeries(
   computedAt: string,
   sourceImportId: string | null
 ): void {
-  const series = aggregate(db, scoped, def);
+  // The multiplier is baked in HERE rather than at read time, so the cached
+  // series is the final figure everywhere: the KPI page shows the pot in
+  // currency, and consumers never re-apply the rate. It also means changing a
+  // multiplier moves kpi_driver_values, which computeFingerprint already
+  // probes — results go stale without a new probe.
+  const factor = normMultiplier(def.multiplier);
+  const series = aggregate(db, scoped, def).map((s) => ({
+    deptKey: s.deptKey,
+    values: factor === 1 ? s.values : s.values.map((value) => value * factor),
+  }));
   const insert = db.prepare(
     `INSERT INTO kpi_driver_values
        (driver_id, ou, dept_key, period, value, source_import_id, computed_at)
@@ -417,6 +448,7 @@ export function saveDriver(
     deptPatterns: string[];
     accountPrefixes: string[];
     bucketIndex: number;
+    multiplier?: number;
     sortOrder: number;
     createdBy: string | null;
     now: string;
@@ -445,16 +477,18 @@ export function saveDriver(
   }
   const bucketIndex =
     driver.bucketIndex >= 1 && driver.bucketIndex <= 3 ? driver.bucketIndex : 1;
+  const multiplier = normMultiplier(driver.multiplier ?? 1);
 
   const upsertDriver = db.prepare(`
     INSERT INTO kpi_drivers
-      (id, ou, label, description, dept_mode, bucket_index, aggregation, sort_order, created_by, updated_at, deleted_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'SUM', ?, ?, ?, NULL)
+      (id, ou, label, description, dept_mode, bucket_index, multiplier, aggregation, sort_order, created_by, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'SUM', ?, ?, ?, NULL)
     ON CONFLICT(id) DO UPDATE SET
       label = excluded.label,
       description = excluded.description,
       dept_mode = excluded.dept_mode,
       bucket_index = excluded.bucket_index,
+      multiplier = excluded.multiplier,
       sort_order = excluded.sort_order,
       updated_at = excluded.updated_at,
       deleted_at = NULL
@@ -474,6 +508,7 @@ export function saveDriver(
       description,
       driver.deptMode,
       bucketIndex,
+      multiplier,
       driver.sortOrder,
       driver.createdBy,
       driver.now

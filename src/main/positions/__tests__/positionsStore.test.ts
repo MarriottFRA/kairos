@@ -17,6 +17,7 @@ import {
 } from "../../kpiDrivers/repo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
 import { SEED_VERSION, SYSTEM_FIELD_SEED } from "../../../shared/positions/fieldSeed";
+import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts";
 import {
   applyValueStoreV3,
   applyValueStoreV4,
@@ -106,6 +107,42 @@ describe("field catalog seed", () => {
     ensureFieldCatalogSeed(structureDb, OU_A);
     ensureFieldCatalogSeed(structureDb, OU_A);
     expect(catalogFor(OU_A).fields).toHaveLength(SYSTEM_FIELD_SEED.length);
+  });
+
+  it("seeds HC Stats as a read-only account column carrying the pinned code", () => {
+    const field = catalogFor(OU_A).fields.find(
+      (entry) => entry.key === "headcountStatsAccount"
+    );
+    expect(field).toMatchObject({
+      dataType: "ACCOUNT_CODE",
+      storage: "COMPUTED",
+      editable: false,
+      // JSON round-trips through default_value, so this also pins that the
+      // constant survives the store rather than arriving as undefined.
+      defaultValue: POSITION_COUNT_ACCOUNT,
+    });
+    // No dropdown: the code is fixed, so there is nothing to pick.
+    expect(field?.dropdownSource).toBeFalsy();
+  });
+
+  it("prunes the retired positionCount column on the v20 re-seed", () => {
+    catalogFor(OU_A);
+    // A catalog left by a pre-v20 app still carries the retired NUMBER column.
+    structureDb
+      .prepare(
+        `INSERT INTO field_catalog (ou, field_key, section, data_type, storage,
+           origin, locked, default_label, custom_label, sort_order, visible,
+           editable, maskable, vector, month_index, compute_key, dropdown_source,
+           validation, default_value, seed_version, updated_at, deleted_at)
+         VALUES (?, 'positionCount', 'employee', 'NUMBER', 'COMPUTED', 'SYSTEM', 1,
+                 'Position Count', NULL, 355, 1, 0, 0, NULL, NULL, 'positionCount',
+                 NULL, NULL, NULL, ?, '2026-01-01T00:00:00.000Z', NULL)`
+      )
+      .run(OU_A.ou, SEED_VERSION - 1);
+
+    const keys = catalogFor(OU_A).fields.map((entry) => entry.key);
+    expect(keys).not.toContain("positionCount");
+    expect(keys).toContain("headcountStatsAccount");
   });
 
   it("re-applies a changed system dropdownSource when the seed version climbs", () => {
@@ -321,7 +358,6 @@ describe("batch write", () => {
               cluster: "Rooms",
               payType: "SALARIED",
               headcount: 2,
-              fte: 1.5,
               monthlyBaseSalary: 3000,
               seasonality: [1, 1, 1, 1, 1, 1, 0.5, 0.5, 1, 1, 1, 1],
               vacationMonthlyWeights: Array(12).fill(1 / 12),
@@ -687,7 +723,6 @@ describe("engine round trip", () => {
               cluster: "Rooms",
               payType: "SALARIED",
               headcount: 1,
-              fte: 1,
               monthlyBaseSalary: 2500,
               seasonality: Array(12).fill(1),
               additionalMonthlyCosts: Array(12).fill(0),
@@ -797,7 +832,6 @@ describe("engine round trip", () => {
               cluster: "Rooms",
               payType: "SALARIED",
               headcount: 2,
-              fte: 1,
               monthlyBaseSalary: 2500,
               seasonality: [1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
               vacationMonthlyWeights: Array(12).fill(1 / 12),
@@ -1130,27 +1164,44 @@ describe("engine outputs", () => {
     total: perMonth * 12,
   });
 
+  // Codes carry the "A" prefix every path in this app normalizes to (see
+  // budgetImport/parseWorkbook and the A9…/A5… account-picker filters). Using
+  // bare digits here previously hid a real bug: isStatsAccount tested for a
+  // leading "9", which no stored code can ever have, so the Results page's
+  // Statistics tab was permanently empty and Costs was identical to All.
   it("aggregates lines to dept×account and tags statistics accounts", () => {
     writeRun(
       valuesDb, OU_A, SCENARIO,
       { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 2 },
       [
-        line("p1", "blk-1:cost", "0410", "511000", 100),
-        line("p2", "blk-1:cost", "0410", "511000", 50),
-        line("p1", "blk-2:stat", "0410", "988200", 4),
+        line("p1", "blk-1:cost", "0410", "A511000", 100),
+        line("p2", "blk-1:cost", "0410", "A511000", 50),
+        line("p1", "blk-2:stat", "0410", "A988200", 4),
       ]
     );
 
     const outputs = readOutputs(structureDb, valuesDb, OU_A, SCENARIO);
     expect(outputs.run).toMatchObject({ lineCount: 3, positionCount: 2 });
     expect(outputs.rows).toHaveLength(2);
-    const cost = outputs.rows.find((row) => row.account === "511000")!;
+    const cost = outputs.rows.find((row) => row.account === "A511000")!;
     expect(cost.isStats).toBe(false);
     expect(cost.months[0]).toBe(150);
     expect(cost.total).toBe(1800);
-    const stat = outputs.rows.find((row) => row.account === "988200")!;
+    const stat = outputs.rows.find((row) => row.account === "A988200")!;
     expect(stat.isStats).toBe(true);
     expect(stat.total).toBe(48);
+  });
+
+  it("classifies the pinned position-count account as a statistic", () => {
+    writeRun(
+      valuesDb, OU_A, SCENARIO,
+      { fingerprint: "fp-hc", computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      [line("p1", "sys-poscount:OU_A", "0410", POSITION_COUNT_ACCOUNT, 5)]
+    );
+
+    const outputs = readOutputs(structureDb, valuesDb, OU_A, SCENARIO);
+    expect(outputs.rows[0].account).toBe(POSITION_COUNT_ACCOUNT);
+    expect(outputs.rows[0].isStats).toBe(true);
   });
 
   it("overwrites wholesale on a new run and isolates OUs", () => {

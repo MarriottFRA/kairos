@@ -105,13 +105,22 @@ const logger = {
 
 let mainWindow: Nullable<BrowserWindow> = null;
 
+// Window icon (title bar / taskbar / alt-tab). The main process runs from
+// .vite/build, and `src/` is excluded from the package, so this has to be
+// resolved differently per build: packaged copies live in resources/ via
+// packagerConfig.extraResource. On Windows the exe icon usually wins anyway,
+// but Linux and the dev run both rely on this path.
+const WINDOW_ICON = app.isPackaged
+  ? path.join(process.resourcesPath, "kairos_logo.png")
+  : path.join(__dirname, "../../src/images/kairos_logo.png");
+
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 800,
     show: false, // show when ready-to-show for smoother UX
     autoHideMenuBar: true, // Hide menu bar (File, Edit, View, Window)
-    icon: path.join(__dirname, "../src/images/marriott_logo.png"),
+    icon: WINDOW_ICON,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,

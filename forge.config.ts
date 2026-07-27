@@ -14,7 +14,10 @@ import { join } from 'path';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: false,
-    icon: './src/images/marriott_logo',
+    icon: './src/images/kairos_logo',
+    // `src/` is excluded below, so ship the window icon into resources/ —
+    // src/main.ts reads it from process.resourcesPath when packaged.
+    extraResource: ['./src/images/kairos_logo.png'],
     prune: false,  // Keep false - postPackage hook needs to install deps
     ignore: [
       /^\/\.git($|\/)/,
@@ -161,12 +164,17 @@ updaterCacheDirName: kairos-updater`;
     new MakerSquirrel({
       // Per-user install - no admin rights required
       // Installs to: %LocalAppData%\kairos
-      setupIcon: './src/images/marriott_logo.ico',
+      setupIcon: './src/images/kairos_logo.ico',
+      // Squirrel writes this into the nuspec; it becomes the Apps & features
+      // (Add/Remove Programs) entry icon. It must be a URL the client can
+      // reach — without it, electron-winstaller falls back to a generic
+      // Electron icon.
+      iconUrl: 'https://raw.githubusercontent.com/MarriottFRA/kairos/master/src/images/kairos_logo.ico',
       loadingGif: undefined, // Optional: add a loading animation path
     }),
     new MakerZIP({}, ['darwin']),
-    new MakerRpm({}),
-    new MakerDeb({})
+    new MakerRpm({ options: { icon: './src/images/kairos_logo_1024.png' } }),
+    new MakerDeb({ options: { icon: './src/images/kairos_logo_1024.png' } })
   ],
   publishers: [
     {

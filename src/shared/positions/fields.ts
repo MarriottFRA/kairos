@@ -172,7 +172,6 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
   clusterMultiplierOverride: "cluster_multiplier_override",
   payType: "pay_type",
   headcount: "headcount",
-  fte: "fte",
   monthlyBaseSalary: "monthly_base_salary",
   hourlyRate: "hourly_rate",
   meritIncreasePct: "merit_increase_pct",
@@ -184,6 +183,12 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
   // accrualDaysPerMonth is no longer an engine scalar — it is a COMPUTED column
   // (Yearly Days ÷ 12) and the engine value is derived at load time, gated by the
   // accrual account (see loadScenarioInput). The DB column is left vestigial.
+  //
+  // `fte` left for the same reason in v24: it is a COMPUTED column derived from
+  // the row's contract against the hotel-year full-time reference (see
+  // engineInput.deriveFte), materialized by both engine paths at load. The
+  // positions.fte column is vestigial — still selected by POSITION_COLUMNS, no
+  // longer read or written.
 };
 
 /** The Basic Salary band offers two mutually-exclusive inputs: a fixed Monthly
@@ -194,6 +199,33 @@ export const ENGINE_SCALAR_COLUMNS: Readonly<Record<string, string>> = {
 export const BASIC_SALARY_MONTHLY_KEY = "monthlyBaseSalary";
 export const BASIC_SALARY_HOURLY_KEY = "hourlyRate";
 
+/**
+ * Annual salary entry. Contracts are written per year, so Annual Basic is the
+ * figure most users actually hold — but the engine's base is per active month
+ * and stays that way (monthlyBaseSalary is the only salary input it reads).
+ * These three keys are the pairing that lets one be typed and the other derived:
+ *
+ *   salaryEntryMode      which face the user typed; the other is read-only
+ *   annualBaseSalary     the yearly contract figure
+ *   annualDivisorBasis   how the two convert — Σ working months (the contract
+ *                        covers only the months worked) or a flat 12
+ *
+ * The divisor lives on the ROW, not in a global setting, so a row's monthly
+ * figure is always reproducible from the row itself — flipping the preference
+ * can never silently re-base positions nobody touched. Shared by the grid
+ * (read-only gating + muting) and rowModel (derivation + hydration).
+ */
+export const BASIC_SALARY_ANNUAL_KEY = "annualBaseSalary";
+export const SALARY_ENTRY_MODE_KEY = "salaryEntryMode";
+export const ANNUAL_DIVISOR_KEY = "annualDivisorBasis";
+
+/** Which of the two basic-salary faces the user types. Absent = MONTHLY, the
+ *  behaviour of every row written before the Annual column existed. */
+export type SalaryEntryMode = "MONTHLY" | "ANNUAL";
+
+/** What Annual Basic is divided by to reach the monthly base. */
+export type AnnualDivisorBasis = "WORKING_MONTHS" | "TWELVE";
+
 /** The hotel-cluster pair on a position: the assignment (stores a cluster id,
  *  "" = none) and the manual multiplier override (only honored while the
  *  assigned cluster has exactly one member hotel). Shared by the grid
@@ -201,6 +233,32 @@ export const BASIC_SALARY_HOURLY_KEY = "hourlyRate";
  *  when the assignment changes). */
 export const HOTEL_CLUSTER_KEY = "cluster";
 export const HOTEL_CLUSTER_MULT_KEY = "clusterMultiplierOverride";
+
+/**
+ * The per-position posting accounts, keyed to the permanent system definition
+ * each one routes. POSITION_EXTRA fields, so they live in `extra_values`.
+ *
+ * Named here because three places must agree on them and previously did not:
+ * the field seed that declares the columns, and the TWO engine-input assemblies
+ * that read them (loadScenarioInput and the renderer live sim). They were
+ * write-only for exactly this reason — nothing tied the stored key to a reader.
+ * See engineInput.readPositionAccounts / applyPositionAccounts.
+ */
+/**
+ * The read-only "HC Stats" column: displays POSITION_COUNT_ACCOUNT, the account
+ * the permanent position-count head always books to. COMPUTED and never stored —
+ * the value is a constant, surfaced so the pinned account is discoverable from
+ * the grid instead of only appearing, unexplained, in Results.
+ */
+export const HEADCOUNT_STATS_ACCOUNT_KEY = "headcountStatsAccount";
+
+export const ACCOUNT_FIELD_KEYS = {
+  salary: "salaryAccountCode",
+  headcount: "headCountAccount",
+  hours: "workingHoursAccount",
+  accrual: "accrualAccount",
+  benefits: "benefitsAccountCode",
+} as const;
 
 /** Vector engine fields: vector name -> `positions` JSON column. */
 export const VECTOR_COLUMNS: Readonly<Record<VectorName, string>> = {
@@ -243,4 +301,34 @@ export function parseVectorKey(
 
 export function vectorKey(vector: VectorName, monthIndex: number): string {
   return `${VECTOR_KEY_PREFIXES[vector]}_${monthIndex}`;
+}
+
+/** The twelve flat keys of a month family, in month order. */
+export function vectorKeys(vector: VectorName): string[] {
+  return Array.from({ length: 12 }, (_, index) => vectorKey(vector, index + 1));
+}
+
+/**
+ * Month families the grid folds away behind one summary column.
+ *
+ * Twelve columns is a lot of width to spend on a field most hotels never fill
+ * in. The pair here is `summary field key -> the vector it stands in for`: the
+ * summary is an ordinary COMPUTED column (so it sums the family and reads as
+ * derived like any other), and the grid hides the twelve behind it by DEFAULT,
+ * with a chevron on the summary header that expands them in place.
+ *
+ * Note what this is NOT: the fields keep `visible: true` in the catalog. Catalog
+ * visibility means "removed column" (the Manage Columns surface, persisted per
+ * OU); collapsing is a layout state on the grid's own columnVisibilityModel, so
+ * it costs one click to reverse, survives via the saved layout, and the values
+ * keep feeding the engine either way — a collapsed family is hidden, never off.
+ */
+export const COLLAPSIBLE_MONTH_FAMILIES: Readonly<Record<string, VectorName>> = {
+  additionalCostsTotal: "additionalMonthlyCosts",
+  totalWorkingMonths: "seasonality",
+};
+
+/** Every month key that starts out folded away. */
+export function collapsibleMonthKeys(): string[] {
+  return Object.values(COLLAPSIBLE_MONTH_FAMILIES).flatMap(vectorKeys);
 }

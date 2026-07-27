@@ -75,3 +75,22 @@ export async function clusterMembersView(
   );
   return unwrap<ClusterMembersViewResponse>(response) ?? { positions: [] };
 }
+
+/**
+ * Link a standalone position into an existing cluster-position group, then
+ * converge it onto that group's shared values — the fix for the same person
+ * having been typed into each hotel by hand. Throws SECURE_DB_LOCKED while
+ * signed out.
+ */
+export async function adoptClusterPosition(
+  clusterLinkId: string,
+  positionId: string,
+  ou: string
+): Promise<void> {
+  const response = await ipc().sendIpcRequest(HOTEL_CLUSTERS_CHANNELS.adopt, {
+    clusterLinkId,
+    positionId,
+    ou,
+  });
+  unwrap(response);
+}

@@ -39,6 +39,7 @@ import type {
   MappingSyncResult,
   MappingTablesStatus,
 } from "../../shared/mappingTables/types";
+import LegacyImportCard from "../../components/settings/LegacyImportCard";
 
 export default function Settings() {
   const themeMode = useSettingsStore((s) => s.themeMode);
@@ -49,6 +50,7 @@ export default function Settings() {
   const resetUiScaleToAuto = useSettingsStore((s) => s.resetUiScaleToAuto);
   const selectedHotelOu = useSettingsStore((s) => s.selectedHotelOu);
   const setSelectedHotelOu = useSettingsStore((s) => s.setSelectedHotelOu);
+  const planningScenarioId = useSettingsStore((s) => s.planningScenarioId);
 
   const [hotels, setHotels] = useState<Hotel[]>([]);
   const [loadingHotels, setLoadingHotels] = useState(false);
@@ -527,6 +529,13 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      {/* One-shot migration off the Excel tool. Self-contained: everything it
+          needs lives under components/settings + main/legacyImport. */}
+      <LegacyImportCard
+        ou={selectedHotelOu ?? ""}
+        scenarioId={planningScenarioId}
+      />
 
       <Card
         variant="outlined"

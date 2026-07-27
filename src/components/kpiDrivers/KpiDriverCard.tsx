@@ -173,6 +173,16 @@ export default function KpiDriverCard({
                 : `bucket ${driver.bucketIndex}`
             }
           />
+          {driver.multiplier !== 1 && (
+            // The series below is already multiplied, so say so — otherwise the
+            // numbers won't reconcile against the accounts listed beside them.
+            <Chip
+              size="small"
+              color="secondary"
+              variant="outlined"
+              label={`× ${driver.multiplier}`}
+            />
+          )}
         </Stack>
 
         {series.length > 0 ? (

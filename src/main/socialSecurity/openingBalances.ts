@@ -23,7 +23,11 @@ import type Database from "better-sqlite3-multiple-ciphers";
 import { compile, simulate } from "../../shared/engine/simulate";
 import { referenceVacation } from "../../shared/engine/reference";
 import { MONTHS } from "../../shared/engine/types";
-import { CalendarGetter, loadScenarioInput } from "../positions/loadScenarioInput";
+import {
+  CalendarGetter,
+  PositionDefaultsGetter,
+  loadScenarioInput,
+} from "../positions/loadScenarioInput";
 import { OuScope } from "../positions/ouScope";
 import { prepared } from "../positions/stmtCache";
 
@@ -64,9 +68,17 @@ export async function computeNiOpeningBalances(
   scenarioId: string,
   ssSchemeId: string,
   getCalendarYear: CalendarGetter,
-  now: string
+  now: string,
+  getPositionDefaults?: PositionDefaultsGetter
 ): Promise<{ updated: number }> {
-  const input = await loadScenarioInput(structureDb, valuesDb, scope, scenarioId, getCalendarYear);
+  const input = await loadScenarioInput(
+    structureDb,
+    valuesDb,
+    scope,
+    scenarioId,
+    getCalendarYear,
+    getPositionDefaults
+  );
 
   // The SS def for THIS scheme (not merely the first) — its id keys the write.
   const ssDef = input.definitions.find(

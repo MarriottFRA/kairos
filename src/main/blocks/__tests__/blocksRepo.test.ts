@@ -20,9 +20,12 @@ import {
   BlockInput,
 } from "../../../shared/blocks/ipc";
 import {
+  baseSalaryDefId,
   deleteBlock,
   ensureBaseSalaryDef,
   ensurePositionCountDef,
+  ensureSystemDefs,
+  holidayAccrualDefId,
   listBlocks,
   POSITION_COUNT_ACCOUNT,
   positionCountDefId,
@@ -30,6 +33,7 @@ import {
   restoreBlock,
   saveBlock,
   systemStatDefId,
+  vacationCostDefId,
 } from "../repo";
 
 type Db = InstanceType<typeof Database>;
@@ -106,6 +110,31 @@ describe("saveBlock — definition projection", () => {
     expect(stat.increaseAware).toBe(false);
   });
 
+  it("COUNT_RATE spread WEIGHTED_BASE compiles to WEIGHTED_BY_BASE", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "COUNT_RATE",
+        label: "End of Service",
+        accountCode: "560506",
+        accountLocked: true,
+        statsAccountCode: "",
+        spread: "WEIGHTED_BASE",
+      },
+      NOW
+    );
+
+    const cost = getComponentDefinitions(db, OU_A).find(
+      (def) => def.id === blockCostDefId(id)
+    )!;
+    expect(cost.spreadMethod).toBe("WEIGHTED_BY_BASE");
+    // No explicit selector: the engine defaults WEIGHTED_BY_BASE to the gross
+    // base-salary curve, which is what "weighted by salary" means here.
+    expect(cost.baseSelector).toBeUndefined();
+    expect(listBlocks(db, OU_A)[0].spread).toBe("WEIGHTED_BASE");
+  });
+
   it("MULTIPLIER of base salary compiles to PERCENT_OF over BASE_SALARY", () => {
     const id = saveBlock(
       db,
@@ -148,6 +177,66 @@ describe("saveBlock — definition projection", () => {
     expect(levy.baseSelector).toEqual({
       kind: "COMPONENTS",
       componentIds: [blockCostDefId(baseId)],
+    });
+  });
+
+  it("MULTIPLIER of a composite sums base salary and the picked blocks", () => {
+    const foodId = saveBlock(db, OU_A, flatMonthly({ label: "Food" }), NOW);
+    const housingId = saveBlock(db, OU_A, flatMonthly({ label: "Housing" }), NOW);
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Pension",
+        accountCode: "565003",
+        accountLocked: true,
+        base: {
+          kind: "COMPOSITE",
+          includeBaseSalary: true,
+          blockIds: [foodId, housingId],
+        },
+      },
+      NOW
+    );
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const pension = defs.find((def) => def.label === "Pension")!;
+    expect(pension.spreadMethod).toBe("PERCENT_OF");
+    expect(pension.baseSelector).toEqual({
+      kind: "COMPONENTS",
+      componentIds: [
+        baseSalaryDefId(OU_A.ou),
+        blockCostDefId(foodId),
+        blockCostDefId(housingId),
+      ],
+    });
+    // The composite refs the base-salary head by id, so it must exist even
+    // though nothing else has built the structure read model yet.
+    expect(defs.some((def) => def.id === baseSalaryDefId(OU_A.ou))).toBe(true);
+  });
+
+  it("a composite without base salary refs only the picked blocks", () => {
+    const foodId = saveBlock(db, OU_A, flatMonthly({ label: "Food" }), NOW);
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Levy",
+        accountCode: "565004",
+        accountLocked: true,
+        base: { kind: "COMPOSITE", includeBaseSalary: false, blockIds: [foodId] },
+      },
+      NOW
+    );
+
+    const levy = getComponentDefinitions(db, OU_A).find(
+      (def) => def.label === "Levy"
+    )!;
+    expect(levy.baseSelector).toEqual({
+      kind: "COMPONENTS",
+      componentIds: [blockCostDefId(foodId)],
     });
   });
 
@@ -233,6 +322,100 @@ describe("saveBlock — definition projection", () => {
     expect(def.spreadMethod).toBe("DIRECT_MONTHLY");
     expect(def.increaseAware).toBe(true);
   });
+
+  it("POOL_SPREAD compiles to one DIRECT_ABS def carrying no KPI driver", () => {
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "POOL_SPREAD",
+        label: "Gratuities",
+        accountCode: "601000",
+        accountLocked: true,
+        poolSource: "KPI",
+        poolKpiDriverId: "kpi-gratuities",
+        poolSpreadBase: "FTE",
+        poolEligibilityMode: "RULE",
+        poolDepartments: ["D0060"],
+        poolJobTypes: ["Associate"],
+      },
+      NOW
+    );
+
+    const defs = getComponentDefinitions(db, OU_A);
+    expect(defs).toHaveLength(1);
+    expect(defs[0].spreadMethod).toBe("DIRECT_ABS");
+    expect(defs[0].kind).toBe("SPREAD");
+    // A share of a fixed pot is never merit-increased.
+    expect(defs[0].increaseAware).toBe(false);
+    // Critically NOT set: kpi_driver_id is injectKpiSeries' trigger, and that
+    // path would read the per-row eligibility flag as a multiplier.
+    expect(defs[0].kpiDriverId ?? null).toBeNull();
+
+    const [dto] = listBlocks(db, OU_A);
+    expect(dto).toMatchObject({
+      poolSource: "KPI",
+      poolKpiDriverId: "kpi-gratuities",
+      poolSpreadBase: "FTE",
+      poolEligibilityMode: "RULE",
+      poolDepartments: ["D0060"],
+      poolJobTypes: ["Associate"],
+    });
+    expect(dto.statDefId).toBeUndefined();
+  });
+
+  it("POOL_SPREAD defaults an unconfigured block and validates its pot", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "POOL_SPREAD",
+        label: "Service charge",
+        accountCode: "",
+        accountLocked: true,
+        poolSource: "MANUAL",
+        poolMonthlyAmounts: Array(12).fill(1000),
+      },
+      NOW
+    );
+    const [dto] = listBlocks(db, OU_A);
+    // A rule is legal with no filters at all — that means "everyone".
+    expect(dto.poolSpreadBase).toBe("HEADCOUNT");
+    expect(dto.poolEligibilityMode).toBe("MANUAL");
+    expect(dto.poolMonthlyAmounts).toEqual(Array(12).fill(1000));
+
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        {
+          id,
+          blockType: "POOL_SPREAD",
+          label: "Service charge",
+          accountCode: "",
+          accountLocked: true,
+          poolSource: "MANUAL",
+          poolMonthlyAmounts: [1, 2, 3],
+        },
+        NOW
+      )
+    ).toThrow(/12 monthly amounts/);
+
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        {
+          blockType: "POOL_SPREAD",
+          label: "No KPI",
+          accountCode: "",
+          accountLocked: true,
+          poolSource: "KPI",
+        },
+        NOW
+      )
+    ).toThrow(/needs a KPI/);
+  });
 });
 
 describe("saveBlock — update semantics", () => {
@@ -300,6 +483,69 @@ describe("saveBlock — update semantics", () => {
         NOW
       )
     ).toThrow(/base block no longer exists/);
+  });
+
+  it("rejects a composite base that adds up nothing", () => {
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        {
+          blockType: "MULTIPLIER",
+          label: "Empty composite",
+          accountCode: "",
+          accountLocked: true,
+          base: { kind: "COMPOSITE", includeBaseSalary: false, blockIds: [] },
+        },
+        NOW
+      )
+    ).toThrow(/at least one thing/);
+  });
+
+  it("rejects a composite base that loops back through another block", () => {
+    // A -> B (composite). Editing B's base to include A would close the loop.
+    const aId = saveBlock(db, OU_A, flatMonthly({ label: "A" }), NOW);
+    const bId = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "B",
+        accountCode: "",
+        accountLocked: true,
+        base: { kind: "COMPOSITE", includeBaseSalary: true, blockIds: [aId] },
+      },
+      NOW
+    );
+    // C sits between them so the cycle is not a direct self-reference.
+    const cId = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "C",
+        accountCode: "",
+        accountLocked: true,
+        base: { kind: "BLOCK", blockId: bId },
+      },
+      NOW
+    );
+
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        {
+          id: bId,
+          blockType: "MULTIPLIER",
+          label: "B",
+          accountCode: "",
+          accountLocked: true,
+          base: { kind: "COMPOSITE", includeBaseSalary: true, blockIds: [cId] },
+        },
+        NOW
+      )
+    ).toThrow(/loops back to this block/);
   });
 });
 
@@ -514,5 +760,102 @@ describe("scoping + engine round trip", () => {
     );
     // Full 3 heads every active month (weight 0.5 does not flex headcount), 0 in January.
     expect(head).toEqual([0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]);
+  });
+
+  // These heads are what the Positions grid's account columns post through. They
+  // must exist for every OU regardless of which blocks the user built — before
+  // this, only the position-count head was permanently seeded, which is why
+  // Results only ever showed A972540. Asserted against the real SQL (not
+  // hand-built defs) so the seed and the read path are pinned together; the
+  // account wiring itself is covered by shared/positions/__tests__/positionAccounts.
+  it("ensureSystemDefs seeds every permanent head, idempotently and blank-accounted", () => {
+    ensureSystemDefs(db, OU_A, NOW);
+    ensureSystemDefs(db, OU_A, NOW);
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const byId = new Map(defs.map((def) => [def.id as string, def]));
+    expect(defs).toHaveLength(6);
+
+    expect(byId.get(baseSalaryDefId(OU_A.ou))).toMatchObject({
+      kind: "BASE_SALARY",
+      accountCode: "",
+    });
+    expect(byId.get(systemStatDefId(OU_A.ou, "HEADCOUNT"))).toMatchObject({
+      kind: "STAT",
+      statKind: "HEADCOUNT",
+      accountCode: "",
+    });
+    expect(byId.get(systemStatDefId(OU_A.ou, "HOURS"))).toMatchObject({
+      kind: "STAT",
+      statKind: "HOURS",
+      accountCode: "",
+    });
+    expect(byId.get(holidayAccrualDefId(OU_A.ou))).toMatchObject({
+      kind: "HOLIDAY_ACCRUAL",
+      accountCode: "",
+    });
+    // The vacation-cost head is a PERCENT_OF spread over the VACATION series —
+    // no new opcode, no new ComponentKind, no migration of the kind CHECK. The
+    // selector rides as base_ref JSON, so this also pins that round-trip.
+    expect(byId.get(vacationCostDefId(OU_A.ou))).toMatchObject({
+      kind: "SPREAD",
+      spreadMethod: "PERCENT_OF",
+      baseSelector: { kind: "VACATION" },
+      accountCode: "",
+    });
+    // Only this one carries an account, and it is pinned.
+    expect(byId.get(positionCountDefId(OU_A.ou))).toMatchObject({
+      accountCode: POSITION_COUNT_ACCOUNT,
+    });
+
+    // The set must still compile: exactly one BASE_SALARY, at most one accrual,
+    // and the vacation base resolves — all validated by compile().
+    const compiled = compile({
+      scenario: {
+        id: "scen-1" as never,
+        ou: OU_A.ou,
+        year: 2026,
+        label: "Planning",
+        updatedAt: NOW.now,
+        deletedAt: null,
+      },
+      calendar: {
+        realDays: new Float64Array(12).fill(21),
+        flatDays: new Float64Array(12).fill(30),
+        holidayDays: new Float64Array(12),
+      },
+      definitions: defs,
+      ssSchemes: [],
+      positions: [
+        {
+          id: "pos-1" as never,
+          scenarioId: "scen-1" as never,
+          departmentCode: "0410",
+          jobTypeCode: "MGR",
+          cluster: "Rooms",
+          hotelClusterWeight: 1,
+          payType: "SALARIED",
+          headcount: 1,
+          fte: 1,
+          seasonality: new Array(12).fill(1),
+          monthlyBaseSalary: 3000,
+          hourlyRate: 0,
+          additionalMonthlyCosts: new Array(12).fill(0),
+          meritIncreasePct: 0,
+          manualYearlyIncrease: 0,
+          increaseMonth: 13,
+          dailyContractHours: 8,
+          yearlyHoursWorked: 2000,
+          vacationDays: 20,
+          vacationMonthlyWeights: new Array(12).fill(1 / 12),
+          accrualDaysPerMonth: 20 / 12,
+          updatedAt: NOW.now,
+          deletedAt: null,
+        },
+      ],
+      componentValues: [],
+      buyouts: [],
+    });
+    expect("errors" in compiled).toBe(false);
   });
 });

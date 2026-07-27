@@ -33,6 +33,10 @@ import {
   clusterMapById,
   resolveHotelClusterWeight,
 } from "../../shared/hotelClusters/resolve";
+import {
+  adoptIntoGroup,
+  syncClusterMembership,
+} from "../../main/positions/clusterSync";
 import { SECURE_DB_LOCKED } from "../../shared/positions/ipc";
 
 function ok<T>(data: T): IpcResult<T> {
@@ -70,7 +74,22 @@ export function createHotelClustersHandlers(): Record<string, IpcHandler> {
       const input = request?.cluster as HotelClusterInput | undefined;
       if (!input) throw new Error("Missing cluster payload.");
       const db = localDbHandle();
-      saveCluster(db, input, { now: new Date().toISOString() });
+      const now = new Date().toISOString();
+      const savedId = saveCluster(db, input, { now });
+
+      // Reconcile the cluster's position groups with the new member list: a
+      // hotel that just joined gets its mirrored rows, one that left has its
+      // rows unlinked (never deleted). Best-effort — the definition is already
+      // saved, and a locked secure store must not turn a rename into a failure.
+      // The next write or save reconciles.
+      try {
+        syncClusterMembership(
+          { structureDb: db, valuesDb: secureDb(), stamp: now },
+          savedId
+        );
+      } catch (error) {
+        console.warn("Cluster membership sync skipped:", error);
+      }
       return ok({ clusters: listClusters(db) });
     } catch (error) {
       console.error("Hotel clusters save failed:", error);
@@ -146,6 +165,7 @@ export function createHotelClustersHandlers(): Record<string, IpcHandler> {
             override: row.cluster_multiplier_override,
             effectiveWeight: resolved.weight,
             warning: resolved.warning,
+            clusterLinkId: row.cluster_link_id ?? "",
           };
         });
       return ok({ positions });
@@ -155,10 +175,45 @@ export function createHotelClustersHandlers(): Record<string, IpcHandler> {
     }
   };
 
+  /**
+   * Adopt a standalone position into an existing cluster-position group.
+   *
+   * The escape hatch for rows created by hand in each hotel before this
+   * feature — the one case the app deliberately will NOT resolve on its own,
+   * because matching live cost data on a title string is a guess. Here the
+   * user has pointed at the two rows, so it is their call, not ours.
+   */
+  const adopt: IpcHandler<any, IpcResult<ClusterMembersViewResponse>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const linkId = String(request?.clusterLinkId ?? "");
+      const positionId = String(request?.positionId ?? "");
+      const ou = String(request?.ou ?? "");
+      if (!linkId || !positionId || !ou) {
+        throw new Error("Missing position, group or hotel.");
+      }
+      const valuesDb = secureDb();
+      const db = localDbHandle();
+      adoptIntoGroup(
+        { structureDb: db, valuesDb, stamp: new Date().toISOString() },
+        linkId,
+        positionId,
+        ou
+      );
+      return ok(EMPTY_VIEW);
+    } catch (error) {
+      console.error("Cluster position adopt failed:", error);
+      return fail(error, EMPTY_VIEW);
+    }
+  };
+
   return {
     [HOTEL_CLUSTERS_CHANNELS.list]: list,
     [HOTEL_CLUSTERS_CHANNELS.save]: save,
     [HOTEL_CLUSTERS_CHANNELS.delete]: del,
     [HOTEL_CLUSTERS_CHANNELS.membersView]: membersView,
+    [HOTEL_CLUSTERS_CHANNELS.adopt]: adopt,
   };
 }

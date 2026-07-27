@@ -83,6 +83,12 @@ export interface ClusterPositionRefDto {
   effectiveWeight: number;
   /** Set when the assignment is broken — the row resolves to weight 1. */
   warning?: "NOT_MEMBER" | "DANGLING";
+  /** The cluster-position group this row belongs to ("" = a standalone row
+   *  that happens to carry the assignment). Rows sharing a link id are ONE
+   *  person: the Clusters screen groups them into a single line, and a
+   *  standalone row in a member hotel is a candidate to be adopted into a
+   *  group (the hand-made-duplicate fix). */
+  clusterLinkId: string;
 }
 
 export interface ClusterMembersViewResponse {
@@ -101,4 +107,10 @@ export const HOTEL_CLUSTERS_CHANNELS = {
   delete: "hotelClusters:delete",
   /** Assigned positions across ALL OUs (the one explicit multi-scope read). */
   membersView: "hotelClusters:members-view",
+  /**
+   * Adopt a standalone position into an existing cluster-position group — the
+   * fix for rows created by hand in each hotel before the cluster existed.
+   * Links the row and converges it onto the group's shared values.
+   */
+  adopt: "hotelClusters:adopt-position",
 } as const;

@@ -35,6 +35,7 @@ import {
   AllocationsViewResponse,
 } from "../../shared/allocations/ipc";
 import { ScenarioDto, SECURE_DB_LOCKED } from "../../shared/positions/ipc";
+import { resolvePlanningScenario } from "../../shared/positions/scenarioResolve";
 import {
   useBudgetYear,
   usePlanningScenarioId,
@@ -80,12 +81,8 @@ export default function Allocations() {
       try {
         const scenarios = await listScenarios(selectedHotelOu, budgetYear);
         if (cancelled) return;
-        const forYear = scenarios.filter((s) => s.year === budgetYear);
         setScenario(
-          forYear.find((s) => s.id === planningScenarioId) ??
-            forYear.find((s) => s.label === "Planning") ??
-            forYear[0] ??
-            null
+          resolvePlanningScenario(scenarios, budgetYear, planningScenarioId)
         );
       } catch (err) {
         console.error("Failed to resolve scenario for allocations:", err);

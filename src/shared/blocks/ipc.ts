@@ -24,7 +24,8 @@ export type BlockType =
   | "FLAT_MONTHLY" // per-row absolute amount booked each active month
   | "COUNT_RATE" // per-row count × rate → cost account, count → stats account
   | "CUSTOM_MONTHLY" // per-row 12 monthly amounts
-  | "SOCIAL_SECURITY"; // NI/SS scheme on a contributory base
+  | "SOCIAL_SECURITY" // NI/SS scheme on a contributory base
+  | "POOL_SPREAD"; // one pot (KPI or typed) divided among eligible positions
 
 export const BLOCK_TYPES: readonly BlockType[] = [
   "MULTIPLIER",
@@ -32,6 +33,7 @@ export const BLOCK_TYPES: readonly BlockType[] = [
   "COUNT_RATE",
   "CUSTOM_MONTHLY",
   "SOCIAL_SECURITY",
+  "POOL_SPREAD",
 ] as const;
 
 /**
@@ -45,22 +47,97 @@ export const USER_ADDABLE_BLOCK_TYPES: readonly BlockType[] = BLOCK_TYPES;
 export type BlockSpread =
   | "ACTIVE_MONTHS" // evenly over the position's working months
   | "DAYS" // proportional to working days per month
-  | "VACATION_PATTERN"; // following the position's vacation weights
+  | "VACATION_PATTERN" // following the position's vacation weights
+  | "WEIGHTED_BASE"; // proportional to the monthly base-salary curve
 
 /**
- * What a MULTIPLIER block multiplies against. BASE_SALARY / BLOCK compile to
- * the engine's existing BaseSelector; KPI compiles to the kpi_driver_id path
- * (series × per-row multiplier, resolved at engine load). STAT / CALENDAR /
- * VACATION are stored as a base_ref JSON on the definition and light up with
- * the matching engine BaseSelector extensions.
+ * What a MULTIPLIER block multiplies against. BASE_SALARY / BLOCK / COMPOSITE
+ * compile to the engine's existing BaseSelector; KPI compiles to the
+ * kpi_driver_id path (series × per-row multiplier, resolved at engine load).
+ * STAT / CALENDAR / VACATION are stored as a base_ref JSON on the definition and
+ * light up with the matching engine BaseSelector extensions.
+ *
+ * COMPOSITE is the sum of several series — base salary and/or other blocks'
+ * cost lines. It needs no engine work: the engine's COMPONENTS selector has
+ * always accepted a list, and it already reads the BASE_SALARY definition as
+ * gross salary when that id appears among the refs (see engine/reference.ts
+ * resolveBase and the matching branch in engine/compile.ts). Legacy Excel tools
+ * routinely define pension/bonus this way — "% of salary + food allowance + …".
  */
 export type BlockBaseRef =
   | { kind: "BASE_SALARY" }
   | { kind: "BLOCK"; blockId: string }
+  | { kind: "COMPOSITE"; includeBaseSalary: boolean; blockIds: string[] }
   | { kind: "KPI"; kpiDriverId: string }
   | { kind: "STAT"; stat: "HOURS" | "HEADCOUNT" | "FTE" }
   | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" }
   | { kind: "VACATION" };
+
+/** Where a POOL_SPREAD block's monthly pot comes from. */
+export type PoolSource =
+  | "KPI" // a KPI driver's cached series (already multiplier-applied)
+  | "MANUAL"; // twelve amounts typed into the block config
+
+/**
+ * The per-position weight a POOL_SPREAD block divides its pot by. Mirrors the
+ * Allocations vocabulary (see shared/allocations/ipc.ts) minus MANHOURS_PAID and
+ * CONTRACT_DAYS, whose inputs (contractYearlyDays / contractDaysOff) are
+ * POSITION_EXTRA and never reach the engine Position type.
+ */
+export type PoolSpreadBase =
+  | "HEADCOUNT"
+  | "FTE"
+  | "MANHOURS_WORKED"
+  | "BASE_SALARY"
+  | "VACATION_DAYS"
+  | "FLAT";
+
+export const POOL_SPREAD_BASES: readonly PoolSpreadBase[] = [
+  "HEADCOUNT",
+  "FTE",
+  "MANHOURS_WORKED",
+  "BASE_SALARY",
+  "VACATION_DAYS",
+  "FLAT",
+] as const;
+
+export const POOL_SPREAD_BASE_META: Record<
+  PoolSpreadBase,
+  { label: string; hint: string }
+> = {
+  HEADCOUNT: {
+    label: "Headcount",
+    hint: "Equal per head — a row counting 3 people takes three shares.",
+  },
+  FTE: {
+    label: "FTE",
+    hint: "By full-time equivalent, so part-timers take a smaller share.",
+  },
+  MANHOURS_WORKED: {
+    label: "Man-hours worked",
+    hint: "By hours actually worked over the year, vacation excluded.",
+  },
+  BASE_SALARY: {
+    label: "Base salary",
+    hint: "Higher earners take proportionally more. Note that hourly-paid positions carry no monthly base salary and would take nothing.",
+  },
+  VACATION_DAYS: {
+    label: "Vacation days",
+    hint: "By contractual vacation entitlement.",
+  },
+  FLAT: {
+    label: "Flat (equal per row)",
+    hint: "Every eligible row takes the same share regardless of how many people it counts.",
+  },
+};
+
+/** How a POOL_SPREAD block decides which positions share the pot. */
+export type PoolEligibilityMode =
+  | "MANUAL" // per-row tick box in the grid
+  | "RULE"; // department / classification filters here in the config
+
+/** Number of monthly amounts a MANUAL pool carries. */
+export const POOL_MONTHS = 12;
 
 /** The payload the renderer sends to create/update a block. */
 export interface BlockInput {
@@ -90,6 +167,14 @@ export interface BlockInput {
    *  shows "set up NI". A block's membership in any scheme's base now lives on
    *  the scheme itself (SocialSecurityScheme.baseComponentIds), not here. */
   ssSchemeId?: string;
+  /** POOL_SPREAD only — see BlockDto for the semantics of each. */
+  poolSource?: PoolSource;
+  poolKpiDriverId?: string;
+  poolMonthlyAmounts?: number[];
+  poolSpreadBase?: PoolSpreadBase;
+  poolEligibilityMode?: PoolEligibilityMode;
+  poolDepartments?: string[];
+  poolJobTypes?: string[];
 }
 
 /** A block as seen by the renderer. */
@@ -114,6 +199,26 @@ export interface BlockDto {
    *  the per-row "Opening base" input column (resolved server-side against the
    *  scheme, since BlockDto alone has no accumulation fields). */
   ssCumulativeNonJan?: boolean;
+  /**
+   * POOL_SPREAD only. The block owns ONE pot per month and divides it among the
+   * eligible positions, so — unlike every other block type — the per-row figures
+   * are an output, and their sum is exactly the pot. See
+   * shared/positions/poolSpread.ts for the division itself.
+   */
+  poolSource?: PoolSource;
+  /** POOL_SPREAD + poolSource KPI: the driver whose series is the pot. */
+  poolKpiDriverId?: string;
+  /** POOL_SPREAD + poolSource MANUAL: twelve amounts, Jan..Dec. */
+  poolMonthlyAmounts?: number[];
+  /** POOL_SPREAD: what each eligible position's share is proportional to. */
+  poolSpreadBase?: PoolSpreadBase;
+  /** POOL_SPREAD: RULE derives eligibility here (and locks the grid cells);
+   *  MANUAL leaves it to a per-row tick box. */
+  poolEligibilityMode?: PoolEligibilityMode;
+  /** POOL_SPREAD + RULE: department codes; empty means every department. */
+  poolDepartments?: string[];
+  /** POOL_SPREAD + RULE: job-type codes; empty means every classification. */
+  poolJobTypes?: string[];
   sortOrder: number;
   updatedAt: string;
   /** Compiled engine definition ids (the grid keys inputs/totals by these). */
@@ -141,12 +246,42 @@ export function blockStatDefId(blockId: string): string {
   return `${blockId}:stat`;
 }
 
+/**
+ * Deterministic ids of the permanent SYSTEM definitions — the heads that exist
+ * for every OU regardless of which blocks the user has built (see
+ * blocks/repo.ensureSystemDefs, which seeds them).
+ *
+ * Shared rather than main-only because the renderer needs them too: each is the
+ * definition a Positions-grid account column posts through, and both engine-input
+ * assemblies attach the per-row account by these ids (see
+ * engineInput.applyPositionAccounts).
+ */
+export function baseSalaryDefId(ou: string): string {
+  return `sys-base:${ou}`;
+}
+export function positionCountDefId(ou: string): string {
+  return `sys-poscount:${ou}`;
+}
+export function systemStatDefId(
+  ou: string,
+  stat: "HOURS" | "HEADCOUNT" | "FTE"
+): string {
+  return `sys-stat-${stat.toLowerCase()}:${ou}`;
+}
+export function holidayAccrualDefId(ou: string): string {
+  return `sys-accrual:${ou}`;
+}
+export function vacationCostDefId(ou: string): string {
+  return `sys-vaccost:${ou}`;
+}
+
 /** Engine spread method a BlockSpread maps to (yearly value is synthesized
  *  per row by the block-value resolver: count × rate or count alone). */
 export const SPREAD_TO_METHOD: Record<BlockSpread, SpreadMethod> = {
   ACTIVE_MONTHS: "FLAT_PER_ACTIVE_MONTH",
   DAYS: "FLAT_PER_DAY",
   VACATION_PATTERN: "VACATION_WEIGHTED",
+  WEIGHTED_BASE: "WEIGHTED_BY_BASE",
 };
 
 export const BLOCKS_CHANNELS = {

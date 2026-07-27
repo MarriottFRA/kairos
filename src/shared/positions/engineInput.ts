@@ -11,6 +11,12 @@
  */
 
 import { CalendarYear } from "../calendar";
+import {
+  baseSalaryDefId,
+  holidayAccrualDefId,
+  systemStatDefId,
+  vacationCostDefId,
+} from "../blocks/ipc";
 import { KPI_EXPLICIT_DEPT_KEY } from "../kpiDrivers/ipc";
 import {
   CalendarContext,
@@ -21,6 +27,9 @@ import {
   Position,
   SocialSecurityScheme,
 } from "../engine/types";
+import { FullTimeReference } from "../positionDefaults";
+import { ACCOUNT_FIELD_KEYS } from "./fields";
+import { POSITION_COUNT_ACCOUNT } from "./systemAccounts";
 
 /**
  * The bank-holiday premium is configured on the calendar (per hotel-year).
@@ -96,6 +105,106 @@ export function resolveYearlyHoursWorked(
   return storedYearlyHoursWorked > 0
     ? storedYearlyHoursWorked
     : deriveYearlyHoursWorked(position, calendar);
+}
+
+// ---------------------------------------------------------------------------
+// FTE — derived from the contract, measured against the hotel's full-timer
+// ---------------------------------------------------------------------------
+
+/** The three Contract day-count columns FTE reads. POSITION_EXTRA fields, so
+ *  they arrive in a stored position's `extraValues` or on a live grid row —
+ *  the same two shapes readPositionAccounts serves. */
+export const FTE_CONTRACT_KEYS = {
+  yearlyDays: "contractYearlyDays",
+  daysOff: "contractDaysOff",
+  pubHolidays: "contractPubHolidays",
+} as const;
+
+export interface ContractDays {
+  yearlyDays: number;
+  daysOff: number;
+  pubHolidays: number;
+}
+
+function dayValue(source: Record<string, unknown>, key: string): number {
+  const num = Number(source[key]);
+  return Number.isFinite(num) ? num : 0;
+}
+
+/** Read a position's contract day counts out of a flat key/value bag. One
+ *  reader for both engine-input assemblies, exactly like readPositionAccounts. */
+export function readContractDays(source: Record<string, unknown>): ContractDays {
+  return {
+    yearlyDays: dayValue(source, FTE_CONTRACT_KEYS.yearlyDays),
+    daysOff: dayValue(source, FTE_CONTRACT_KEYS.daysOff),
+    pubHolidays: dayValue(source, FTE_CONTRACT_KEYS.pubHolidays),
+  };
+}
+
+/**
+ * A position's FTE — how much of one full-time contract it is worth. Derived,
+ * never entered (VBA Associate Details column P):
+ *
+ *   hours worked   (Yearly Days − Vacation − Days Off − Public Holidays)
+ *                  × Daily Hours ÷ 12 × Working Months
+ *   ─────────────  ────────────────────────────────────────────────────────
+ *   full-timer's   (FT productive days − Vacation) × (FT weekly hours ÷ 5)
+ *
+ * Two things about this are deliberate and easy to "fix" wrongly:
+ *
+ * - Vacation is subtracted on BOTH sides, so a generous entitlement does not
+ *   depress a post's FTE — a full-timer with 30 days off is still one FTE. It
+ *   is the row's own vacation on both sides, which is what makes the ratio
+ *   collapse to 1.00 for anyone on the hotel's standard contract.
+ * - The ÷12 × Working Months prorate is what makes a six-month seasonal post
+ *   read 0.50. The engine then spreads that figure across the active months by
+ *   the same seasonality vector (STAT_FTE), so the yearly total is the FTE and
+ *   the monthly line is the FTE while working.
+ *
+ * A row with NO Yearly Days at all falls back to the full-time productive year
+ * rather than reading 0. Those three columns arrived with the hotel-year safe
+ * defaults, so rows written before them are simply blank — and "this post has
+ * no contract" is not what a blank means there; treating it as one would zero
+ * the FTE of every pre-existing position, and with it every FTE-based pool
+ * share and staffing stat. A row that states its own Yearly Days is always
+ * taken at its word, blank Days Off and Public Holidays included.
+ *
+ * Returns 0 when the yardstick is unusable (no defaults loaded, zero-hour
+ * full-time week) rather than dividing by zero — the grid shows a blank/0 cell
+ * until the hotel-year defaults are there.
+ */
+export function deriveFte(
+  position: Pick<Position, "vacationDays" | "dailyContractHours" | "seasonality">,
+  contract: ContractDays,
+  reference: FullTimeReference
+): number {
+  const stated = contract.yearlyDays > 0;
+  const productiveDays = stated
+    ? contract.yearlyDays - contract.daysOff - contract.pubHolidays
+    : reference.productiveDays;
+
+  const workedDays = productiveDays - position.vacationDays;
+  if (workedDays <= 0 || position.dailyContractHours <= 0) return 0;
+
+  let workingMonths = 0;
+  for (let m = 0; m < MONTHS; m++) workingMonths += position.seasonality[m] ?? 0;
+
+  const worked =
+    ((workedDays * position.dailyContractHours) / MONTHS) * workingMonths;
+
+  const fullTimeDays = reference.productiveDays - position.vacationDays;
+  const fullTime = fullTimeDays * reference.dailyHours;
+  return fullTime > 0 ? worked / fullTime : 0;
+}
+
+/** deriveFte straight off a flat bag of contract values — the form both engine
+ *  paths and the grid actually hold. */
+export function resolveFte(
+  position: Pick<Position, "vacationDays" | "dailyContractHours" | "seasonality">,
+  source: Record<string, unknown>,
+  reference: FullTimeReference
+): number {
+  return deriveFte(position, readContractDays(source), reference);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +385,155 @@ export function resolveBlockValues(
       updatedAt: value.updatedAt,
       deletedAt: null,
     });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Per-position posting accounts → the system definitions
+// ---------------------------------------------------------------------------
+
+/**
+ * The posting accounts a position carries on its own row, one per permanent
+ * system head (see blocks/repo.ensureSystemDefs, which seeds those heads with a
+ * BLANK account precisely so the row can supply it).
+ *
+ * Each is optional and may be blank. Blank does NOT suppress the calculation:
+ * the line still computes and stays available as a base for other blocks; it is
+ * only excluded from the output projection (see outputLines). That is the
+ * workbook's "Blank" contract — compute everything, post what has an account.
+ */
+export interface PositionAccounts {
+  /** Base salary, net of vacation taken. */
+  salary?: string;
+  /** The per-row headcount stat (distinct from the pinned position-count head,
+   *  which always posts to POSITION_COUNT_ACCOUNT whatever this says). */
+  headcount?: string;
+  /** Hours worked stat. */
+  hours?: string;
+  /** Vacation accrual movement. */
+  accrual?: string;
+  /** Vacation cost actually taken — the amount BASE_DEDUCT nets out of salary. */
+  benefits?: string;
+}
+
+function accountValue(source: Record<string, unknown>, key: string): string {
+  const value = source[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Read a position's posting accounts out of a flat key/value bag — either a
+ * stored position's `extraValues` or a live grid row, which carry the same keys.
+ *
+ * One reader for both engine-input assemblies: that is what stops the persisted
+ * run and the grid's live sim from reading different fields (liveSimParity pins
+ * them, but only behaviour they actually share can be pinned).
+ */
+export function readPositionAccounts(
+  source: Record<string, unknown>
+): PositionAccounts {
+  return {
+    salary: accountValue(source, ACCOUNT_FIELD_KEYS.salary),
+    headcount: accountValue(source, ACCOUNT_FIELD_KEYS.headcount),
+    hours: accountValue(source, ACCOUNT_FIELD_KEYS.hours),
+    accrual: accountValue(source, ACCOUNT_FIELD_KEYS.accrual),
+    benefits: accountValue(source, ACCOUNT_FIELD_KEYS.benefits),
+  };
+}
+
+/**
+ * Attach each position's own posting accounts to the system definitions.
+ *
+ * This is the step whose absence meant Results only ever showed the pinned
+ * position-count account: the grid's five account columns were stored on the
+ * position and read by nothing, so every system head compiled with the blank
+ * account it was seeded with and was dropped from the output.
+ *
+ * Implemented as synthesized ComponentValue rows rather than new fields on
+ * Position because the compiler already resolves a per-row account override that
+ * way (`value?.accountCode ?? def.accountCode`), and for BASE_SALARY / STAT /
+ * HOLIDAY_ACCRUAL definitions the ComponentValue is consulted for NOTHING ELSE.
+ * So this changes only the dept×account key a line aggregates under, never a
+ * value — with the single deliberate exception of the vacation-cost head, which
+ * needs `rate: 1` because it is a PERCENT_OF spread over the vacation series.
+ *
+ * Returns a NEW array. Existing rows are preserved (shallow-cloned where an
+ * account merges onto them) — never appended alongside, because compile keys
+ * values by `positionId|componentDefId` and a duplicate would silently win or
+ * lose depending on order.
+ */
+export function applyPositionAccounts(
+  ou: string,
+  componentValues: ComponentValue[],
+  accountsByPosition: Map<string, PositionAccounts>
+): ComponentValue[] {
+  if (accountsByPosition.size === 0) return componentValues;
+
+  // defId → the patch that def needs. `rate` is only for the vacation-cost head.
+  const patchFor = (
+    accounts: PositionAccounts
+  ): Array<{ defId: string; accountCode: string; rate?: number }> => [
+    { defId: baseSalaryDefId(ou), accountCode: accounts.salary ?? "" },
+    {
+      defId: systemStatDefId(ou, "HEADCOUNT"),
+      // The pinned position-count head already books every head to
+      // POSITION_COUNT_ACCOUNT. Letting the per-row headcount pick the SAME
+      // account would intern both lines onto one dept|account key, and the
+      // outputs read SUMS lines sharing a key — reporting double the heads.
+      // Drop the override instead, so this line simply does not post.
+      accountCode:
+        (accounts.headcount ?? "").trim().toUpperCase() === POSITION_COUNT_ACCOUNT
+          ? ""
+          : accounts.headcount ?? "",
+    },
+    { defId: systemStatDefId(ou, "HOURS"), accountCode: accounts.hours ?? "" },
+    { defId: holidayAccrualDefId(ou), accountCode: accounts.accrual ?? "" },
+    // rate 1 = "100% of the vacation series", i.e. the leave actually taken.
+    // Unconditional: the line must compute even with no account, so that a
+    // block using it as a base sees the same number the persisted run does.
+    { defId: vacationCostDefId(ou), accountCode: accounts.benefits ?? "", rate: 1 },
+  ];
+
+  const out: ComponentValue[] = [];
+  const merged = new Set<string>();
+  const byKey = new Map<string, ComponentValue>();
+  for (const value of componentValues) {
+    byKey.set(`${value.positionId as string}|${value.componentDefId as string}`, value);
+  }
+
+  for (const [positionId, accounts] of accountsByPosition) {
+    for (const patch of patchFor(accounts)) {
+      const key = `${positionId}|${patch.defId}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        merged.add(key);
+        out.push({
+          ...existing,
+          accountCode: patch.accountCode,
+          rate: patch.rate ?? existing.rate,
+        });
+        continue;
+      }
+      // A blank account with nothing else to carry needs no row at all: the
+      // compiler falls back to the definition's own account, which for every
+      // head here is equally blank. Skipping keeps ~4 objects per position out of
+      // the plan in the common "no accounts picked yet" case.
+      if (!patch.accountCode && patch.rate === undefined) continue;
+      out.push({
+        positionId: positionId as ComponentValue["positionId"],
+        componentDefId: patch.defId as ComponentDefId,
+        accountCode: patch.accountCode,
+        rate: patch.rate,
+        updatedAt: "",
+        deletedAt: null,
+      });
+    }
+  }
+
+  for (const value of componentValues) {
+    const key = `${value.positionId as string}|${value.componentDefId as string}`;
+    if (!merged.has(key)) out.push(value);
   }
   return out;
 }

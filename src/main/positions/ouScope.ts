@@ -8,8 +8,12 @@
  * isn't OU-scoped is a compile error, not a code-review catch, and a row
  * object cannot smuggle itself into another hotel's data.
  *
- * Cross-OU (cluster) reads, when they arrive, will be a separate explicit
- * multi-scope API — never a default.
+ * Cross-OU (cluster) access is a separate explicit multi-scope API — never a
+ * default. There are exactly two, both narrow and both greppable:
+ *   main/hotelClusters/repo.ts   the cluster assignment view + clear
+ *   main/positions/clusterSync.ts cluster-position sibling rows
+ * Both mint a scope per target hotel through resolveOuScope() and bind it the
+ * same way a single-hotel query would; neither ever runs an unscoped write.
  */
 
 // Canonical form: "OU" + a 5-character alphanumeric unit code (e.g. OU25RJ2).

@@ -4,9 +4,12 @@
  * plus the aggregate save-status chip fed by the write queue.
  */
 
+import { useState } from "react";
 import AddIcon from "@mui/icons-material/Add";
+import ArrowDropDownIcon from "@mui/icons-material/ArrowDropDown";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DashboardCustomizeOutlinedIcon from "@mui/icons-material/DashboardCustomizeOutlined";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import DownloadIcon from "@mui/icons-material/Download";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
 import SearchIcon from "@mui/icons-material/Search";
@@ -15,10 +18,20 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import WorkspacesIcon from "@mui/icons-material/Workspaces";
 import {
   Button,
+  ButtonGroup,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
   InputAdornment,
+  ListItemIcon,
+  ListItemText,
+  Menu,
+  MenuItem,
   Stack,
   TextField,
   ToggleButton,
@@ -28,6 +41,11 @@ import { QueueState } from "../../services/positionsWriteQueue";
 
 const CONTROL_HEIGHT = 36;
 
+/** Ceiling on one "add several" action — each new row is a queued create. */
+export const MAX_BULK_ADD = 50;
+
+const ADD_PRESETS = [5, 10, 25];
+
 export interface PositionsToolbarProps {
   disabled: boolean;
   /** Planning context (set in the app bar) — shown as chips on the right. */
@@ -36,17 +54,20 @@ export interface PositionsToolbarProps {
   masked: boolean;
   groupByDept: boolean;
   showInactive: boolean;
-  /** Checked rows — drives the bulk activate/deactivate pair. */
+  /** Checked rows — drives the whole bulk band. */
   selectedCount: number;
   quickFilter: string;
   queueState: QueueState;
   pendingRows: number;
-  onAddPosition: () => void;
+  /** Append `count` blank positions (1 from the main button, N from its menu). */
+  onAddPositions: (count: number) => void;
   onAddBlock: () => void;
   onToggleMask: () => void;
   onToggleGroup: () => void;
   onToggleInactive: () => void;
   onBulkActive: (active: boolean) => void;
+  onBulkDuplicate: () => void;
+  onBulkDelete: () => void;
   onCopyFromYear: () => void;
   onQuickFilter: (value: string) => void;
   onExportCsv: () => void;
@@ -119,32 +140,140 @@ export default function PositionsToolbar({
   quickFilter,
   queueState,
   pendingRows,
-  onAddPosition,
+  onAddPositions,
   onAddBlock,
   onToggleMask,
   onToggleGroup,
   onToggleInactive,
   onBulkActive,
+  onBulkDuplicate,
+  onBulkDelete,
   onCopyFromYear,
   onQuickFilter,
   onExportCsv,
 }: PositionsToolbarProps) {
+  // Both menus and the custom-count prompt are the toolbar's own business —
+  // the page above it only ever hears the resulting intent.
+  const [addAnchor, setAddAnchor] = useState<HTMLElement | null>(null);
+  const [bulkAnchor, setBulkAnchor] = useState<HTMLElement | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customCount, setCustomCount] = useState("10");
+
+  const customValid = /^\d+$/.test(customCount.trim())
+    ? Number(customCount) >= 1 && Number(customCount) <= MAX_BULK_ADD
+    : false;
+
+  const submitCustom = () => {
+    if (!customValid) return;
+    setCustomOpen(false);
+    onAddPositions(Number(customCount));
+  };
+
+  const plural = `position${selectedCount === 1 ? "" : "s"}`;
+
   return (
     <Stack
       direction="row"
       spacing={1.5}
       sx={{ alignItems: "center", flexWrap: "wrap", rowGap: 1 }}
     >
-      <Button
-        variant="contained"
-        disableElevation
-        startIcon={<AddIcon />}
-        onClick={onAddPosition}
-        disabled={disabled}
-        sx={{ height: CONTROL_HEIGHT, px: 2 }}
+      {/* Split button: the bare click adds one row and drops you into its first
+          cell; the arrow adds a batch, which deliberately does not open an
+          editor (see addPositions). */}
+      <ButtonGroup variant="contained" disableElevation sx={{ height: CONTROL_HEIGHT }}>
+        <Button
+          startIcon={<AddIcon />}
+          onClick={() => onAddPositions(1)}
+          disabled={disabled}
+          sx={{ px: 2 }}
+        >
+          Add position
+        </Button>
+        <Button
+          size="small"
+          aria-label="Add several positions"
+          onClick={(event) => setAddAnchor(event.currentTarget)}
+          disabled={disabled}
+          sx={{ px: 0.5, minWidth: 32 }}
+        >
+          <ArrowDropDownIcon />
+        </Button>
+      </ButtonGroup>
+
+      <Menu
+        anchorEl={addAnchor}
+        open={!!addAnchor}
+        onClose={() => setAddAnchor(null)}
       >
-        Add position
-      </Button>
+        {ADD_PRESETS.map((count) => (
+          <MenuItem
+            key={count}
+            onClick={() => {
+              setAddAnchor(null);
+              onAddPositions(count);
+            }}
+          >
+            Add {count} positions
+          </MenuItem>
+        ))}
+        <Divider />
+        <MenuItem
+          onClick={() => {
+            setAddAnchor(null);
+            setCustomOpen(true);
+          }}
+        >
+          Add a specific number…
+        </MenuItem>
+      </Menu>
+
+      <Dialog
+        open={customOpen}
+        onClose={() => setCustomOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Add positions</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Blank rows are appended to the grid, ready to fill in. Up to{" "}
+            {MAX_BULK_ADD} at a time.
+          </DialogContentText>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            type="number"
+            label="How many"
+            value={customCount}
+            onChange={(event) => setCustomCount(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitCustom();
+              }
+            }}
+            error={customCount.trim() !== "" && !customValid}
+            helperText={
+              customCount.trim() !== "" && !customValid
+                ? `Enter a whole number between 1 and ${MAX_BULK_ADD}`
+                : " "
+            }
+            slotProps={{ htmlInput: { min: 1, max: MAX_BULK_ADD } }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCustomOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disableElevation
+            disabled={!customValid}
+            onClick={submitCustom}
+          >
+            Add
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Tooltip title="Add a calculation block — a new set of columns that generates costs or statistics for every position">
         <span>
@@ -200,7 +329,10 @@ export default function PositionsToolbar({
       </Tooltip>
 
       {/* Only present with a selection: the checkbox column is the affordance
-          that puts it there, and the pair is meaningless without one. */}
+          that puts it there, and the band is meaningless without one. The two
+          reversible toggles stay inline; everything that creates or destroys
+          rows sits behind the menu, which is also where the band stops growing
+          as more bulk actions land. */}
       {selectedCount > 0 && (
         <>
           <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
@@ -227,6 +359,48 @@ export default function PositionsToolbar({
           >
             Deactivate
           </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            endIcon={<ArrowDropDownIcon />}
+            onClick={(event) => setBulkAnchor(event.currentTarget)}
+            sx={{ height: CONTROL_HEIGHT, px: 1.5 }}
+          >
+            Bulk actions
+          </Button>
+          <Menu
+            anchorEl={bulkAnchor}
+            open={!!bulkAnchor}
+            onClose={() => setBulkAnchor(null)}
+          >
+            <MenuItem
+              onClick={() => {
+                setBulkAnchor(null);
+                onBulkDuplicate();
+              }}
+            >
+              <ListItemIcon>
+                <ContentCopyIcon fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary={`Duplicate ${selectedCount} ${plural}`}
+                secondary="Copies keep the contract, not the identity"
+              />
+            </MenuItem>
+            <Divider />
+            <MenuItem
+              onClick={() => {
+                setBulkAnchor(null);
+                onBulkDelete();
+              }}
+              sx={{ color: "error.main" }}
+            >
+              <ListItemIcon>
+                <DeleteOutlineIcon fontSize="small" color="error" />
+              </ListItemIcon>
+              <ListItemText primary={`Delete ${selectedCount} ${plural}`} />
+            </MenuItem>
+          </Menu>
           <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
         </>
       )}

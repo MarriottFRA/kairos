@@ -16,8 +16,12 @@ export const BLOCK_CONFIGS_SQL = `
   CREATE TABLE IF NOT EXISTS block_configs (
       id         TEXT PRIMARY KEY,
       ou         TEXT NOT NULL,
+      -- Widening this list is a baseline edit while the store is pre-launch
+      -- (local_db CURRENT_SCHEMA_VERSION 1) and needs Settings -> Danger Zone ->
+      -- Rebuild database on an existing dev store: SQLite cannot ALTER a CHECK,
+      -- so post-launch it becomes an append-only table-rebuild migration.
       block_type TEXT NOT NULL CHECK (block_type IN
-        ('MULTIPLIER','FLAT_MONTHLY','COUNT_RATE','CUSTOM_MONTHLY','SOCIAL_SECURITY')),
+        ('MULTIPLIER','FLAT_MONTHLY','COUNT_RATE','CUSTOM_MONTHLY','SOCIAL_SECURITY','POOL_SPREAD')),
       label      TEXT NOT NULL,
       -- Everything type-specific (accounts, locks, base ref, spread choice,
       -- increase-aware, department mode) as one JSON blob; the compiled

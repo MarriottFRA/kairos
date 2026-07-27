@@ -28,10 +28,12 @@ import {
   FieldCatalog,
   FieldDataType,
   fieldLabel,
+  HOTEL_CLUSTER_KEY,
   SectionId,
 } from "../../shared/positions/fields";
 import {
   changedFieldKeys,
+  fteById,
   newDraftRow,
   manhoursWorkedById,
   PositionRow,
@@ -73,6 +75,13 @@ import {
   ScenarioDto,
   SECURE_DB_LOCKED,
 } from "../../shared/positions/ipc";
+import { resolvePlanningScenario } from "../../shared/positions/scenarioResolve";
+import {
+  CLUSTER_LINK_ROW_KEY,
+  ClusterSyncResult,
+} from "../../shared/positions/clusterSync";
+import authService from "../../services/auth";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   addSectionField,
   getFieldCatalog,
@@ -88,7 +97,9 @@ import { AccountOption, DepartmentOption } from "../../shared/mappingTables/type
 import { listScenarios } from "../../services/scenarioService";
 import { loadPositionDefaults } from "../../services/positionDefaultsService";
 import {
+  FullTimeReference,
   PositionDefaults,
+  fullTimeReference,
   seedInitForPosition,
 } from "../../shared/positionDefaults";
 import {
@@ -103,11 +114,17 @@ import {
 } from "../../store/settings";
 import { useGridStatePersistence } from "../../hooks/useGridStatePersistence";
 import PositionsGrid from "../../components/positions/PositionsGrid";
-import PositionsToolbar from "../../components/positions/PositionsToolbar";
+import PositionsToolbar, {
+  MAX_BULK_ADD,
+} from "../../components/positions/PositionsToolbar";
 import AddFieldDialog from "../../components/positions/AddFieldDialog";
 import RemoveFieldDialog from "../../components/positions/RemoveFieldDialog";
 import ManageColumnsDialog from "../../components/positions/ManageColumnsDialog";
 import CopyScenarioDialog from "../../components/positions/CopyScenarioDialog";
+import DeleteClusterPositionDialog, {
+  PendingPositionDelete,
+} from "../../components/positions/DeleteClusterPositionDialog";
+import PositionFormDialog from "../../components/positions/PositionFormDialog";
 import { uuidv7 } from "../../shared/engine/ids";
 
 /**
@@ -217,6 +234,10 @@ const IDLE_SNAPSHOT: QueueSnapshot = {
  * leaving a stale one; with no reference data loaded the map is empty and the
  * code column is left editable (see columnFactory), so nothing is touched here.
  */
+/** Shared empty list, so "no blocks yet" is one identity rather than a new one
+ *  per render (see the `blocks` memo below). */
+const EMPTY_BLOCKS: BlockDto[] = [];
+
 function applyDeptCodeAutofill(
   row: PositionRow,
   oldRow: PositionRow,
@@ -267,6 +288,27 @@ export default function Positions() {
   // options and the live-sim's multiplier source. Best-effort — with none
   // loaded, assignments resolve to weight 1 and the column degrades to text.
   const [hotelClusters, setHotelClusters] = useState<HotelClusterDto[]>([]);
+  // OU -> hotel name, so a cluster position can say WHICH hotels it is shared
+  // with rather than showing raw OU codes. Best-effort, like the cluster list.
+  const [hotelNames, setHotelNames] = useState<ReadonlyMap<string, string>>(
+    new Map()
+  );
+  /** A delete batch holding at least one clustered row, awaiting the "this
+   *  deletes it in every hotel" confirm. */
+  const [pendingDelete, setPendingDelete] = useState<PendingPositionDelete | null>(
+    null
+  );
+  /** The row open in the Edit Position form, by id — never the row itself, so
+   *  the dialog always re-reads the LIVE row and its derived values refresh as
+   *  you type. The grid stays editable throughout; this is a second way in. */
+  const [editRowId, setEditRowId] = useState<string | null>(null);
+  /** The cell the form was opened from, so it can focus the same field. */
+  const [editFocusField, setEditFocusField] = useState<string | null>(null);
+  /** What the last write did in the other member hotels. */
+  const [clusterNotice, setClusterNotice] = useState<{
+    severity: "info" | "warning";
+    message: string;
+  } | null>(null);
   // KPI drivers with cached series: the block dialog's KPI options AND the
   // series feed for KPI-based blocks in the live sim.
   const [kpiDrivers, setKpiDrivers] = useState<KpiDriverWithSeries[]>([]);
@@ -294,7 +336,8 @@ export default function Positions() {
   const [reloadToken, setReloadToken] = useState(0);
   const [quickFilter, setQuickFilter] = useState("");
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot>(IDLE_SNAPSHOT);
-  const [undoRow, setUndoRow] = useState<PositionRow | null>(null);
+  /** The last deleted batch (a single row delete is a batch of one). */
+  const [undoRows, setUndoRows] = useState<PositionRow[] | null>(null);
   const [addFieldSection, setAddFieldSection] = useState<SectionId | null>(null);
   const [addingField, setAddingField] = useState(false);
   // Column removal: the count-aware confirm (data-bearing only), the busy flag,
@@ -323,6 +366,9 @@ export default function Positions() {
   const [gridEpoch, setGridEpoch] = useState(0);
   const [layoutOverride, setLayoutOverride] = useState<GridInitialState | null>(null);
 
+  const location = useLocation();
+  const navigate = useNavigate();
+
   const queueRef = useRef<PositionsWriteQueue | null>(null);
   const catalogRef = useRef<FieldCatalog | null>(null);
   catalogRef.current = catalog;
@@ -330,6 +376,16 @@ export default function Positions() {
   // set changes under it (same pattern as catalogRef).
   const blocksRef = useRef<BlockDto[]>([]);
   blocksRef.current = blocksModel?.blocks ?? [];
+  // The grid's blocks prop, memoized: `blocksModel?.blocks ?? []` inline mints a
+  // new empty array on every render while blocks are still loading, which alone
+  // is enough to invalidate the grid's columnGroupingModel memo every time the
+  // page renders — and rebuilding that model re-walks every column.
+  const blocks = useMemo(() => blocksModel?.blocks ?? EMPTY_BLOCKS, [blocksModel]);
+  // Same pattern for hotel names: the cluster-sync reporter must stay stable,
+  // because it is handed to the write queue and a new identity would tear the
+  // queue down mid-edit.
+  const hotelNamesRef = useRef<ReadonlyMap<string, string>>(new Map());
+  hotelNamesRef.current = hotelNames;
   // name -> code, for the Department code auto-fill in the edit/paste path. A
   // ref so handleRowUpdate stays a stable callback while the map updates under
   // it. Names carry the unique code, so the mapping is effectively 1:1; on the
@@ -339,10 +395,12 @@ export default function Positions() {
     () => new Map(departments.map((dept) => [dept.name, dept.code])),
     [departments]
   );
-  // Safe defaults for (hotel, budget year) — read only when adding a position,
-  // so a ref (not state) is enough; a new row seeds from it and is then
-  // independent.
+  // Safe defaults for (hotel, budget year). The ref is the add-a-position seed
+  // (read only on that path, and the new row is independent afterwards); the
+  // state is the FTE denominator, which every row is displayed against and so
+  // has to re-render the grid when it lands. Both are set from one fetch.
   const defaultsRef = useRef<PositionDefaults | null>(null);
+  const [fullTime, setFullTime] = useState<FullTimeReference | null>(null);
 
   const restoredState = useGridStatePersistence(
     apiRef,
@@ -364,12 +422,11 @@ export default function Positions() {
         const scenarios = await listScenarios(selectedHotelOu, budgetYear);
         if (cancelled) return;
         setAllScenarios(scenarios);
-        const forYear = scenarios.filter((s) => s.year === budgetYear);
-        const resolved =
-          forYear.find((s) => s.id === planningScenarioId) ??
-          forYear.find((s) => s.label === "Planning") ??
-          forYear[0] ??
-          null;
+        const resolved = resolvePlanningScenario(
+          scenarios,
+          budgetYear,
+          planningScenarioId
+        );
         setScenario(resolved);
         if (resolved && resolved.id !== planningScenarioId) {
           void setPlanningScenarioId(resolved.id);
@@ -415,20 +472,30 @@ export default function Positions() {
     };
   }, []);
 
-  // ── Safe defaults for (hotel, budget year): the seed for a new position ──
+  // ── Safe defaults for (hotel, budget year) ──
+  // Two jobs: the seed for a new position, and the full-time contract every
+  // row's FTE is derived against. The handler resolves linked fields against
+  // the saved calendar, so this is the same yardstick loadScenarioInput builds.
   useEffect(() => {
     if (!selectedHotelOu) {
       defaultsRef.current = null;
+      setFullTime(null);
       return;
     }
     let cancelled = false;
     (async () => {
       try {
         const { defaults } = await loadPositionDefaults(selectedHotelOu, budgetYear);
-        if (!cancelled) defaultsRef.current = defaults;
+        if (!cancelled) {
+          defaultsRef.current = defaults;
+          setFullTime(fullTimeReference(defaults));
+        }
       } catch (err) {
         console.error("Failed to load position defaults:", err);
-        if (!cancelled) defaultsRef.current = null;
+        if (!cancelled) {
+          defaultsRef.current = null;
+          setFullTime(null);
+        }
       }
     })();
     return () => {
@@ -500,6 +567,18 @@ export default function Positions() {
         console.error("Failed to load hotel clusters:", err);
         if (!cancelled) setHotelClusters([]);
       }
+      // Names are cosmetic — a failure leaves cluster tooltips showing OU codes,
+      // which is worse to read but never wrong, so it never blocks the grid.
+      try {
+        const hotels = await authService.getHotels();
+        if (!cancelled) {
+          setHotelNames(
+            new Map(hotels.map((hotel) => [hotel.ou, hotel.hotel_name]))
+          );
+        }
+      } catch (err) {
+        console.warn("Hotel names unavailable for cluster tooltips:", err);
+      }
     })();
     return () => {
       cancelled = true;
@@ -520,6 +599,10 @@ export default function Positions() {
     () => manhoursWorkedById(rows, calendarCtx, scenario?.id ?? ""),
     [rows, calendarCtx, scenario]
   );
+
+  // Derived FTE per row — the row's contract over the hotel's full-timer. Blank
+  // (empty map) until the defaults that supply the denominator have loaded.
+  const ftes = useMemo(() => fteById(rows, fullTime), [rows, fullTime]);
 
   // ── Live block simulation: the real engine over the live rows ──
   // Recomputed on every committed edit (cell commit, not keystroke) — a full
@@ -544,9 +627,58 @@ export default function Positions() {
       scenarioId: scenario.id,
       ou: selectedHotelOu,
       hotelClusters,
+      // FTE is derived, so the sim has to derive it too — an FTE-based pooled
+      // block would otherwise spread over a grid of zeros.
+      fullTime: fullTime ?? undefined,
     });
     return { results: run.results, errors: run.errors } as const;
-  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu, hotelClusters]);
+  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu, hotelClusters, fullTime]);
+
+  /**
+   * Report what a write did to the OTHER member hotels.
+   *
+   * Two things must never be silent: rows appearing in hotels the user is not
+   * looking at, and values that could NOT be mirrored (block inputs and user
+   * columns are matched by label, so a hotel without a matching block simply
+   * does not get that cost). The first is an info toast, the second a warning
+   * that names what was left behind.
+   */
+  const handleClusterSync = useCallback(
+    (result: ClusterSyncResult) => {
+      const nameOf = (ou: string) => hotelNamesRef.current.get(ou) ?? ou;
+      const parts: string[] = [];
+      if (result.created.length > 0) {
+        const hotels = [...new Set(result.created.map((made) => made.ou))].map(nameOf);
+        parts.push(`Also added to ${hotels.join(", ")}`);
+      }
+      if (result.unlinked > 0) {
+        parts.push(
+          `${result.unlinked} position${result.unlinked === 1 ? "" : "s"} in other hotels left the cluster`
+        );
+      }
+      if (result.skips.length > 0) {
+        const detail = result.skips
+          .map(
+            (skip) =>
+              `“${skip.label}” → ${nameOf(skip.targetOu)} (${
+                skip.reason === "AMBIGUOUS"
+                  ? "more than one match"
+                  : "no match there"
+              })`
+          )
+          .join("; ");
+        setClusterNotice({
+          severity: "warning",
+          message: `Not mirrored: ${detail}. Add a matching block or column in that hotel, then re-save the row.`,
+        });
+        return;
+      }
+      if (parts.length > 0) {
+        setClusterNotice({ severity: "info", message: parts.join(" · ") });
+      }
+    },
+    []
+  );
 
   // ── Queue lifecycle: one per (hotel, scenario), flushed before swap ──
   useEffect((): (() => void) | undefined => {
@@ -558,7 +690,8 @@ export default function Positions() {
     const queue = new PositionsWriteQueue(
       selectedHotelOu,
       scenario.id,
-      setQueueSnapshot
+      setQueueSnapshot,
+      handleClusterSync
     );
     queueRef.current = queue;
     setQueueSnapshot(IDLE_SNAPSHOT);
@@ -574,7 +707,7 @@ export default function Positions() {
       if (queueRef.current === queue) queueRef.current = null;
       void queue.dispose(); // final flush
     };
-  }, [selectedHotelOu, scenario]);
+  }, [selectedHotelOu, scenario, handleClusterSync]);
 
   // ── Load catalog + rows + PII when the scope changes ──
   useEffect(() => {
@@ -680,67 +813,212 @@ export default function Positions() {
     setError("Could not apply that change");
   }, []);
 
-  const handleAddPosition = useCallback(() => {
-    const currentCatalog = catalogRef.current;
-    const queue = queueRef.current;
-    if (!currentCatalog || !queue) return;
+  // ── Edit Position form ──
+  // The live row, looked up each render: every commit re-renders the page, so
+  // the form's derived values, salary pair and block totals move with it.
+  const editRow = useMemo(
+    () => (editRowId ? rows.find((row) => row.id === editRowId) ?? null : null),
+    [rows, editRowId]
+  );
 
-    // Seed the Contract columns (Yearly Days, Days Off, Public Holidays, Daily
-    // Hours) from the hotel-year safe defaults set on the Home page. The seed is
-    // a one-time copy — the row is fully independent and editable afterwards.
-    const seed: Partial<PositionRow> | undefined = defaultsRef.current
-      ? seedInitForPosition(defaultsRef.current)
-      : undefined;
-    const draft = newDraftRow(currentCatalog, seed);
-    queue.enqueueCreate(toCreate(draft, currentCatalog));
-    setRows((current) => [...current, draft]);
+  // Deleted, filtered away, or the hotel/scenario changed under the dialog —
+  // close it rather than strand the user on a row that no longer exists.
+  useEffect(() => {
+    if (editRowId && !editRow) setEditRowId(null);
+  }, [editRowId, editRow]);
 
-    // Land the user in the first editable cell of the new row.
-    requestAnimationFrame(() => {
-      try {
-        const rowIndex = apiRef.current?.getRowIndexRelativeToVisibleRows(draft.id);
-        if (rowIndex !== undefined && rowIndex >= 0) {
-          apiRef.current?.scrollToIndexes({ rowIndex });
-        }
-        // With PII masked, the first reachable editable cell is the Department
-        // picker (Dept Name) — departmentCode is the read-only code mirror now.
-        const firstField = masked ? "deptName" : "empNumber";
-        apiRef.current?.startCellEditMode({ id: draft.id, field: firstField });
-      } catch {
-        /* focus is best-effort */
+  /** The rows in the order the grid is showing them, for the form's ↑/↓. */
+  const orderedRowIds = useCallback((): string[] => {
+    const known = new Set(rows.map((row) => row.id));
+    // Row grouping injects synthetic group rows, so filter to real ids; before
+    // the grid mounts (or with no sort applied) fall back to load order.
+    const sorted = (apiRef.current?.getSortedRowIds?.() ?? [])
+      .map(String)
+      .filter((id) => known.has(id));
+    return sorted.length > 0 ? sorted : rows.map((row) => row.id);
+  }, [rows, apiRef]);
+
+  const editIndex = useMemo(
+    () => (editRowId ? orderedRowIds().indexOf(editRowId) : -1),
+    [editRowId, orderedRowIds]
+  );
+
+  const handleEditRow = useCallback((row: PositionRow, field?: string) => {
+    setEditRowId(row.id);
+    setEditFocusField(field ?? null);
+  }, []);
+
+  const handleEditNavigate = useCallback(
+    (delta: 1 | -1) => {
+      const ids = orderedRowIds();
+      const next = ids[ids.indexOf(editRowId ?? "") + delta];
+      if (next) setEditRowId(next);
+    },
+    [orderedRowIds, editRowId]
+  );
+
+  const addPositions = useCallback(
+    (count: number, clusterId?: string) => {
+      const currentCatalog = catalogRef.current;
+      const queue = queueRef.current;
+      if (!currentCatalog || !queue) return;
+
+      const total = Math.min(Math.max(Math.trunc(count) || 1, 1), MAX_BULK_ADD);
+
+      // Seed the Contract columns (Yearly Days, Days Off, Public Holidays, Daily
+      // Hours) from the hotel-year safe defaults set on the Home page. The seed is
+      // a one-time copy — the row is fully independent and editable afterwards.
+      // newDraftRow spreads it into a fresh row each call, so one object is safe
+      // to share across the batch.
+      const seed: Partial<PositionRow> | undefined = defaultsRef.current
+        ? seedInitForPosition(defaultsRef.current)
+        : undefined;
+
+      const drafts: PositionRow[] = [];
+      for (let i = 0; i < total; i += 1) {
+        const draft = newDraftRow(
+          currentCatalog,
+          // Started from the Clusters screen: the assignment is the one thing that
+          // page already knows, so the row arrives with it made and mirrors into
+          // the other member hotels on its first save.
+          clusterId ? { ...seed, [HOTEL_CLUSTER_KEY]: clusterId } : seed
+        );
+        queue.enqueueCreate(toCreate(draft, currentCatalog));
+        drafts.push(draft);
       }
-    });
-  }, [apiRef, masked]);
+      setRows((current) => [...current, ...drafts]);
+      if (drafts.length > 1) setToast(`${drafts.length} positions added`);
 
-  const handleDuplicate = useCallback((row: PositionRow) => {
+      requestAnimationFrame(() => {
+        try {
+          const first = drafts[0];
+          const rowIndex = apiRef.current?.getRowIndexRelativeToVisibleRows(first.id);
+          if (rowIndex !== undefined && rowIndex >= 0) {
+            apiRef.current?.scrollToIndexes({ rowIndex });
+          }
+          // A single new row lands the user in its first editable cell. A batch
+          // deliberately does not: an open editor on row 1 of 20 is something to
+          // dismiss before the rows it created are even visible.
+          if (drafts.length === 1) {
+            // With PII masked, the first reachable editable cell is the Department
+            // picker (Dept Name) — departmentCode is the read-only code mirror now.
+            const firstField = masked ? "deptName" : "empNumber";
+            apiRef.current?.startCellEditMode({ id: first.id, field: firstField });
+          }
+        } catch {
+          /* focus is best-effort */
+        }
+      });
+    },
+    [apiRef, masked]
+  );
+
+  // ── "Add position" from a cluster card: create the pre-assigned row once ──
+  // The intent rides on the navigation rather than in persisted state, so a
+  // reload or a back-navigation never resurrects it.
+  const clusterSeedHandled = useRef(false);
+  useEffect(() => {
+    const seedCluster = (location.state as { newPositionInCluster?: string } | null)
+      ?.newPositionInCluster;
+    if (!seedCluster || clusterSeedHandled.current) return;
+    if (!catalog || !queueRef.current) return; // wait for the grid to be ready
+    clusterSeedHandled.current = true;
+    navigate(location.pathname, { replace: true, state: null });
+    addPositions(1, seedCluster);
+  }, [location, catalog, navigate, addPositions]);
+
+  /** The checked rows, in the order the grid is showing them. */
+  const selectedRows = useCallback((): PositionRow[] => {
+    if (selectedIds.length === 0) return [];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const checked = new Set(selectedIds);
+    return orderedRowIds()
+      .filter((id) => checked.has(id))
+      .map((id) => byId.get(id))
+      .filter((row): row is PositionRow => !!row);
+  }, [rows, selectedIds, orderedRowIds]);
+
+  const duplicateRows = useCallback((targets: readonly PositionRow[]) => {
     const currentCatalog = catalogRef.current;
     const queue = queueRef.current;
-    if (!currentCatalog || !queue) return;
+    if (!currentCatalog || !queue || targets.length === 0) return;
 
     // Copy the contractual data; the identity (PII) stays blank on the copy.
-    const copy: PositionRow = { ...row, id: uuidv7() };
-    for (const def of currentCatalog.fields) {
-      if (def.maskable) copy[def.key] = null;
-    }
-    queue.enqueueCreate(toCreate(copy, currentCatalog));
-    setRows((current) => [...current, copy]);
+    // The cluster-position group is deliberately NOT inherited: the copy is a
+    // second person, and the backend mints it a group of its own if the
+    // duplicated cluster assignment warrants one.
+    const copies = targets.map((row) => {
+      const copy: PositionRow = { ...row, id: uuidv7(), [CLUSTER_LINK_ROW_KEY]: "" };
+      for (const def of currentCatalog.fields) {
+        if (def.maskable) copy[def.key] = null;
+      }
+      queue.enqueueCreate(toCreate(copy, currentCatalog));
+      return copy;
+    });
+    setRows((current) => [...current, ...copies]);
+    if (copies.length > 1) setToast(`${copies.length} positions duplicated`);
   }, []);
 
-  const handleDelete = useCallback((row: PositionRow) => {
+  const handleDuplicate = useCallback(
+    (row: PositionRow) => duplicateRows([row]),
+    [duplicateRows]
+  );
+
+  const handleBulkDuplicate = useCallback(
+    () => duplicateRows(selectedRows()),
+    [duplicateRows, selectedRows]
+  );
+
+  // One batch, one Undo — the snackbar restores everything the action removed,
+  // so a mis-aimed bulk delete costs a click rather than a re-entry session.
+  const deleteRows = useCallback((targets: readonly PositionRow[]) => {
     const queue = queueRef.current;
-    if (!queue) return;
-    queue.enqueueDelete(row.id);
-    setRows((current) => current.filter((r) => r.id !== row.id));
-    setUndoRow(row);
+    if (!queue || targets.length === 0) return;
+    const removed = new Set(targets.map((row) => row.id));
+    for (const row of targets) queue.enqueueDelete(row.id);
+    setRows((current) => current.filter((row) => !removed.has(row.id)));
+    // The grid prunes its own selection when rows leave, but the toolbar band
+    // reads this mirror — drop them here too so it can't linger on ghosts.
+    setSelectedIds((current) => current.filter((id) => !removed.has(id)));
+    setUndoRows([...targets]);
   }, []);
+
+  // A clustered row is one person held by several hotels, so deleting it takes
+  // their copies too. That is worth a confirm naming them; a batch of purely
+  // standalone rows still deletes straight away with the usual Undo.
+  const requestDelete = useCallback(
+    (targets: readonly PositionRow[]) => {
+      if (targets.length === 0) return;
+      const clustered = targets.filter((row) => row[CLUSTER_LINK_ROW_KEY]);
+      if (clustered.length === 0) {
+        deleteRows(targets);
+        return;
+      }
+      setPendingDelete({
+        clustered,
+        standalone: targets.filter((row) => !row[CLUSTER_LINK_ROW_KEY]),
+      });
+    },
+    [deleteRows]
+  );
+
+  const handleDelete = useCallback(
+    (row: PositionRow) => requestDelete([row]),
+    [requestDelete]
+  );
+
+  const handleBulkDelete = useCallback(
+    () => requestDelete(selectedRows()),
+    [requestDelete, selectedRows]
+  );
 
   const handleUndoDelete = useCallback(() => {
     const queue = queueRef.current;
-    if (!queue || !undoRow) return;
-    queue.enqueueRestore(undoRow.id);
-    setRows((current) => [...current, undoRow]);
-    setUndoRow(null);
-  }, [undoRow]);
+    if (!queue || !undoRows) return;
+    for (const row of undoRows) queue.enqueueRestore(row.id);
+    setRows((current) => [...current, ...undoRows]);
+    setUndoRows(null);
+  }, [undoRows]);
 
   const handleExportCsv = useCallback(() => {
     apiRef.current?.exportDataAsCsv({
@@ -967,6 +1245,17 @@ export default function Positions() {
   // ── Blocks: add / edit / delete (with undo) ──
   // Column changes are reactive (the columns memo reads blocksModel), so no
   // grid remount is needed; new bands append after the catalog sections.
+
+  // Stable, because it is handed to the grid, which bakes it into the band
+  // headers of the column grouping model. As an inline arrow it re-minted that
+  // whole model on every render of this page.
+  // Social Security carries its own scheme/accumulation settings, so it opens
+  // the NI modal rather than the generic block dialog.
+  const handleEditBlock = useCallback((block: BlockDto) => {
+    if (block.blockType === "SOCIAL_SECURITY") setNiDialog({ block });
+    else setBlockDialog({ mode: "edit", block });
+  }, []);
+
   const handleSaveBlock = useCallback(
     (input: BlockInput) => {
       if (!selectedHotelOu) return;
@@ -1171,12 +1460,14 @@ export default function Positions() {
           quickFilter={quickFilter}
           queueState={queueSnapshot.state}
           pendingRows={queueSnapshot.pendingRows}
-          onAddPosition={handleAddPosition}
+          onAddPositions={addPositions}
           onAddBlock={() => setBlockDialog({ mode: "create" })}
           onToggleMask={() => setMasked((value) => !value)}
           onToggleGroup={() => setGroupByDept((value) => !value)}
           onToggleInactive={() => setShowInactive((value) => !value)}
           onBulkActive={handleBulkActive}
+          onBulkDuplicate={handleBulkDuplicate}
+          onBulkDelete={handleBulkDelete}
           onCopyFromYear={() => setCopyOpen(true)}
           onQuickFilter={setQuickFilter}
           onExportCsv={handleExportCsv}
@@ -1209,9 +1500,11 @@ export default function Positions() {
             accounts={accounts}
             vacationCostById={vacationCosts}
             manhoursWorkedById={manhoursWorked}
+            fteById={ftes}
             hotelClusters={hotelClusters}
             currentOu={selectedHotelOu}
-            blocks={blocksModel?.blocks ?? []}
+            hotelNames={hotelNames}
+            blocks={blocks}
             blockResults={liveSim.results}
             masked={masked}
             groupByDept={groupByDept}
@@ -1226,16 +1519,13 @@ export default function Positions() {
             onSelectionChange={setSelectedIds}
             onDuplicate={handleDuplicate}
             onDelete={handleDelete}
+            onEditRow={handleEditRow}
             onPasteStart={handlePasteStart}
             onPasteEnd={handlePasteEnd}
             onAddField={handleAddField}
             onRemoveField={handleRemoveField}
             onManageColumns={handleManageColumns}
-            onEditBlock={(block) =>
-              block.blockType === "SOCIAL_SECURITY"
-                ? setNiDialog({ block })
-                : setBlockDialog({ mode: "edit", block })
-            }
+            onEditBlock={handleEditBlock}
           />
         )}
       </Box>
@@ -1298,6 +1588,7 @@ export default function Positions() {
           label: entry.driver.label,
         }))}
         accounts={accounts}
+        departments={departments}
         saving={blockBusy}
         onClose={() => setBlockDialog(null)}
         onSave={handleSaveBlock}
@@ -1324,11 +1615,75 @@ export default function Positions() {
         }}
       />
 
+      <DeleteClusterPositionDialog
+        pending={pendingDelete}
+        clusterOf={(row) =>
+          hotelClusters.find((cluster) => cluster.id === row[HOTEL_CLUSTER_KEY]) ??
+          null
+        }
+        hotelNames={hotelNames}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (!pendingDelete) return;
+          setPendingDelete(null);
+          deleteRows([...pendingDelete.clustered, ...pendingDelete.standalone]);
+        }}
+      />
+
+      {catalog ? (
+        <PositionFormDialog
+          row={editRow}
+          catalog={catalog}
+          blocks={blocksModel?.blocks ?? []}
+          blockResults={liveSim.results}
+          departments={departments}
+          accounts={accounts}
+          vacationCostById={vacationCosts}
+          manhoursWorkedById={manhoursWorked}
+          fteById={ftes}
+          hotelClusters={hotelClusters}
+          currentOu={selectedHotelOu}
+          hotelNames={hotelNames}
+          masked={masked}
+          status={queueSnapshot.statusByRow.get(editRowId ?? "")}
+          initialFocusField={editFocusField}
+          index={editIndex}
+          count={rows.length}
+          onRowUpdate={handleRowUpdate}
+          onNavigate={handleEditNavigate}
+          onEditBlock={(block) =>
+            block.blockType === "SOCIAL_SECURITY"
+              ? setNiDialog({ block })
+              : setBlockDialog({ mode: "edit", block })
+          }
+          onClose={() => setEditRowId(null)}
+        />
+      ) : null}
+
       <Snackbar
-        open={!!undoRow}
+        open={!!clusterNotice}
+        autoHideDuration={clusterNotice?.severity === "warning" ? 12000 : 6000}
+        onClose={() => setClusterNotice(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          severity={clusterNotice?.severity ?? "info"}
+          onClose={() => setClusterNotice(null)}
+          sx={{ maxWidth: 560 }}
+        >
+          {clusterNotice?.message}
+        </Alert>
+      </Snackbar>
+
+      <Snackbar
+        open={!!undoRows}
         autoHideDuration={6000}
-        onClose={() => setUndoRow(null)}
-        message="Position deleted"
+        onClose={() => setUndoRows(null)}
+        message={
+          undoRows && undoRows.length > 1
+            ? `${undoRows.length} positions deleted`
+            : "Position deleted"
+        }
         action={
           <Button color="secondary" size="small" onClick={handleUndoDelete}>
             Undo

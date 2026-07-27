@@ -14,6 +14,7 @@ import LoginIcon from "@mui/icons-material/Login";
 import PersonAddAltRoundedIcon from "@mui/icons-material/PersonAddAltRounded";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
+import KairosMark from "../components/KairosMark";
 import { brokerErrorCode, describeBrokerError } from "../services/auth";
 import { useSettingsStore } from "../store/settings";
 
@@ -871,11 +872,10 @@ export default function Landing() {
       {/* center brand + auth */}
       <Box sx={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", px: 3, pointerEvents: "none" }}>
         {/* ring logo */}
-        <Box sx={{ position: "relative", width: 60, height: 60, mb: "22px", animation: "kUp .9s cubic-bezier(.2,.7,.2,1) both", animationDelay: ".05s" }}>
-          <Box sx={{ position: "absolute", inset: 0, borderRadius: "50%", border: "1.5px solid var(--line)" }} />
-          <Box sx={{ position: "absolute", inset: 0, borderRadius: "50%", border: "1.5px solid transparent", borderTopColor: "var(--accent)", borderRightColor: "var(--accent)", transform: "rotate(-18deg)" }} />
-          <Box sx={{ position: "absolute", top: "50%", left: "50%", width: 12, height: 12, mt: "-6px", ml: "-6px", borderRadius: "50%", background: "var(--accent)" }} />
-        </Box>
+        <KairosMark
+          size={60}
+          sx={{ mb: "22px", animation: "kUp .9s cubic-bezier(.2,.7,.2,1) both", animationDelay: ".05s" }}
+        />
 
         <Box sx={{ fontSize: 64, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1, animation: "kUp .9s cubic-bezier(.2,.7,.2,1) both", animationDelay: ".15s" }}>
           Kairos

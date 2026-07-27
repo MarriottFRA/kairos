@@ -5,6 +5,7 @@ import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
   ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
+  applyValueStoreV12,
 } from "./main/positions/schema";
 import { MANUAL_INPUT_TABLES_SQL } from "./main/manualInput/schema";
 import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
@@ -61,7 +62,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -231,9 +232,12 @@ export function closeSecureDatabase(): void {
 //--- SCHEMA -------------------------------------------------------------------
 
 // Append-only post-launch migrations, keyed by the version they produce
-// (v2, v3, …). Empty today: the whole pre-launch history is folded into the v1
-// baseline in createSchema(). NEVER edit or renumber a shipped entry.
-const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {};
+// (v2, v3, …). The pre-launch history is folded into the v1 baseline in
+// createSchema(). NEVER edit or renumber a shipped entry.
+const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
+  // Cluster-position groups: positions.cluster_link_id.
+  2: applyValueStoreV12,
+};
 
 function createSchema(handle: SecureDb): void {
   handle.exec(`

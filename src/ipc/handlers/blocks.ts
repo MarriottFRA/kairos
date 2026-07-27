@@ -15,8 +15,7 @@ import { localDbHandle } from "../../local_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import {
   deleteBlock,
-  ensureBaseSalaryDef,
-  ensurePositionCountDef,
+  ensureSystemDefs,
   listBlocks,
   reorderBlocks,
   restoreBlock,
@@ -48,14 +47,13 @@ type Scope = ReturnType<typeof resolveOuScope>;
 
 /** The full structure read model the renderer needs for grid + live sim. */
 function readModel(db: LocalDb, scope: Scope): BlocksListResponse {
-  // The engine mandates exactly one BASE_SALARY def; guarantee it here so the
-  // component graph is always compilable once blocks come into play. NI/SS blocks
-  // are now user-added (as many as the OU needs), so nothing is seeded here.
-  // The permanent position-count head (always booked to A972540) is seeded
-  // beside it so every scenario reports its heads — never silently dropped.
+  // Seed the permanent system definitions: the mandatory BASE_SALARY head (so
+  // the component graph is always compilable), the always-booked position-count
+  // head, and one head per posting account the Positions grid offers (headcount,
+  // hours, vacation cost, vacation accrual) — those are inert columns until the
+  // definition they attach to exists. NI/SS blocks stay user-added.
   const now = new Date().toISOString();
-  ensureBaseSalaryDef(db, scope, { now });
-  ensurePositionCountDef(db, scope, { now });
+  ensureSystemDefs(db, scope, { now });
   const ssSchemes = getSsSchemes(db, scope);
   // Stamp each SS block with whether its scheme carries a prior-year opening
   // base (CUMULATIVE + non-January tax year). This is the single source of the

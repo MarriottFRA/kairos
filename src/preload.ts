@@ -14,6 +14,7 @@ const ALLOWED_CHANNEL_PREFIXES = [
   "data:fetch",
   "mapping-tables:",
   "budgetImport:",
+  "legacyImport:",
   "kpiDrivers:",
   "manualInput:",
   "blocks:",

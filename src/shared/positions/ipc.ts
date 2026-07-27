@@ -5,6 +5,7 @@
  * the engine's branded types are applied by the loader, not the wire format).
  */
 
+import { ClusterSyncResult } from "./clusterSync";
 import { FieldDef, SectionDef } from "./fields";
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,10 @@ export interface PositionRecord {
   /** Manual multiplier, honored only while the assigned cluster has exactly
    *  one member hotel. null = use the cluster's member weight. */
   clusterMultiplierOverride: number | null;
+  /** Cluster-position group ("" = standalone). Shared by this row and its
+   *  sibling rows in the cluster's other member hotels; edits propagate along
+   *  it. Read-only to the renderer — only clusterSync.ts ever sets it. */
+  clusterLinkId: string;
   payType: "HOURLY" | "SALARIED";
   headcount: number;
   fte: number;
@@ -236,6 +241,10 @@ export interface PositionsBatchWriteResponse {
   /** One ISO stamp for the whole batch; the renderer adopts it per row. */
   updatedAt: string;
   applied: number;
+  /** What this write did to the OTHER member hotels of a cluster: sibling rows
+   *  created/unlinked, edits propagated, and anything that could not be
+   *  mirrored. Absent when no touched row belongs to a cluster group. */
+  clusterSync?: ClusterSyncResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +261,8 @@ export interface OutputRunDto {
 export interface OutputAggRowDto {
   dept: string;
   account: string;
-  /** Statistics account (starts with "9" — count/hours lines, not currency). */
+  /** Statistics account (the A9… range — count/hours/FTE lines, not currency).
+   *  See STATS_ACCOUNT_FILTER; costs are every other account. */
   isStats: boolean;
   /** Jan..Dec. */
   months: number[];
@@ -263,10 +273,19 @@ export interface OutputAggRowDto {
  *  as a Results-page notice so a silently-dropped row is visible. Populated by
  *  recalc only; absent on a plain outputs read (page mount). */
 export interface OutputDiagnostics {
-  /** Active positions that produced no output lines at all — every candidate
-   *  line was dropped for a blank posting account (Salary / Headcount / Hours
-   *  account unset). */
-  noAccountPositions: number;
+  /**
+   * How many position lines each component had dropped for a blank posting
+   * account, keyed by the component's label ("Base Salary", "Hours Worked", …).
+   * A blank account means "calculate but do not post": the line is still
+   * computed and still available as a base for other blocks, it just never
+   * reaches the output — so without this tally the amount would vanish with no
+   * explanation. Empty when every line posted.
+   *
+   * Replaces a per-position `noAccountPositions` count, which could never fire:
+   * the permanent position-count head guarantees every active position writes at
+   * least one line, so "wrote nothing at all" was unreachable.
+   */
+  unpostedByLabel: Record<string, number>;
   /** Active positions that produced only zero-valued lines — e.g. no salary or
    *  hours entered, or Count 0. */
   allZeroPositions: number;
