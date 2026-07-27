@@ -12,7 +12,7 @@ import dotenv from "dotenv";
 import { closeLocalDatabase, initializeDatabase } from "./local_db";
 import { closeSecureDatabase } from "./secure_db";
 import { initializeIpc } from "./ipc";
-import { setupAutoUpdaterEvents } from "./ipc/handlers/app";
+import { setupAutoUpdaterEvents, markAutoUpdaterReady } from "./ipc/handlers/app";
 import { attachUiScale } from "./ipc/handlers/window";
 import { createAuthStack } from "./main/auth";
 import { API_BASE_URL, SWA_ORIGIN } from "./config";
@@ -174,9 +174,6 @@ function createMainWindow(): void {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
-    // Initialize auto-updater AFTER window is visible
-    // This ensures users see the app immediately
-    initializeAutoUpdater();
     // DevTools can be opened with Ctrl+Shift+I or F12 (Electron default shortcuts)
     // No automatic opening in production or development
   });
@@ -251,10 +248,13 @@ function setupContentSecurityPolicy(devServerUrl?: string): void {
  * Configure auto-updater using update-electron-app
  * This works with Electron Forge + Squirrel.Windows
  * Only runs in packaged/production builds
- */
-/**
- * Initialize auto-updater AFTER window is shown
- * This ensures users see the app immediately, then updates happen in background
+ *
+ * Must run BEFORE the renderer is loaded: UpdateChecker fires
+ * `app:check-for-updates` from its mount effect, and Electron's Windows
+ * autoUpdater throws "Update URL is not set" if checkForUpdates() is called
+ * before update-electron-app has had a chance to call setFeedURL(). The IPC
+ * hop beats the paint round-trip, so initialising on `ready-to-show` lost
+ * that race and surfaced the error card on every launch.
  */
 function initializeAutoUpdater(): void {
   if (!app.isPackaged) {
@@ -270,6 +270,10 @@ function initializeAutoUpdater(): void {
     logger: log,
     notifyUser: false, // We handle notifications via IPC to renderer
   });
+
+  // The feed URL is set synchronously inside updateElectronApp() (the app is
+  // already ready by now), so manual checks are safe from here on.
+  markAutoUpdaterReady();
 
   // Set up event listeners for Electron's native autoUpdater
   autoUpdater.on("checking-for-update", () => {
@@ -335,6 +339,12 @@ app.on("ready", async () => {
 
     // Setup auto-updater event forwarding to renderer
     setupAutoUpdaterEvents(mainWindow);
+
+    // Configure the updater in the same tick as createMainWindow(), before the
+    // renderer can execute any JS, so the feed URL is already set when
+    // UpdateChecker asks for a manual check. Listeners above are registered
+    // first so the automatic startup check can't fire into a void.
+    initializeAutoUpdater();
   } catch (err) {
     logger.error("Startup error:", err);
     // In a real prod app, consider user-facing error UI here.

@@ -21,6 +21,17 @@ const isDev = !app.isPackaged;
 // Store the latest release info when update is available
 let latestReleaseInfo: { version: string; releaseNotes: string } | null = null;
 
+// Electron's Windows autoUpdater emits "Update URL is not set" if
+// checkForUpdates() runs before setFeedURL(). main.ts flips this once
+// update-electron-app has configured the feed, so the renderer's manual check
+// can never race ahead of it.
+let autoUpdaterReady = false;
+
+/** Called by main.ts right after update-electron-app has set the feed URL. */
+export function markAutoUpdaterReady(): void {
+  autoUpdaterReady = true;
+}
+
 /**
  * Fetch latest release info from GitHub
  */
@@ -76,6 +87,21 @@ export function createAppHandlers(): Record<string, IpcHandler> {
           latestVersion: app.getVersion(),
           devMode: true,
           message: 'Update checks only work in production builds'
+        };
+      }
+
+      // Defensive: if the feed URL isn't configured yet, calling
+      // checkForUpdates() would emit "Update URL is not set" and paint the
+      // error screen. update-electron-app's own startup check covers this
+      // launch anyway, so just report "nothing to do" and let the renderer
+      // continue into the app.
+      if (!autoUpdaterReady) {
+        return {
+          updateAvailable: false,
+          currentVersion: app.getVersion(),
+          latestVersion: app.getVersion(),
+          devMode: false,
+          checking: false,
         };
       }
 
