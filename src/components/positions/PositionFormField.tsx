@@ -13,6 +13,12 @@
  *   - text and numbers are held as a draft STRING while focused and committed on
  *     blur/Enter, so a half-typed "0." is never normalised out from under the
  *     caret (the same trick KpiDriverDialog uses for its multiplier).
+ *
+ * Every field renders as the SAME box — label above a control slot of a fixed
+ * height — whatever control ends up inside it. That uniformity is what lets the
+ * dialog lay all of them out on one lattice: a switch, a date and a locked
+ * computed figure occupy identical cells, so no row of the form can come out
+ * taller than its neighbours and leave a gap.
  */
 
 import { useEffect, useState } from "react";
@@ -72,8 +78,10 @@ export interface PositionFormFieldProps {
   lockNote?: string | null;
   /** Flags a value that needs attention (vacation weights off 100%). */
   warn?: boolean;
-  /** Month cells: label above, tighter box. */
+  /** Month cells: no unit suffix, smaller type — same box height. */
   dense?: boolean;
+  /** Rendered right of the label — the chevron a month family hangs off. */
+  action?: React.ReactNode;
   departments: DepartmentOption[];
   accounts: AccountOption[];
   /**
@@ -96,6 +104,7 @@ export default function PositionFormField({
   lockNote,
   warn,
   dense,
+  action,
   departments,
   accounts,
   onCommit,
@@ -124,23 +133,20 @@ export default function PositionFormField({
   };
 
   const shared = { size: "small" as const, fullWidth: true };
-  const rowProps = { field: column.field, label, unit, hint, dense };
+  const rowProps = { field: column.field, label, unit, hint, dense, action };
 
   if (!editable) {
     return (
-      <FieldRow {...rowProps}>
+      <FieldRow {...rowProps} locked>
         <Tooltip title={lockNote ?? hint ?? ""} placement="top-start">
           <Typography
             variant="body2"
             tabIndex={-1}
             sx={{
-              px: 0.75,
-              py: 0.5,
-              minHeight: 30,
+              width: "100%",
+              px: 1,
               color: warn ? "error.main" : "text.secondary",
               fontVariantNumeric: "tabular-nums",
-              borderBottom: "1px dashed",
-              borderColor: "divider",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -161,12 +167,14 @@ export default function PositionFormField({
   if (def?.dataType === "BOOLEAN" || column.type === "boolean") {
     return (
       <FieldRow {...rowProps}>
-        <Switch
-          size="small"
-          checked={value === true || value === 1}
-          slotProps={{ input: { "aria-label": label } }}
-          onChange={(event) => commit(event.target.checked)}
-        />
+        <Box sx={{ pl: 0.5 }}>
+          <Switch
+            size="small"
+            checked={value === true || value === 1}
+            slotProps={{ input: { "aria-label": label } }}
+            onChange={(event) => commit(event.target.checked)}
+          />
+        </Box>
       </FieldRow>
     );
   }
@@ -187,7 +195,7 @@ export default function PositionFormField({
           onChange={(code) => commit(code)}
           size="small"
           openOnFocus
-          sx={{ "& .MuiInputBase-root": { fontSize: "0.8125rem" } }}
+          sx={{ width: "100%", "& .MuiInputBase-root": { fontSize: "0.8125rem" } }}
         />
       </FieldRow>
     );
@@ -340,18 +348,29 @@ export default function PositionFormField({
 }
 
 /**
- * Label on the left, control on the right — the form's one row shape.
+ * The form's one cell: label above a control slot of a fixed height.
+ *
+ * Every field uses it — editable or locked, switch or autocomplete — because a
+ * cell that is always the same size is what makes the dialog's lattice line up.
+ * The height comes from MUI's small outlined input (40px); the locked variant
+ * borrows the control's box but draws it dashed and quiet, so "you cannot type
+ * here" is legible without the value having to look like a different species of
+ * thing from the one two cells over.
  *
  * The wrapper carries `data-form-field` (rather than the input, which is not a
  * plain DOM node for every control) so the dialog can find a field by key when
  * it restores focus after stepping to the next position.
  */
+const CONTROL_HEIGHT = 40;
+
 function FieldRow({
   field,
   label,
   unit,
   hint,
   dense,
+  locked,
+  action,
   children,
 }: {
   field: string;
@@ -359,53 +378,64 @@ function FieldRow({
   unit?: string | null;
   hint?: string | null;
   dense?: boolean;
+  locked?: boolean;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  if (dense) {
-    return (
-      <Box data-form-field={field} sx={{ minWidth: 0 }}>
-        <Typography
-          variant="caption"
-          sx={{ color: "text.secondary", display: "block", lineHeight: 1.2 }}
-        >
-          {label}
-        </Typography>
+  return (
+    <Box data-form-field={field} sx={{ minWidth: 0 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 0.25,
+          minWidth: 0,
+          height: 18,
+        }}
+      >
+        <Tooltip title={hint ?? ""} placement="top-start" enterDelay={600}>
+          <Typography
+            variant="caption"
+            noWrap
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              color: "text.secondary",
+              lineHeight: 1.2,
+              fontSize: dense ? "0.6875rem" : undefined,
+              cursor: hint ? "help" : "default",
+            }}
+          >
+            {label}
+            {unit && !dense ? (
+              <Box component="span" sx={{ color: "text.disabled", ml: 0.5 }}>
+                {unit}
+              </Box>
+            ) : null}
+          </Typography>
+        </Tooltip>
+        {action}
+      </Box>
+
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          minWidth: 0,
+          height: CONTROL_HEIGHT,
+          ...(locked
+            ? {
+                borderRadius: 1,
+                border: "1px dashed",
+                borderColor: "divider",
+                bgcolor: "action.hover",
+              }
+            : null),
+          "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT },
+        }}
+      >
         {children}
       </Box>
-    );
-  }
-
-  return (
-    <Box
-      data-form-field={field}
-      sx={{
-        display: "grid",
-        gridTemplateColumns: "minmax(90px, 40%) 1fr",
-        alignItems: "center",
-        columnGap: 1,
-        minWidth: 0,
-      }}
-    >
-      <Tooltip title={hint ?? ""} placement="top-start" enterDelay={600}>
-        <Typography
-          variant="caption"
-          sx={{
-            color: "text.secondary",
-            lineHeight: 1.2,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            cursor: hint ? "help" : "default",
-          }}
-        >
-          {label}
-          {unit ? (
-            <Box component="span" sx={{ color: "text.disabled", ml: 0.5 }}>
-              {unit}
-            </Box>
-          ) : null}
-        </Typography>
-      </Tooltip>
-      <Box sx={{ minWidth: 0 }}>{children}</Box>
     </Box>
   );
 }

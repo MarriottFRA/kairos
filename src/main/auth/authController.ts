@@ -24,6 +24,7 @@ import {
   isSecureDatabaseUnlocked,
 } from "../../secure_db";
 import { fetchServerKeyHalf } from "../security/serverKeyHalf";
+import { scheduleAutoCleanup } from "../maintenance/autoCleanup";
 
 /** user_settings key holding the last-used login email (not a secret). */
 const LAST_USER_EMAIL_KEY = "last_user_email";
@@ -641,6 +642,10 @@ export class AuthController {
       const serverHalf = await fetchServerKeyHalf(this.deps.apiClient, deviceId);
       unlockSecureDatabase(serverHalf);
       console.info("[AuthController] Secure database unlocked");
+      // Both stores are readable for the first time here, which is the only
+      // moment the soft-delete sweep can run. Fire-and-forget: it defers itself
+      // off this path and can never fail the session.
+      scheduleAutoCleanup();
     } catch (error) {
       console.warn(
         "[AuthController] Secure database unlock failed — feature data unavailable this session:",

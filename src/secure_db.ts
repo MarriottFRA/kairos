@@ -5,9 +5,13 @@ import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
   ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
+  applyOutputLineProvenance,
   applyValueStoreV12,
 } from "./main/positions/schema";
-import { MANUAL_INPUT_TABLES_SQL } from "./main/manualInput/schema";
+import {
+  MANUAL_INPUT_TABLES_SQL,
+  applyManualInputScenarioScope,
+} from "./main/manualInput/schema";
 import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 // Kairos secure store: the encrypted-at-rest database for feature data.
@@ -62,7 +66,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -237,6 +241,13 @@ export function closeSecureDatabase(): void {
 const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   // Cluster-position groups: positions.cluster_link_id.
   2: applyValueStoreV12,
+  // Results became a union of four sources (engine, manual input, allocations,
+  // buyouts): provenance columns on engine_output_lines, and manual input rows
+  // scoped to a scenario the way every other budget input already is.
+  3: (handle) => {
+    applyOutputLineProvenance(handle);
+    applyManualInputScenarioScope(handle);
+  },
 };
 
 function createSchema(handle: SecureDb): void {

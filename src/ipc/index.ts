@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createLegacyImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers } from "./handlers";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -79,6 +79,14 @@ export function initializeIpc(deps: {
     ipcRegistry.register(channel, handler);
   });
 
+  // Register Maintenance handlers (storage cleanup: purge soft-deleted rows
+  // from both stores). Deliberately NOT OU-gated — cleanup spans every hotel
+  // by definition; the secure-DB session lock is the gate instead.
+  const maintenanceHandlers = createMaintenanceHandlers();
+  Object.entries(maintenanceHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
   // Register App handlers
   const appHandlers = createAppHandlers();
   Object.entries(appHandlers).forEach(([channel, handler]) => {
@@ -103,6 +111,14 @@ export function initializeIpc(deps: {
   // plaintext local store). OU-gated — a pull can only land in its own hotel.
   const budgetImportHandlers = createBudgetImportHandlers();
   Object.entries(budgetImportHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register BST-push handlers (recalculate, then write the Results rows back
+  // into the hotel's Excel BST). OU-gated, and the handlers additionally refuse
+  // any file whose own OU or budget year disagrees with the selection.
+  const bstPushHandlers = createBstPushHandlers();
+  Object.entries(bstPushHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 

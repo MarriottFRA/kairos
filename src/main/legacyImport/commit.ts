@@ -218,12 +218,15 @@ export async function commitImportPlan(
   // ── 3b. Manual-input rows. One call each — the repo has no bulk path, and at
   // ~130 rows on a local SQLite file that is not worth a new channel.
   let manualInputRowsCreated = 0;
-  let sortOrder = nextSortOrder(secureDb, scope.ou);
+  let sortOrder = nextSortOrder(secureDb, scope.ou, scenarioId);
   for (const row of plan.manualRows) {
     saveManualRow(secureDb, {
       ...row,
       id: newId(),
       ou: scope.ou,
+      // Same scenario the positions above landed in: manual rows post into that
+      // scenario's results, so an import must not split itself across two.
+      scenarioId,
       sortOrder,
       createdBy: null,
       now,

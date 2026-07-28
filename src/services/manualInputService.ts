@@ -2,8 +2,10 @@
  * Manual Input Service
  * Renderer-side driver for the Manual Input tab. Main owns storage (the encrypted
  * secure store); this service relays the selected OU and the edited row. Every
- * call carries `ou` (the selected hotel) so the OU-gate middleware can scope it.
- * Mutations return the full refreshed list.
+ * call carries `ou` (the selected hotel) so the OU-gate middleware can scope it,
+ * and `scenarioId` — manual rows post into that scenario's results, so they are
+ * scoped the same way positions and buyouts are. Mutations return the full
+ * refreshed list.
  */
 
 import {
@@ -22,19 +24,27 @@ function ipc() {
 }
 
 /** All manual-input rows for a hotel, in sort order. */
-export async function listManualRows(ou: string): Promise<ManualInputRow[]> {
-  const response = await ipc().sendIpcRequest(MANUAL_INPUT_CHANNELS.list, { ou });
+export async function listManualRows(
+  ou: string,
+  scenarioId: string
+): Promise<ManualInputRow[]> {
+  const response = await ipc().sendIpcRequest(MANUAL_INPUT_CHANNELS.list, {
+    ou,
+    scenarioId,
+  });
   return (response.data as ManualInputRow[]) ?? [];
 }
 
 /** Create or update a row; returns the refreshed list. */
 export async function saveManualRow(
   ou: string,
+  scenarioId: string,
   row: ManualInputRowInput,
   createdBy: string | null
 ): Promise<ManualInputRow[]> {
   const response = await ipc().sendIpcRequest(MANUAL_INPUT_CHANNELS.save, {
     ou,
+    scenarioId,
     row,
     createdBy,
   });
@@ -44,10 +54,12 @@ export async function saveManualRow(
 /** Soft-delete one or more rows; returns the refreshed list. */
 export async function deleteManualRows(
   ou: string,
+  scenarioId: string,
   ids: ManualInputRowId[]
 ): Promise<ManualInputRow[]> {
   const response = await ipc().sendIpcRequest(MANUAL_INPUT_CHANNELS.delete, {
     ou,
+    scenarioId,
     ids,
   });
   return (response.data as ManualInputRow[]) ?? [];

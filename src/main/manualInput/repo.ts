@@ -23,6 +23,7 @@ type SecureDb = InstanceType<typeof Database>;
 interface DbRow {
   id: string;
   ou: string;
+  scenario_id: string;
   description: string;
   department: string;
   department_code: string;
@@ -60,6 +61,7 @@ function toRow(row: DbRow): ManualInputRow {
   return {
     id: row.id as ManualInputRowId,
     ou: row.ou,
+    scenarioId: row.scenario_id ?? "",
     description: row.description,
     department: row.department,
     departmentCode: row.department_code,
@@ -80,25 +82,63 @@ function toRow(row: DbRow): ManualInputRow {
   };
 }
 
-/** All rows for an OU, in sort order. */
-export function listRows(db: SecureDb, ou: string): ManualInputRow[] {
+/**
+ * All rows for an (OU, scenario), in sort order.
+ *
+ * Rows carrying '' predate the scenario scoping and are included everywhere
+ * until healRowScenario stamps them — a mid-upgrade user must not open the page
+ * to find their manual lines gone.
+ */
+export function listRows(
+  db: SecureDb,
+  ou: string,
+  scenarioId: string
+): ManualInputRow[] {
   const scoped = scopeOf(ou);
   const rows = db
     .prepare(
-      "SELECT * FROM manual_input_rows WHERE ou = ? AND deleted_at IS NULL ORDER BY sort_order, created_at, id"
+      `SELECT * FROM manual_input_rows
+        WHERE ou = ? AND (scenario_id = ? OR scenario_id = '') AND deleted_at IS NULL
+        ORDER BY sort_order, created_at, id`
     )
-    .all(scoped) as DbRow[];
+    .all(scoped, scenarioId) as DbRow[];
   return rows.map(toRow);
 }
 
-/** The next sort_order for a new row in this OU. */
-export function nextSortOrder(db: SecureDb, ou: string): number {
+/**
+ * Adopt this OU's un-scoped rows into a scenario.
+ *
+ * The secure-store migration could only default the column to '': `scenarios`
+ * lives in the plaintext store and the two database files can never be
+ * ATTACHed, so nothing down there can resolve which scenario a row belongs to.
+ * The handler can — it holds both handles — so the stamp happens on first list.
+ * Idempotent, and a no-op once every row is scoped.
+ */
+export function healRowScenario(
+  db: SecureDb,
+  ou: string,
+  scenarioId: string
+): void {
+  if (!scenarioId) return;
+  db.prepare(
+    `UPDATE manual_input_rows SET scenario_id = ?
+      WHERE ou = ? AND scenario_id = ''`
+  ).run(scenarioId, scopeOf(ou));
+}
+
+/** The next sort_order for a new row in this (OU, scenario). */
+export function nextSortOrder(
+  db: SecureDb,
+  ou: string,
+  scenarioId: string
+): number {
   const scoped = scopeOf(ou);
   const row = db
     .prepare(
-      "SELECT COALESCE(MAX(sort_order), -1) AS max FROM manual_input_rows WHERE ou = ? AND deleted_at IS NULL"
+      `SELECT COALESCE(MAX(sort_order), -1) AS max FROM manual_input_rows
+        WHERE ou = ? AND (scenario_id = ? OR scenario_id = '') AND deleted_at IS NULL`
     )
-    .get(scoped) as { max: number };
+    .get(scoped, scenarioId) as { max: number };
   return (row?.max ?? -1) + 1;
 }
 
@@ -126,6 +166,7 @@ export function saveRow(
   row: {
     id: string;
     ou: string;
+    scenarioId: string;
     description: string;
     department: string;
     departmentCode: string;
@@ -160,11 +201,12 @@ export function saveRow(
 
   const upsert = db.prepare(`
     INSERT INTO manual_input_rows
-      (id, ou, description, department, department_code, cost_account, stats_account, rate,
+      (id, ou, scenario_id, description, department, department_code, cost_account, stats_account, rate,
        stats_json, amounts_json, spread_mode, spread_base_stats, spread_base_amount,
        increase_pct, increase_month, sort_order, created_by, created_at, updated_at, deleted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     ON CONFLICT(id) DO UPDATE SET
+      scenario_id        = excluded.scenario_id,
       description        = excluded.description,
       department         = excluded.department,
       department_code    = excluded.department_code,
@@ -186,6 +228,7 @@ export function saveRow(
     upsert.run(
       row.id,
       scoped,
+      String(row.scenarioId ?? ""),
       String(row.description ?? ""),
       String(row.department ?? ""),
       String(row.departmentCode ?? ""),

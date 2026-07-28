@@ -11,11 +11,18 @@
 
 import { describe, expect, it } from "vitest";
 import { BlockDto } from "../../blocks/ipc";
-import { buildPositionForm, matchFormFields } from "../positionForm";
+import {
+  buildPositionForm,
+  ESSENTIAL_FIELD_KEYS,
+  fieldSpan,
+  isEssentialField,
+  matchFormFields,
+} from "../positionForm";
 import { BUILTIN_CATALOG } from "../fieldSeed";
 import {
   COLLAPSIBLE_MONTH_FAMILIES,
   FieldCatalog,
+  FieldDef,
   VectorName,
   vectorKey,
   vectorKeys,
@@ -303,6 +310,107 @@ describe("block cards", () => {
     );
     expect(cards.map((card) => card.label)).toEqual(["Pension", "Meals"]);
     expect(cards.map((card) => card.id)).toEqual(["blk:b1", "blk:b2"]);
+  });
+});
+
+describe("cell geometry", () => {
+  const def = (key: string) => BUILTIN_CATALOG.fields.find((f) => f.key === key)!;
+
+  it("gives an account picker two tracks and a number one", () => {
+    // An account reads "A511000 · Salaries — Front Office"; a merit % reads
+    // "3.5". Same box for both is what made the old layout truncate.
+    expect(fieldSpan("salaryAccountCode", def("salaryAccountCode"))).toBe(2);
+    expect(fieldSpan("headCountAccount", def("headCountAccount"))).toBe(2);
+    expect(fieldSpan("meritIncreasePct", def("meritIncreasePct"))).toBe(1);
+    expect(fieldSpan("headcount", def("headcount"))).toBe(1);
+  });
+
+  it("widens the pickers whose VALUE is long, not whose label is", () => {
+    expect(fieldSpan("deptName", def("deptName"))).toBe(2);
+    expect(fieldSpan("title", def("title"))).toBe(2);
+    expect(fieldSpan("cluster", def("cluster"))).toBe(2);
+    // Short free text stays narrow — two tracks of "1042" is wasted lattice.
+    expect(fieldSpan("empNumber", def("empNumber"))).toBe(1);
+  });
+
+  it("widens a block's account cells, which carry no catalog def", () => {
+    expect(fieldSpan("blk:b1:cost:account")).toBe(2);
+    expect(fieldSpan("blk:b1:cost:statsAccount")).toBe(2);
+    expect(fieldSpan("blk:b1:cost:multiplier")).toBe(1);
+    expect(fieldSpan("blk:b1:cost:m7")).toBe(1);
+  });
+
+  it("never asks for more tracks than a narrow dialog has", () => {
+    for (const field of BUILTIN_CATALOG.fields) {
+      expect(fieldSpan(field.key, field)).toBeLessThanOrEqual(2);
+    }
+  });
+});
+
+describe("essentials", () => {
+  it("names only fields the catalog actually ships", () => {
+    // The failure this guards: a seed rename leaves a stale key here, the field
+    // silently drops out of the default view, and it looks like it never saved.
+    const known = new Set(BUILTIN_CATALOG.fields.map((f) => f.key));
+    for (const key of ESSENTIAL_FIELD_KEYS) expect(known).toContain(key);
+  });
+
+  it("holds back only posting accounts, mirrors and rare overrides", () => {
+    const monthCells = new Set(
+      (
+        [
+          "seasonality",
+          "additionalMonthlyCosts",
+          "vacationMonthlyWeights",
+        ] as VectorName[]
+      ).flatMap(vectorKeys)
+    );
+    const held = BUILTIN_CATALOG.fields
+      .filter((f) => f.visible && !monthCells.has(f.key) && !isEssentialField(f))
+      .map((f) => f.key);
+
+    // Stated as a whole set rather than a spot-check: this list IS the promise
+    // the "Key / All" toggle makes, so growing it has to be deliberate.
+    expect([...held].sort()).toEqual(
+      [
+        "accrualAccount",
+        "benefitsAccountCode",
+        "departmentCode",
+        "headCountAccount",
+        "headcountStatsAccount",
+        "manualYearlyIncrease",
+        "salaryAccountCode",
+        "standardJobTitle",
+        "clusterMultiplierOverride",
+        "workingHoursAccount",
+      ].sort()
+    );
+  });
+
+  it("always keeps a user-added field, which somebody added on purpose", () => {
+    const custom: FieldDef = {
+      key: "u_0192",
+      section: "employee",
+      dataType: "TEXT",
+      storage: "POSITION_EXTRA",
+      origin: "USER",
+      locked: false,
+      defaultLabel: "Locker no.",
+      sortOrder: 999,
+      visible: true,
+      editable: true,
+      maskable: false,
+    };
+    expect(isEssentialField(custom)).toBe(true);
+  });
+
+  it("keeps each month family's Σ, so no family disappears when folded", () => {
+    // The form anchors a family on its summary line; dropping the Σ from the
+    // default view would take all twelve cells with it.
+    for (const summaryKey of Object.keys(COLLAPSIBLE_MONTH_FAMILIES)) {
+      expect(ESSENTIAL_FIELD_KEYS).toContain(summaryKey);
+    }
+    expect(ESSENTIAL_FIELD_KEYS).toContain("vacationWeightsTotal");
   });
 });
 

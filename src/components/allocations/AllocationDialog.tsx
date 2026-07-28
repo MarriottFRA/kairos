@@ -3,8 +3,9 @@
  *
  * Name (required, unique) + a spread-base Select (drives the whole column) + a
  * multi-select of departments to EXCLUDE (the cost's owners, zeroed before
- * normalizing). The department options come from the current grid, so only
- * departments that actually exist in the scenario can be excluded.
+ * normalizing) + the account the split posts to on the Results page. The
+ * department options come from the current grid, so only departments that
+ * actually exist in the scenario can be excluded.
  */
 
 import { useEffect, useState } from "react";
@@ -17,12 +18,15 @@ import DialogTitle from "@mui/material/DialogTitle";
 import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
 import {
   AllocationDto,
   AllocationInput,
   SPREAD_BASE_META,
   SpreadBase,
 } from "../../shared/allocations/ipc";
+import { AccountOption } from "../../shared/mappingTables/types";
+import AccountAutocomplete from "../common/AccountAutocomplete";
 
 /** A department option for the exclude picker. */
 export interface DeptOption {
@@ -38,6 +42,8 @@ export interface AllocationDialogProps {
   existing: AllocationDto[];
   /** Departments present in the scenario, for the exclude picker. */
   departments: DeptOption[];
+  /** The account cache, for the "post to" picker. */
+  accounts: AccountOption[];
   saving?: boolean;
   onClose: () => void;
   onSave: (input: AllocationInput) => void;
@@ -48,6 +54,7 @@ export default function AllocationDialog({
   allocation,
   existing,
   departments,
+  accounts,
   saving,
   onClose,
   onSave,
@@ -55,6 +62,7 @@ export default function AllocationDialog({
   const [name, setName] = useState("");
   const [spreadBase, setSpreadBase] = useState<SpreadBase>("HEADCOUNT");
   const [excluded, setExcluded] = useState<string[]>([]);
+  const [injectAccount, setInjectAccount] = useState("");
 
   const isEdit = !!allocation;
 
@@ -63,6 +71,7 @@ export default function AllocationDialog({
     setName(allocation?.name ?? "");
     setSpreadBase(allocation?.spreadBase ?? "HEADCOUNT");
     setExcluded(allocation?.excludedDepartments ?? []);
+    setInjectAccount(allocation?.injectAccount ?? "");
   }, [open, allocation]);
 
   const nameByCode = new Map(departments.map((dept) => [dept.code, dept]));
@@ -92,6 +101,7 @@ export default function AllocationDialog({
       name: trimmedName,
       spreadBase,
       excludedDepartments: excluded,
+      injectAccount,
     });
   };
 
@@ -150,6 +160,21 @@ export default function AllocationDialog({
               />
             )}
           />
+
+          <Stack spacing={0.75}>
+            <Typography variant="subtitle2">Post to account</Typography>
+            <AccountAutocomplete
+              options={accounts}
+              value={injectAccount}
+              onChange={setInjectAccount}
+              size="small"
+            />
+            <Typography variant="caption" color="text.secondary">
+              {injectAccount
+                ? "Each department's share posts to this account on the Results page as a decimal (0.1523, not 15.23), the same value every month."
+                : "No account: the split is still calculated and shown here, but it is not included in the Results output or the BST push."}
+            </Typography>
+          </Stack>
         </Stack>
       </DialogContent>
       <DialogActions>

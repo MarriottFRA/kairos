@@ -58,6 +58,7 @@ function alloc(over: Partial<AllocationDto>): AllocationDto {
     name: "Alloc",
     spreadBase: "HEADCOUNT",
     excludedDepartments: [],
+    injectAccount: "",
     sortOrder: 10,
     updatedAt: "",
     ...over,

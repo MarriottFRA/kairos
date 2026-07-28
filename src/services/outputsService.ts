@@ -5,7 +5,12 @@
  * Recalculate overwrites the stored run and returns the refreshed read model.
  */
 
-import { OutputsResponse, POSITIONS_CHANNELS } from "../shared/positions/ipc";
+import {
+  OutputLineDto,
+  OutputLinesResponse,
+  OutputsResponse,
+  POSITIONS_CHANNELS,
+} from "../shared/positions/ipc";
 
 function ipc() {
   const api = (window as any)?.ipcApi;
@@ -13,6 +18,25 @@ function ipc() {
     throw new Error("IPC API not available");
   }
   return api;
+}
+
+/**
+ * The individual lines behind one dept×account row — the Results inspector.
+ * A pure read of the last run; `month` (0-based) only ranks the result, so the
+ * same call serves both a month cell and a whole row.
+ */
+export async function loadOutputLines(
+  ou: string,
+  scenarioId: string,
+  dept: string,
+  account: string,
+  month?: number
+): Promise<OutputLineDto[]> {
+  const response = await ipc().sendIpcRequest(
+    POSITIONS_CHANNELS.outputLinesGet,
+    { ou, scenarioId, dept, account, month }
+  );
+  return (response.data as OutputLinesResponse)?.lines ?? [];
 }
 
 /** The stored outputs + staleness for (hotel, scenario). */

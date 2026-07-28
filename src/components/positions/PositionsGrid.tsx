@@ -97,6 +97,27 @@ function getRowClassName(params: GridRowClassNameParams): string {
 
 const GRID_SX: SxProps<Theme> = {
   borderRadius: 2,
+  // Why the grid is permanently unselectable — this is a performance fix, not
+  // a styling choice.
+  //
+  // With `cellSelection` on, MUI adds `root--disableUserSelection` to the grid
+  // ROOT on cellMouseDown and removes it on mouseup (useGridCellSelection), to
+  // stop a range drag from also dragging a text selection. That class sets
+  // `user-select: none`, which is an INHERITED property — so flipping it on the
+  // root makes the browser re-propagate computed style to every descendant.
+  // At a full viewport that is ~1000 cells, twice per click and four times per
+  // double click, and it is the whole reason clicking a cell lags while arrow
+  // keys (which never touch the class) stay instant.
+  //
+  // Declaring it here means the root's computed value is already `none`, so
+  // MUI's toggle no longer changes anything and the recalculation stops at the
+  // root. Nothing is lost: a cellSelection grid never allowed drag-to-select
+  // text anyway — that is precisely what MUI was toggling the class to prevent
+  // — and Ctrl+C still copies through the grid's own clipboard handling.
+  userSelect: "none",
+  // Editors are the exception: text inside an open cell editor must still be
+  // selectable, and `user-select` would otherwise inherit straight into them.
+  "& input, & textarea": { userSelect: "text" },
   // renderHeader owns the column title's typography (see columnFactory);
   // this only styles the titles the grid draws itself — the group bands.
   "& .MuiDataGrid-columnHeader": { padding: "0 8px" },
@@ -492,10 +513,44 @@ export default function PositionsGrid({
     [masked, maskableKeys, hotelClusters, currentOu]
   );
 
-  const isCellEditable = useCallback(
-    (params: GridCellParams) =>
-      cellEditable(params.row as PositionRow, params.colDef, editabilityCtx),
+  // Memo for the answer above, keyed row -> field.
+  //
+  // Every mounted cell subscribes to isCellEditable and re-runs it on EVERY
+  // grid store update, not just relevant ones (see GridCell's "Subscribe to
+  // changes of the `isCellEditable` API result" selector). A single click
+  // writes to the store three or four times — focus out, focus in, tab index,
+  // cell selection — so with ~600 cells mounted the answer is recomputed a
+  // couple of thousand times per click, for a value that cannot change unless
+  // the row object or the context does.
+  //
+  // Keyed on the row object, same copy-on-write argument as the caches in
+  // columnFactory: sanitizeRow and setRows always produce fresh objects rather
+  // than mutating in place, so a stale row can never be read back. The cache
+  // hangs off editabilityCtx, so a mask toggle, a new OU or a changed cluster
+  // set builds a new ctx and therefore a new, empty cache.
+  const editableCache = useMemo(
+    () => new WeakMap<PositionRow, Map<string, boolean>>(),
     [editabilityCtx]
+  );
+
+  const isCellEditable = useCallback(
+    (params: GridCellParams) => {
+      const row = params.row as PositionRow | undefined;
+      // Group and aggregation rows are not PositionRows — answer directly
+      // rather than caching against a row object the grid rebuilds anyway.
+      if (!row) return cellEditable(row, params.colDef, editabilityCtx);
+      let byField = editableCache.get(row);
+      if (!byField) {
+        byField = new Map<string, boolean>();
+        editableCache.set(row, byField);
+      }
+      const cached = byField.get(params.colDef.field);
+      if (cached !== undefined) return cached;
+      const editable = cellEditable(row, params.colDef, editabilityCtx);
+      byField.set(params.colDef.field, editable);
+      return editable;
+    },
+    [editabilityCtx, editableCache]
   );
 
   // The read-only Department (code) cell is a mirror of the Dept Name pick, so

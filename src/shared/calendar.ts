@@ -58,6 +58,47 @@ export const MONTH_LABELS = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ] as const;
 
+/** Alias of MONTH_LABELS, for code that reads better saying "short". */
+export const MONTH_SHORT = MONTH_LABELS;
+
+export const MONTH_LONG = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+] as const;
+
+/**
+ * "Oct", "Oct–Dec", "Jan–Mar, Oct–Dec" — a run-collapsed list of month names
+ * from 0-based indices. Every warning and consequence sentence about a set of
+ * months goes through this, so they all read the same way.
+ */
+export function formatMonthRanges(
+  indices: number[],
+  labels: readonly string[] = MONTH_LABELS
+): string {
+  const sorted = [...new Set(indices)].sort((a, b) => a - b);
+  if (sorted.length === 0) return "";
+
+  const parts: string[] = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+
+  const flush = () => {
+    parts.push(start === prev ? labels[start] : `${labels[start]}–${labels[prev]}`);
+  };
+
+  for (const index of sorted.slice(1)) {
+    if (index === prev + 1) {
+      prev = index;
+      continue;
+    }
+    flush();
+    start = index;
+    prev = index;
+  }
+  flush();
+  return parts.join(", ");
+}
+
 /** Sunday-first weekday labels, aligned with the bit order of `weekendMask`. */
 export const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 

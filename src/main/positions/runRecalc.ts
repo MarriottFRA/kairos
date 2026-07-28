@@ -1,0 +1,149 @@
+/**
+ * Run the engine over the PERSISTED scenario and overwrite the stored outputs.
+ *
+ * Extracted from the `positions:recalc` handler so the BST Push can recalculate
+ * with byte-identical semantics before it reads the outputs. Two call sites that
+ * each assembled their own input would eventually disagree about what a scenario
+ * computes to — and a push that disagreed with the Results page would be worse
+ * than no push at all.
+ *
+ * Blank-account lines (calculation-only blocks) are computed but never written:
+ * the workbook's "Blank" contract, enforced in projectOutputLines.
+ *
+ * Dependencies come in by argument (db handles, calendar/defaults lookups) so
+ * this stays unit-testable and Electron-free.
+ */
+
+import type Database from "better-sqlite3-multiple-ciphers";
+
+import { ensureSystemDefs } from "../blocks/repo";
+import {
+  CalendarGetter,
+  PositionDefaultsGetter,
+  loadScenarioInput,
+} from "./loadScenarioInput";
+import {
+  computeFingerprint,
+  projectAllocationLines,
+  projectBuyoutLines,
+  projectManualLines,
+  projectOutputLines,
+  readOutputs,
+  writeRun,
+} from "./outputsRepo";
+import { listAllocations } from "../allocations/repo";
+import { aggregateDepartmentMetrics } from "../../shared/allocations/compute";
+import { listRows as listManualRows } from "../manualInput/repo";
+import { loadScenarioValues } from "./positionsRepo";
+import { compile, simulate } from "../../shared/engine/simulate";
+import type { OutputsResponse } from "../../shared/positions/ipc";
+import type { OuScope } from "./ouScope";
+
+type Db = InstanceType<typeof Database>;
+
+export interface RunRecalcDeps {
+  /** Plaintext store: scenarios, definitions, blocks. */
+  localDb: Db;
+  /** Encrypted store: position values, buyouts, persisted outputs. */
+  secureDb: Db;
+  getCalendar: CalendarGetter;
+  getDefaults: PositionDefaultsGetter;
+  /** Injectable for tests; defaults to now. */
+  now?: () => string;
+}
+
+/**
+ * Recalculate + persist, then return the freshly stored outputs with the run's
+ * diagnostics attached.
+ *
+ * @throws if the block setup cannot be compiled.
+ */
+export async function runRecalc(
+  deps: RunRecalcDeps,
+  scope: OuScope,
+  scenarioId: string
+): Promise<OutputsResponse> {
+  const { localDb, secureDb, getCalendar, getDefaults } = deps;
+  const now = deps.now ?? (() => new Date().toISOString());
+
+  // The permanent system heads must exist before the definitions are read —
+  // otherwise a hotel that has never opened the Blocks page recalculates with no
+  // BASE_SALARY def (a hard compile error). Idempotent.
+  ensureSystemDefs(localDb, scope, { now: now() });
+
+  const input = await loadScenarioInput(
+    localDb,
+    secureDb,
+    scope,
+    scenarioId,
+    getCalendar,
+    getDefaults
+  );
+
+  const compiled = compile(input);
+  if ("errors" in compiled) {
+    throw new Error(
+      compiled.errors.map((entry) => entry.message).join(" ") ||
+        "The block setup cannot be calculated."
+    );
+  }
+  const result = simulate(compiled.plan);
+
+  const { lines, unpostedByLabel, allZeroPositions } = projectOutputLines(
+    result,
+    input.positions
+  );
+
+  // ---- the three non-engine sources ----------------------------------------
+  // Read here rather than inside loadScenarioInput: none of them is engine
+  // INPUT — the engine never sees them and does not need to. They are output
+  // contributions that land in the same dept × account table, so they belong
+  // beside the projection, not beside the compile.
+
+  // Buyouts came in with the scenario input already (the compiler interns them
+  // for its in-memory aggregate); this is the projection step that was missing.
+  const buyoutLines = projectBuyoutLines(input.buyouts);
+
+  const manualLines = projectManualLines(
+    listManualRows(secureDb, scope.ou, scenarioId)
+  );
+
+  // Allocations spread over the SAME department metrics the Allocations page
+  // shows — same loader, same aggregator, same calendar — so the two pages can
+  // never disagree about a split. (aggregateDepartmentMetrics wants the stored
+  // PositionRecords, not the engine's narrowed Position type, and does its own
+  // active filtering.)
+  const allocationLines = projectAllocationLines(
+    listAllocations(localDb, scope),
+    aggregateDepartmentMetrics(
+      loadScenarioValues(secureDb, scope, scenarioId).positions,
+      input.calendar
+    )
+  );
+
+  const allLines = [
+    ...lines,
+    ...buyoutLines,
+    ...manualLines,
+    ...allocationLines,
+  ];
+
+  // Fingerprint AFTER the load (same data the run saw).
+  const fingerprint = computeFingerprint(localDb, secureDb, scope, scenarioId);
+  writeRun(
+    secureDb,
+    scope,
+    scenarioId,
+    {
+      fingerprint,
+      computedAt: now(),
+      positionCount: input.positions.length,
+    },
+    allLines
+  );
+
+  return {
+    ...readOutputs(localDb, secureDb, scope, scenarioId),
+    diagnostics: { unpostedByLabel, allZeroPositions },
+  };
+}

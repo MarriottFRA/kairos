@@ -43,6 +43,8 @@ import {
 } from "../../store/settings";
 import AllocationsGrid from "../../components/allocations/AllocationsGrid";
 import AllocationDialog from "../../components/allocations/AllocationDialog";
+import { loadAccounts } from "../../services/mappingTablesService";
+import { AccountOption } from "../../shared/mappingTables/types";
 
 const EMPTY: AllocationsViewResponse = { allocations: [], departments: [] };
 
@@ -60,6 +62,23 @@ export default function Allocations() {
   const [editing, setEditing] = useState<AllocationDto | null>(null);
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<AllocationDto | null>(null);
+  // For the dialog's "post to account" picker. Best-effort, like every other
+  // page that offers it: no cache yet just means an empty option list.
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAccounts()
+      .then((result) => {
+        if (!cancelled) setAccounts(result);
+      })
+      .catch(() => {
+        if (!cancelled) setAccounts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const surfaceError = useCallback((err: unknown, fallback: string) => {
     const message = err instanceof Error ? err.message : fallback;
@@ -235,6 +254,7 @@ export default function Allocations() {
         allocation={editing}
         existing={view.allocations}
         departments={deptOptions}
+        accounts={accounts}
         saving={saving}
         onClose={() => {
           setDialogOpen(false);

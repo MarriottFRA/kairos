@@ -23,7 +23,10 @@ import {
 } from "./main/kpiDrivers/schema";
 import { applyBlocksStructureV12 } from "./main/blocks/schema";
 import { applyHotelClustersV13 } from "./main/hotelClusters/schema";
-import { applyAllocations } from "./main/allocations/schema";
+import {
+  applyAllocationInjectAccount,
+  applyAllocations,
+} from "./main/allocations/schema";
 import {
   LOCAL_DB_PATH,
   ensureDataDir,
@@ -70,7 +73,7 @@ db.pragma("foreign_keys = ON");
 // ABOVE a database's stored number, so an edited body silently never re-runs.
 // When the list grows unwieldy and every live store is at/above a known floor,
 // squash back to a fresh baseline the same way.
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 type LocalDb = InstanceType<typeof Database>;
 
@@ -92,7 +95,11 @@ const POSITION_DEFAULTS_TABLE_SQL = `
 // Append-only post-launch migrations, keyed by the version they produce
 // (v2, v3, …). Empty today: the whole pre-launch history is folded into the v1
 // baseline in applyBaselineSchema(). NEVER edit or renumber a shipped entry.
-const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {};
+const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
+  // Allocations can post their split into Results, so a definition needs to say
+  // which account it posts to. '' = not posted, i.e. today's behaviour.
+  2: applyAllocationInjectAccount,
+};
 
 /**
  * Create the entire plaintext feature/structure schema in its final shape (the

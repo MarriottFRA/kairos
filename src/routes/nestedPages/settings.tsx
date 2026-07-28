@@ -40,6 +40,7 @@ import type {
   MappingTablesStatus,
 } from "../../shared/mappingTables/types";
 import LegacyImportCard from "../../components/settings/LegacyImportCard";
+import StorageCleanupCard from "../../components/settings/StorageCleanupCard";
 
 export default function Settings() {
   const themeMode = useSettingsStore((s) => s.themeMode);
@@ -536,6 +537,10 @@ export default function Settings() {
         ou={selectedHotelOu ?? ""}
         scenarioId={planningScenarioId}
       />
+
+      {/* Purge soft-deleted rows from both stores (all hotels). Self-contained:
+          everything it needs lives in components/settings + main/maintenance. */}
+      <StorageCleanupCard />
 
       <Card
         variant="outlined"

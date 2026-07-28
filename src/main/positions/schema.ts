@@ -266,6 +266,15 @@ export const ENGINE_OUTPUTS_SQL = `
       PRIMARY KEY (ou, scenario_id)
   );
 
+  -- A line is one (source, source row, component) contribution to a dept x
+  -- account. position_id/component_def_id stay the primary key, so the
+  -- non-position sources use namespaced synthetic ids to keep it unique:
+  --   ENGINE      <positionId>       / <componentDefId>
+  --   MANUAL      manual:<rowId>     / manual:cost | manual:stats
+  --   ALLOCATION  alloc:<allocId>    / alloc:<deptCode>
+  --   BUYOUT      buyout:<rowId>     / buyout
+  -- detail is the small JSON blob the Results inspector renders (rate, spread
+  -- base, description...) so a drill-down needs no second lookup.
   CREATE TABLE IF NOT EXISTS engine_output_lines (
       ou               TEXT NOT NULL,
       scenario_id      TEXT NOT NULL,
@@ -276,6 +285,9 @@ export const ENGINE_OUTPUTS_SQL = `
       account          TEXT NOT NULL DEFAULT '',
       monthly_values   TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
       total            REAL NOT NULL DEFAULT 0,
+      source           TEXT NOT NULL DEFAULT 'ENGINE',
+      source_ref       TEXT NOT NULL DEFAULT '',
+      detail           TEXT NOT NULL DEFAULT '{}',
       PRIMARY KEY (ou, scenario_id, position_id, component_def_id)
   );
   CREATE INDEX IF NOT EXISTS idx_engine_output_scope
@@ -453,6 +465,45 @@ export function applyValueStoreV12(
     `CREATE INDEX IF NOT EXISTS idx_positions_cluster_link
        ON positions (cluster_link_id)`
   );
+}
+
+/**
+ * Add the provenance columns to engine_output_lines (secure v3).
+ *
+ * Results stopped being "whatever the engine produced" and became a union of
+ * four origins — the engine, manual input, allocations and buyouts — so a line
+ * has to say which one it came from, both for the Results inspector and so the
+ * BST push can never send a number that can't be traced back on the page.
+ *
+ * Existing lines are all engine lines, which is exactly what the DEFAULTs say,
+ * so no backfill is needed. The stored run is left alone: it will be recomputed
+ * on the next Recalculate anyway, and the new sources make it stale immediately
+ * (they are fingerprint probes now). Idempotent — the column check is the guard.
+ */
+export function applyOutputLineProvenance(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(engine_output_lines)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("source")) {
+    handle.exec(
+      `ALTER TABLE engine_output_lines ADD COLUMN source TEXT NOT NULL DEFAULT 'ENGINE'`
+    );
+  }
+  if (!present.has("source_ref")) {
+    handle.exec(
+      `ALTER TABLE engine_output_lines ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''`
+    );
+  }
+  if (!present.has("detail")) {
+    handle.exec(
+      `ALTER TABLE engine_output_lines ADD COLUMN detail TEXT NOT NULL DEFAULT '{}'`
+    );
+  }
 }
 
 /**

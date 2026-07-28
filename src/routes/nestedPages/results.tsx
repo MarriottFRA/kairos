@@ -1,12 +1,18 @@
 /**
  * Results — the generated budget output (dept × account, monthly).
  * -----------------------------------------------------------
- * Read-only presentation of the persisted engine run for the selected hotel +
- * planning scenario. Recalculate re-runs the engine over the SAVED data and
- * overwrites the stored output (calculation-only blocks — blank account —
- * never appear here). A fingerprint compare drives the "out of date" chip
- * whenever any input changed since the run: positions, blocks, calendar, KPI
- * recalc or a budget pull.
+ * Read-only presentation of the persisted run for the selected hotel + planning
+ * scenario. Recalculate re-runs the engine over the SAVED data and overwrites
+ * the stored output (calculation-only blocks — blank account — never appear
+ * here). A fingerprint compare drives the "out of date" chip whenever any input
+ * changed since the run: positions, blocks, calendar, KPI recalc, a budget
+ * pull, manual input or an allocation.
+ *
+ * The rows are a union of four origins — the engine, Manual Input, allocations
+ * and buyouts — each tagged with its source. Because the BST push sends exactly
+ * what this page shows, every number that can reach the workbook has to be
+ * explainable here: clicking any cell opens the inspector with the individual
+ * lines behind it.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -23,12 +29,13 @@ import {
   Typography,
 } from "@mui/material";
 import CalculateOutlinedIcon from "@mui/icons-material/CalculateOutlined";
-import { DataGridPremium, GridColDef } from "@mui/x-data-grid-premium";
-import {
-  OutputAggRowDto,
-  OutputsResponse,
-  SECURE_DB_LOCKED,
-} from "../../shared/positions/ipc";
+import { OutputsResponse, SECURE_DB_LOCKED } from "../../shared/positions/ipc";
+import ResultsGrid, {
+  ResultRow,
+  ResultSelection,
+  rowIdOf,
+} from "../../components/results/ResultsGrid";
+import ResultsInspector from "../../components/results/ResultsInspector";
 import { loadOutputs, recalcOutputs } from "../../services/outputsService";
 import { listScenarios } from "../../services/scenarioService";
 import { ScenarioDto } from "../../shared/positions/ipc";
@@ -41,14 +48,6 @@ import {
 
 type Kind = "all" | "costs" | "stats";
 
-const MONTH_SHORT = Array.from({ length: 12 }, (_, m) =>
-  new Date(2000, m, 1).toLocaleString("en", { month: "short" })
-);
-
-interface ResultRow extends OutputAggRowDto {
-  id: string;
-}
-
 export default function Results() {
   const selectedHotelOu = useSelectedHotel();
   const budgetYear = useBudgetYear();
@@ -60,6 +59,7 @@ export default function Results() {
   const [loading, setLoading] = useState(false);
   const [recalcBusy, setRecalcBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<ResultSelection | null>(null);
 
   // ── Resolve the planning scenario (same healing as the Positions page) ──
   useEffect(() => {
@@ -142,8 +142,18 @@ export default function Results() {
     const all = outputs?.rows ?? [];
     const filtered =
       kind === "all" ? all : all.filter((row) => row.isStats === (kind === "stats"));
-    return filtered.map((row) => ({ ...row, id: `${row.dept}|${row.account}` }));
+    return filtered.map((row) => ({ ...row, id: rowIdOf(row) }));
   }, [outputs, kind]);
+
+  // A selection that no longer exists (filter change, recalculate) must not
+  // leave the inspector explaining a row the user can no longer see.
+  useEffect(() => {
+    if (!selection || selection.isDeptGroup) return;
+    const stillThere = rows.some(
+      (row) => row.dept === selection.dept && row.account === selection.account
+    );
+    if (!stillThere) setSelection(null);
+  }, [rows, selection]);
 
   /** Components whose lines were computed but had no account to post to, worst
    *  first — the "where did my number go" explanation. */
@@ -154,51 +164,6 @@ export default function Results() {
       ),
     [outputs]
   );
-
-  const columns = useMemo<GridColDef<ResultRow>[]>(() => {
-    const numberColumn = (field: string, headerName: string, index?: number): GridColDef<ResultRow> => ({
-      field,
-      headerName,
-      width: field === "total" ? 124 : 96,
-      type: "number",
-      sortable: field === "total",
-      cellClassName: "res-cell--num",
-      valueGetter:
-        index === undefined
-          ? undefined
-          : // Grouping adds auto-generated `dept` rows that carry no months —
-            // their value comes from the aggregation model, not this getter.
-            (_value, row) => row?.months?.[index] ?? null,
-      valueFormatter: (value: number | null | undefined) => {
-        const num = Number(value);
-        if (!Number.isFinite(num) || num === 0) return num === 0 ? "–" : "";
-        return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
-      },
-    });
-
-    return [
-      {
-        field: "dept",
-        headerName: "Department",
-        width: 120,
-      },
-      {
-        field: "account",
-        headerName: "Account",
-        width: 130,
-        renderCell: (params) => (
-          <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
-            <span>{params.value as string}</span>
-            {params.row?.isStats && (
-              <Chip label="stat" size="small" variant="outlined" sx={{ height: 18, fontSize: "0.625rem" }} />
-            )}
-          </Stack>
-        ),
-      },
-      ...MONTH_SHORT.map((name, index) => numberColumn(`m${index + 1}`, name, index)),
-      numberColumn("total", "Year"),
-    ];
-  }, []);
 
   const neverCalculated = !!outputs && outputs.run === null;
 
@@ -301,7 +266,7 @@ export default function Results() {
         </Stack>
       </Stack>
 
-      <Box sx={{ flex: 1, minHeight: 0 }}>
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
         {neverCalculated && !loading ? (
           <Alert
             severity="info"
@@ -315,32 +280,25 @@ export default function Results() {
             Recalculate to generate the budget output from your positions and blocks.
           </Alert>
         ) : (
-          <DataGridPremium
-            rows={rows}
-            columns={columns}
-            loading={loading || recalcBusy}
-            rowGroupingModel={["dept"]}
-            defaultGroupingExpansionDepth={-1}
-            initialState={{
-              aggregation: {
-                model: Object.fromEntries([
-                  ...MONTH_SHORT.map((_name, index) => [`m${index + 1}`, "sum"]),
-                  ["total", "sum"],
-                ]),
-              },
-              pinnedColumns: { right: ["total"] },
-            }}
-            rowHeight={32}
-            columnHeaderHeight={40}
-            hideFooter
-            sx={{
-              borderRadius: 2,
-              "& .res-cell--num": {
-                fontFamily: "'IBM Plex Mono', monospace",
-                fontSize: "0.8125rem",
-              },
-            }}
-          />
+          <>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <ResultsGrid
+                rows={rows}
+                loading={loading || recalcBusy}
+                selection={selection}
+                onSelect={setSelection}
+              />
+            </Box>
+            {selection && selectedHotelOu && scenario && (
+              <ResultsInspector
+                selection={selection}
+                rows={rows}
+                ou={selectedHotelOu}
+                scenarioId={scenario.id}
+                onClose={() => setSelection(null)}
+              />
+            )}
+          </>
         )}
       </Box>
 

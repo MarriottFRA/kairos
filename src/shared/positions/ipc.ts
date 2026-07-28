@@ -257,7 +257,25 @@ export interface OutputRunDto {
   positionCount: number;
 }
 
-/** One dept×account result row (position lines aggregated in the repo). */
+/**
+ * Where a result line came from. Results is a union of four origins, and the
+ * BST push sends exactly what Results shows — so a number that reaches the
+ * workbook can always be traced back to the page, and from the page back to the
+ * row that produced it.
+ */
+export type OutputSource = "ENGINE" | "MANUAL" | "ALLOCATION" | "BUYOUT";
+
+/**
+ * How a row's numbers should be read.
+ *  - currency: money (the default)
+ *  - count:    statistics — heads, hours, covers
+ *  - rate:     a ratio that is the SAME every month (allocation splits). The
+ *              twelve months do not add up to anything meaningful, so the Year
+ *              column shows the rate itself rather than a sum.
+ */
+export type OutputValueKind = "currency" | "count" | "rate";
+
+/** One dept×account result row (source lines aggregated in the repo). */
 export interface OutputAggRowDto {
   dept: string;
   account: string;
@@ -267,6 +285,41 @@ export interface OutputAggRowDto {
   /** Jan..Dec. */
   months: number[];
   total: number;
+  /** Every origin that contributed to this row, in a stable order. A row can
+   *  legitimately mix them — e.g. an engine-posted account a manual row also
+   *  writes to. */
+  sources: OutputSource[];
+  valueKind: OutputValueKind;
+}
+
+/**
+ * One persisted line behind a result row — the drill-down grain the Results
+ * inspector renders. `engine_output_lines` has always kept this; readOutputs
+ * just aggregates it away.
+ */
+export interface OutputLineDto {
+  source: OutputSource;
+  /** The originating row's id (position, manual row, allocation, buyout). */
+  sourceRef: string;
+  /** The component label for engine lines; the row description otherwise. */
+  label: string;
+  /** Jan..Dec. */
+  months: number[];
+  total: number;
+  /**
+   * What produced this line, in the user's terms: the job title for an engine
+   * line, the description for a manual one. Never an employee name — the
+   * inspector answers "which post", not "which person".
+   */
+  displayName: string;
+  /** The Count multiplier on the position; null for non-engine sources. */
+  headcount: number | null;
+  /** Source-specific extras the inspector renders (rate, spread base, …). */
+  detail: Record<string, unknown>;
+}
+
+export interface OutputLinesResponse {
+  lines: OutputLineDto[];
 }
 
 /** Why a Recalculate produced empty/zero results for some positions — surfaced
@@ -323,4 +376,6 @@ export const POSITIONS_CHANNELS = {
   recalc: "positions:recalc",
   /** The persisted outputs + staleness for the Results page. */
   outputsGet: "positions:outputs-get",
+  /** The lines behind one dept×account row — the Results inspector. */
+  outputLinesGet: "positions:output-lines-get",
 } as const;

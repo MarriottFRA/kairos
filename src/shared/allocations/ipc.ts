@@ -84,6 +84,13 @@ export interface AllocationDto {
   spreadBase: SpreadBase;
   /** Department codes zeroed out before normalizing (the cost's owners). */
   excludedDepartments: string[];
+  /**
+   * The account this allocation's split posts to on the Results page: one stat
+   * row per department carrying the DECIMAL fraction (0.1523, not 15.23), the
+   * same value in all 12 months. '' = not posted — the same "Blank" contract
+   * the engine applies to calculation-only blocks.
+   */
+  injectAccount: string;
   sortOrder: number;
   updatedAt: string;
 }
@@ -95,6 +102,17 @@ export interface AllocationInput {
   name: string;
   spreadBase: SpreadBase;
   excludedDepartments: string[];
+  /** Omit or blank = the split is computed but not posted to Results. */
+  injectAccount?: string;
+}
+
+/**
+ * Percent (what the Allocations grid shows) → the decimal the Results page and
+ * the BST carry. Kept here beside the contract so the projector and any future
+ * consumer cannot drift on the factor.
+ */
+export function allocationPercentToDecimal(percent: number): number {
+  return Number.isFinite(percent) ? percent / 100 : 0;
 }
 
 /** One department row of the spread grid. `values` maps allocationId → percent. */
@@ -123,6 +141,7 @@ export function normalizeAllocationInput(input: AllocationInput): {
   name: string;
   spreadBase: SpreadBase;
   excludedDepartments: string[];
+  injectAccount: string;
 } {
   const name = String(input?.name ?? "").trim();
   if (!name) throw new Error("An allocation name is required.");
@@ -136,7 +155,15 @@ export function normalizeAllocationInput(input: AllocationInput): {
   const excludedDepartments = [
     ...new Set(raw.map((code) => String(code ?? "").trim()).filter(Boolean)),
   ];
-  return { id: input.id, name, spreadBase: input.spreadBase, excludedDepartments };
+  // Blank is legal and meaningful: "computed, but not posted to Results".
+  const injectAccount = String(input?.injectAccount ?? "").trim();
+  return {
+    id: input.id,
+    name,
+    spreadBase: input.spreadBase,
+    excludedDepartments,
+    injectAccount,
+  };
 }
 
 export const ALLOCATIONS_CHANNELS = {

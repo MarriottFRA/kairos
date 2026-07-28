@@ -673,6 +673,35 @@ export function cloneScenarioValues(
     for (const id of buyoutIds) {
       insertBuyout.run(mintId(), targetScenarioId, stamp, id, scope.ou);
     }
+
+    // Manual input rows hang off the scenario the same way buyouts do — they
+    // post into that scenario's results, so a copy that left them behind would
+    // silently drop part of the budget it claims to have cloned.
+    const manualIds = (
+      prepared(
+        db,
+        `SELECT id FROM manual_input_rows
+          WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
+      ).all(scope.ou, sourceScenarioId) as Array<{ id: string }>
+    ).map((row) => row.id);
+
+    const insertManual = prepared(
+      db,
+      `INSERT INTO manual_input_rows (
+         id, ou, scenario_id, description, department, department_code,
+         cost_account, stats_account, rate, stats_json, amounts_json,
+         spread_mode, spread_base_stats, spread_base_amount, increase_pct,
+         increase_month, sort_order, created_by, created_at, updated_at, deleted_at)
+       SELECT ?, ou, ?, description, department, department_code,
+         cost_account, stats_account, rate, stats_json, amounts_json,
+         spread_mode, spread_base_stats, spread_base_amount, increase_pct,
+         increase_month, sort_order, created_by, ?, ?, NULL
+         FROM manual_input_rows
+        WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+    );
+    for (const id of manualIds) {
+      insertManual.run(mintId(), targetScenarioId, stamp, stamp, id, scope.ou);
+    }
   })();
 
   return { positions: copied };

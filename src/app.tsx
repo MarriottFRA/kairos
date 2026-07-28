@@ -29,6 +29,7 @@ import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
 import BudgetSync from "./routes/nestedPages/budgetSync";
+import BstPush from "./routes/nestedPages/bstPush";
 import KpiDrivers from "./routes/nestedPages/kpiDrivers";
 import ManualInput from "./routes/nestedPages/manualInput";
 import HotelClusters from "./routes/nestedPages/hotelClusters";
@@ -72,7 +73,12 @@ const router = createHashRouter([
       {
         path: "budget-pull",
         element: <BudgetSync />,
-        handle: { title: "Budget Pull" },
+        handle: { title: "BST Pull" },
+      },
+      {
+        path: "bst-push",
+        element: <BstPush />,
+        handle: { title: "BST Push" },
       },
       {
         path: "kpi-drivers",

@@ -27,6 +27,10 @@ export type SpreadMode = "flat" | "daysInMonth";
 export interface ManualInputRow {
   id: ManualInputRowId;
   ou: string;
+  /** The planning scenario this row belongs to. Rows post into the persisted
+   *  results, which are per (ou, scenario), so a what-if scenario can carry
+   *  different manual numbers. '' = not yet healed from a pre-scoping store. */
+  scenarioId: string;
   description: string;
   /** Department NAME (carries the code); mirrors the positions convention. */
   department: string;

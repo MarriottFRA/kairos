@@ -52,6 +52,9 @@ import {
 import { loadScenarioInput } from "../loadScenarioInput";
 import { computeFingerprint, readOutputs, writeRun } from "../outputsRepo";
 import { ENGINE_OUTPUTS_SQL } from "../schema";
+// A scenario clone carries manual-input rows too, so the value store under test
+// needs the table the real secure store always creates.
+import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
 
 type Db = InstanceType<typeof Database>;
 
@@ -69,6 +72,7 @@ beforeEach(() => {
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
   valuesDb.exec(ENGINE_OUTPUTS_SQL);
+  valuesDb.exec(MANUAL_INPUT_TABLES_SQL);
 });
 
 function catalogFor(scope: OuScope) {
@@ -1345,7 +1349,11 @@ describe("migration runner shape", () => {
     const tables = valuesDb
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>;
-    expect(tables.map((t) => t.name)).toEqual([
+    // manual_input_rows comes from the shared setup (a scenario clone carries
+    // those rows), not from the two DDL constants under test here.
+    expect(
+      tables.map((t) => t.name).filter((name) => name !== "manual_input_rows")
+    ).toEqual([
       "buyout_rows",
       "component_values",
       "engine_output_lines",

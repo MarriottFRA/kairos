@@ -38,15 +38,9 @@ import {
   loadScenarioValues,
   scrubExtraValueKeys,
 } from "../../main/positions/positionsRepo";
-import { ensureSystemDefs } from "../../main/blocks/repo";
 import { loadScenarioInput } from "../../main/positions/loadScenarioInput";
-import {
-  computeFingerprint,
-  projectOutputLines,
-  readOutputs,
-  writeRun,
-} from "../../main/positions/outputsRepo";
-import { compile, simulate } from "../../shared/engine/simulate";
+import { readOutputLines, readOutputs } from "../../main/positions/outputsRepo";
+import { runRecalc } from "../../main/positions/runRecalc";
 import { uuidv7 } from "../../shared/engine/ids";
 import { buildFieldMap } from "../../shared/positions/rowModel";
 import {
@@ -54,6 +48,7 @@ import {
   FieldCatalogPurgeResponse,
   FieldCatalogResponse,
   FieldCatalogSaveRequest,
+  OutputLinesResponse,
   OutputsResponse,
   PiiRecord,
   PositionsBatchWriteRequest,
@@ -398,61 +393,22 @@ export class PositionsHandlers {
     try {
       const scope = resolveOuScope(request);
       const scenarioId = requireScenarioId(request);
-      // The permanent system heads must exist before the definitions are read —
-      // otherwise a hotel that has never opened the Blocks page recalculates with
-      // no BASE_SALARY def (a hard compile error) and no head for any of the
-      // grid's posting accounts. Idempotent.
-      ensureSystemDefs(localDbHandle(), scope, { now: new Date().toISOString() });
-
-      const input = await loadScenarioInput(
-        localDbHandle(),
-        secureDb(),
-        scope,
-        scenarioId,
-        getCalendarEitherForm,
-        getDefaultsEitherForm
+      // Shared with the BST push, which must recalculate before it writes. Two
+      // implementations would eventually disagree about what a scenario
+      // computes to, and a push that disagreed with this page would be worse
+      // than no push at all.
+      return ok(
+        await runRecalc(
+          {
+            localDb: localDbHandle(),
+            secureDb: secureDb(),
+            getCalendar: getCalendarEitherForm,
+            getDefaults: getDefaultsEitherForm,
+          },
+          scope,
+          scenarioId
+        )
       );
-      const compiled = compile(input);
-      if ("errors" in compiled) {
-        throw new Error(
-          compiled.errors.map((entry) => entry.message).join(" ") ||
-            "The block setup cannot be calculated."
-        );
-      }
-      const result = simulate(compiled.plan);
-
-      // Blank-account lines are computed but not posted, and the drops are
-      // tallied so the Results page can explain a missing amount instead of
-      // showing a silent blank (the top cause of "I added a row and nothing
-      // calculated"). See projectOutputLines.
-      const { lines, unpostedByLabel, allZeroPositions } = projectOutputLines(
-        result,
-        input.positions
-      );
-
-      // Fingerprint AFTER the load (same data the run saw).
-      const fingerprint = computeFingerprint(
-        localDbHandle(),
-        secureDb(),
-        scope,
-        scenarioId
-      );
-      writeRun(
-        secureDb(),
-        scope,
-        scenarioId,
-        {
-          fingerprint,
-          computedAt: new Date().toISOString(),
-          positionCount: input.positions.length,
-        },
-        lines
-      );
-      const outputs = readOutputs(localDbHandle(), secureDb(), scope, scenarioId);
-      return ok({
-        ...outputs,
-        diagnostics: { unpostedByLabel, allZeroPositions },
-      });
     } catch (error) {
       console.error("Failed to recalculate outputs:", error);
       return fail(error, null);
@@ -470,6 +426,39 @@ export class PositionsHandlers {
       return ok(readOutputs(localDbHandle(), secureDb(), scope, scenarioId));
     } catch (error) {
       console.error("Failed to read outputs:", error);
+      return fail(error, null);
+    }
+  };
+
+  /**
+   * The individual lines behind one dept×account row — the Results inspector.
+   *
+   * A pure read of the last run: no recalculation, and the output table has
+   * always kept this grain (readOutputs is the thing that aggregates it away).
+   * Optional `month` (0-based) only changes the ranking, so the same call
+   * answers both "what makes up this row" and "why is February high".
+   */
+  outputLinesGet: IpcHandler<any, IpcResult<OutputLinesResponse | null>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      const scenarioId = requireScenarioId(request);
+      const dept = String(request?.dept ?? "");
+      const account = String(request?.account ?? "");
+      if (!account) throw new Error("Missing account.");
+      const rawMonth = Number(request?.month);
+      const month =
+        Number.isInteger(rawMonth) && rawMonth >= 0 && rawMonth < 12
+          ? rawMonth
+          : undefined;
+
+      return ok({
+        lines: readOutputLines(secureDb(), scope, scenarioId, dept, account, month),
+      });
+    } catch (error) {
+      console.error("Failed to read output lines:", error);
       return fail(error, null);
     }
   };
@@ -493,5 +482,6 @@ export function createPositionsHandlers() {
     "positions:scenario-input": handlers.scenarioInput,
     "positions:recalc": handlers.recalc,
     "positions:outputs-get": handlers.outputsGet,
+    "positions:output-lines-get": handlers.outputLinesGet,
   };
 }

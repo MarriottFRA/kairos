@@ -15,6 +15,7 @@ type Db = InstanceType<typeof Database>;
 const OU_A = "OU12345";
 const OU_B = "OU67890";
 const NOW = "2026-07-23T00:00:00.000Z";
+const SCEN = "scenario-1";
 
 let db: Db;
 
@@ -27,6 +28,7 @@ function baseRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "row-1",
     ou: OU_A,
+    scenarioId: SCEN,
     description: "Casual labour",
     department: "Front Office",
     departmentCode: "FO",
@@ -50,7 +52,7 @@ function baseRow(overrides: Record<string, unknown> = {}) {
 describe("manual-input repo", () => {
   it("creates a row and reads it back with the month vectors intact", () => {
     saveRow(db, baseRow());
-    const rows = listRows(db, OU_A);
+    const rows = listRows(db, OU_A, SCEN);
     expect(rows).toHaveLength(1);
     expect(rows[0].description).toBe("Casual labour");
     expect(rows[0].departmentCode).toBe("FO");
@@ -73,7 +75,7 @@ describe("manual-input repo", () => {
         increaseMonth: 6,
       })
     );
-    const [row] = listRows(db, OU_A);
+    const [row] = listRows(db, OU_A, SCEN);
     expect(row.rate).toBe(25.5);
     expect(row.spreadMode).toBe("daysInMonth");
     expect(row.spreadBaseStats).toBe(480);
@@ -84,7 +86,7 @@ describe("manual-input repo", () => {
 
   it("normalizes short/ragged month vectors to length 12", () => {
     saveRow(db, baseRow({ stats: [1, 2, 3], amounts: [] }));
-    const [row] = listRows(db, OU_A);
+    const [row] = listRows(db, OU_A, SCEN);
     expect(row.stats).toHaveLength(12);
     expect(row.amounts).toHaveLength(12);
     expect(row.stats.slice(0, 3)).toEqual([1, 2, 3]);
@@ -93,7 +95,7 @@ describe("manual-input repo", () => {
 
   it("clamps an out-of-range increase month to 13 (none)", () => {
     saveRow(db, baseRow({ increaseMonth: 99 }));
-    expect(listRows(db, OU_A)[0].increaseMonth).toBe(13);
+    expect(listRows(db, OU_A, SCEN)[0].increaseMonth).toBe(13);
   });
 
   it("updates a row in place on conflicting id", () => {
@@ -102,7 +104,7 @@ describe("manual-input repo", () => {
       db,
       baseRow({ description: "Updated", rate: 40, now: "2026-07-24T00:00:00.000Z" })
     );
-    const rows = listRows(db, OU_A);
+    const rows = listRows(db, OU_A, SCEN);
     expect(rows).toHaveLength(1);
     expect(rows[0].description).toBe("Updated");
     expect(rows[0].rate).toBe(40);
@@ -112,30 +114,30 @@ describe("manual-input repo", () => {
   it("scopes rows to their OU", () => {
     saveRow(db, baseRow({ id: "a", ou: OU_A }));
     saveRow(db, baseRow({ id: "b", ou: OU_B }));
-    expect(listRows(db, OU_A).map((r) => r.id)).toEqual(["a"]);
-    expect(listRows(db, OU_B).map((r) => r.id)).toEqual(["b"]);
+    expect(listRows(db, OU_A, SCEN).map((r) => r.id)).toEqual(["a"]);
+    expect(listRows(db, OU_B, SCEN).map((r) => r.id)).toEqual(["b"]);
   });
 
   it("hands out increasing sort orders per OU", () => {
-    expect(nextSortOrder(db, OU_A)).toBe(0);
+    expect(nextSortOrder(db, OU_A, SCEN)).toBe(0);
     saveRow(db, baseRow({ id: "a", sortOrder: 0 }));
-    expect(nextSortOrder(db, OU_A)).toBe(1);
+    expect(nextSortOrder(db, OU_A, SCEN)).toBe(1);
     saveRow(db, baseRow({ id: "b", sortOrder: 1 }));
-    expect(nextSortOrder(db, OU_A)).toBe(2);
+    expect(nextSortOrder(db, OU_A, SCEN)).toBe(2);
     // A different OU is independent.
-    expect(nextSortOrder(db, OU_B)).toBe(0);
+    expect(nextSortOrder(db, OU_B, SCEN)).toBe(0);
   });
 
   it("orders rows by sort order", () => {
     saveRow(db, baseRow({ id: "b", sortOrder: 1, description: "second" }));
     saveRow(db, baseRow({ id: "a", sortOrder: 0, description: "first" }));
-    expect(listRows(db, OU_A).map((r) => r.description)).toEqual(["first", "second"]);
+    expect(listRows(db, OU_A, SCEN).map((r) => r.description)).toEqual(["first", "second"]);
   });
 
   it("soft-deletes rows so they drop out of the list", () => {
     saveRow(db, baseRow({ id: "a" }));
     saveRow(db, baseRow({ id: "b" }));
     deleteRows(db, OU_A, ["a"], { now: NOW });
-    expect(listRows(db, OU_A).map((r) => r.id)).toEqual(["b"]);
+    expect(listRows(db, OU_A, SCEN).map((r) => r.id)).toEqual(["b"]);
   });
 });

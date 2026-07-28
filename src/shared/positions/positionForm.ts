@@ -26,10 +26,12 @@ import {
   BlockSlot,
 } from "./blockRows";
 import {
+  BASIC_SALARY_ANNUAL_KEY,
   COLLAPSIBLE_MONTH_FAMILIES,
   FieldCatalog,
   FieldDef,
   fieldLabel,
+  SALARY_ENTRY_MODE_KEY,
   SectionId,
   VectorName,
   vectorKey,
@@ -240,6 +242,105 @@ export function matchFormFields(
     if (haystacks.some((text) => text.includes(needle))) hits.add(def.key);
   }
   return hits;
+}
+
+// ---------------------------------------------------------------------------
+// Cell geometry
+// ---------------------------------------------------------------------------
+
+/**
+ * How many tracks of the form's lattice a field occupies.
+ *
+ * The dialog lays every field out on ONE grid of equal tracks, shared by every
+ * section and every block, so the whole form lines up vertically no matter how
+ * many fields a section happens to hold — which is the thing a per-card layout
+ * could never do. A field that would truncate at one track (an account picker
+ * showing "A511000 · Salaries — Front Office", a free-text job title) asks for
+ * two; everything else takes one. Nothing takes three: at that point the value
+ * is not a field, it is a family, and families span the row on their own.
+ */
+export type FieldSpan = 1 | 2;
+
+/** Keys whose VALUE, not label, needs the room: long free text and pickers. */
+const WIDE_KEYS: ReadonlySet<string> = new Set([
+  "title",
+  "standardJobTitle",
+  "deptName",
+  "cluster",
+]);
+
+export function fieldSpan(key: string, def?: FieldDef): FieldSpan {
+  if (def) {
+    if (def.dataType === "ACCOUNT_CODE") return 2;
+    const source = def.dropdownSource?.kind;
+    if (source === "accounts" || source === "departments") return 2;
+    return WIDE_KEYS.has(def.key) ? 2 : 1;
+  }
+  // Block slots carry no catalog def; only their two account cells are wide.
+  return /:(?:account|statsAccount)$/.test(key) ? 2 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// Essentials
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields the form shows before you ask for the rest.
+ *
+ * A position carries ~40 form lines once the month families are folded, and a
+ * normal edit touches maybe fifteen of them. What the rest have in common is
+ * that they are set once and then left alone: the accounts a figure posts to,
+ * the read-only mirror of a picked department, and the two overrides that exist
+ * for the rare row. So Essentials is defined by what it DROPS — posting
+ * accounts, mirrors, and rare overrides — which is a rule a user can hold in
+ * their head, unlike a hand-picked list of favourites.
+ *
+ * User-defined fields are always essential: somebody added that column on
+ * purpose, and hiding it by default would make it look like it never saved.
+ */
+export const ESSENTIAL_FIELD_KEYS: ReadonlySet<string> = new Set([
+  "active",
+  // Employee PII
+  "firstName",
+  "lastName",
+  "empNumber",
+  "hiringDate",
+  // Position
+  "deptName",
+  "title",
+  "jobTypeCode",
+  "payType",
+  "headcount",
+  "cluster",
+  // Contract
+  "contractYearlyDays",
+  "contractDaysOff",
+  "contractPubHolidays",
+  "dailyContractHours",
+  "yearlyManhoursPaid",
+  "yearlyHoursWorked",
+  "fte",
+  // Seasonality
+  "totalWorkingMonths",
+  // Basic salary
+  SALARY_ENTRY_MODE_KEY,
+  BASIC_SALARY_ANNUAL_KEY,
+  "monthlyBaseSalary",
+  "hourlyRate",
+  "meritIncreasePct",
+  "increaseMonth",
+  "additionalCostsTotal",
+  "fullYearWage",
+  "budgetYearBasicSalary",
+  // Vacation
+  "vacationDays",
+  "accrualDaysPerMonth",
+  "vacationWeightsTotal",
+  "vacationEstimate",
+]);
+
+export function isEssentialField(def: FieldDef): boolean {
+  return def.origin === "USER" || ESSENTIAL_FIELD_KEYS.has(def.key);
 }
 
 /**

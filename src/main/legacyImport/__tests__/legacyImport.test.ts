@@ -767,7 +767,7 @@ describe("commitImportPlan", () => {
   it("writes manual input, allocations, holidays and the weekly hours", async () => {
     const report = await run();
 
-    expect(listManualRows(secureDb, OU.ou)).toHaveLength(2);
+    expect(listManualRows(secureDb, OU.ou, SCENARIO)).toHaveLength(2);
     expect(report.manualInputRowsCreated).toBe(2);
 
     const allocations = listAllocations(localDb, OU);

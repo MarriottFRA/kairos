@@ -17,6 +17,7 @@ import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import {
   deleteRows,
+  healRowScenario,
   listRows,
   nextSortOrder,
   saveRow,
@@ -37,6 +38,25 @@ function fail<T>(error: unknown, data: T): IpcResult<T> {
   return { success: false, error: message, data, timestamp: Date.now() };
 }
 
+/**
+ * The scenario every channel here works in, plus the one-shot adoption of rows
+ * that predate the scoping.
+ *
+ * Manual rows post into the persisted results, which are per (ou, scenario), so
+ * they had to become scenario-scoped too. The secure-store migration could only
+ * default the column to '' — `scenarios` lives in the plaintext store and the
+ * two files can never be ATTACHed — so the stamp happens here, the first place
+ * that knows both the OU and which scenario the renderer is looking at.
+ */
+function scenarioOf(db: SecureDbHandle, request: any, ou: string): string {
+  const scenarioId = String(request?.scenarioId ?? "").trim();
+  if (!scenarioId) throw new Error("Missing scenario.");
+  healRowScenario(db, ou, scenarioId);
+  return scenarioId;
+}
+
+type SecureDbHandle = ReturnType<typeof secureDb>;
+
 export function createManualInputHandlers(): Record<string, IpcHandler> {
   /** All rows for the OU, in sort order. */
   const list: IpcHandler<any, IpcResult<ManualInputRow[]>> = async (
@@ -45,7 +65,9 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
   ) => {
     try {
       const scope = resolveOuScope(request);
-      return ok(listRows(secureDb(), scope.ou));
+      const db = secureDb();
+      const scenarioId = scenarioOf(db, request, scope.ou);
+      return ok(listRows(db, scope.ou, scenarioId));
     } catch (error) {
       console.error("Manual input list failed:", error);
       return fail(error, []);
@@ -63,6 +85,7 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
       if (!input) throw new Error("Missing row payload.");
 
       const db = secureDb();
+      const scenarioId = scenarioOf(db, request, scope.ou);
       const now = new Date().toISOString();
       const isNew = !input.id;
       const id = input.id ?? (randomUUID() as unknown as ManualInputRowId);
@@ -74,6 +97,7 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
       saveRow(db, {
         id,
         ou: scope.ou,
+        scenarioId,
         description: input.description,
         department: input.department,
         departmentCode: input.departmentCode,
@@ -87,12 +111,12 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
         spreadBaseAmount: input.spreadBaseAmount ?? null,
         increasePct: input.increasePct ?? 0,
         increaseMonth: input.increaseMonth ?? 13,
-        sortOrder: isNew ? nextSortOrder(db, scope.ou) : 0,
+        sortOrder: isNew ? nextSortOrder(db, scope.ou, scenarioId) : 0,
         createdBy,
         now,
       });
 
-      return ok(listRows(db, scope.ou));
+      return ok(listRows(db, scope.ou, scenarioId));
     } catch (error) {
       console.error("Manual input save failed:", error);
       return fail(error, []);
@@ -112,8 +136,9 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
         .filter(Boolean);
       if (ids.length === 0) throw new Error("Missing row id(s).");
       const db = secureDb();
+      const scenarioId = scenarioOf(db, request, scope.ou);
       deleteRows(db, scope.ou, ids, { now: new Date().toISOString() });
-      return ok(listRows(db, scope.ou));
+      return ok(listRows(db, scope.ou, scenarioId));
     } catch (error) {
       console.error("Manual input delete failed:", error);
       return fail(error, []);

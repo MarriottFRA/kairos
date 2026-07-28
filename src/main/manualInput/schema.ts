@@ -21,11 +21,19 @@
  * the database. Kept free of Electron imports so tests can exec it in-memory.
  */
 
+import type Database from "better-sqlite3-multiple-ciphers";
+
 export const MANUAL_INPUT_TABLES_SQL = `
-  -- One row per hand-entered cost line, scoped to a hotel (OU).
+  -- One row per hand-entered cost line, scoped to a hotel (OU) + scenario.
+  -- The scenario scope arrived with the Results integration (secure v3): these
+  -- rows post into engine_output_lines, which is per (ou, scenario), so a
+  -- what-if scenario has to be able to carry different manual numbers. Rows
+  -- predating that migration hold '' and are healed to the OU's planning
+  -- scenario on first list (see ipc/handlers/manualInput.ts).
   CREATE TABLE IF NOT EXISTS manual_input_rows (
       id                 TEXT PRIMARY KEY,
       ou                 TEXT NOT NULL,
+      scenario_id        TEXT NOT NULL DEFAULT '',
       description        TEXT NOT NULL DEFAULT '',
       department         TEXT NOT NULL DEFAULT '',   -- department NAME (like positions)
       department_code    TEXT NOT NULL DEFAULT '',   -- mirror of the picked dept's code
@@ -47,4 +55,36 @@ export const MANUAL_INPUT_TABLES_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_manual_input_rows_ou
     ON manual_input_rows (ou, deleted_at, sort_order);
+  CREATE INDEX IF NOT EXISTS idx_manual_input_rows_scope
+    ON manual_input_rows (ou, scenario_id, deleted_at, sort_order);
 `;
+
+/**
+ * Add `scenario_id` to a pre-Results-integration manual_input_rows.
+ *
+ * Fresh installs get the column from the DDL above, so this is a no-op there.
+ * Existing rows keep '' — a secure-store migration cannot resolve a scenario
+ * (the `scenarios` table lives in the plaintext store and the two files can
+ * never be ATTACHed), so the stamp happens at handler level where both handles
+ * are open. Idempotent: the column check is the guard, since ALTER TABLE ADD
+ * COLUMN has no IF NOT EXISTS.
+ */
+export function applyManualInputScenarioScope(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(manual_input_rows)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("scenario_id")) {
+    handle.exec(
+      `ALTER TABLE manual_input_rows ADD COLUMN scenario_id TEXT NOT NULL DEFAULT ''`
+    );
+  }
+  handle.exec(
+    `CREATE INDEX IF NOT EXISTS idx_manual_input_rows_scope
+       ON manual_input_rows (ou, scenario_id, deleted_at, sort_order)`
+  );
+}

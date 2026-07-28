@@ -3,12 +3,22 @@
  * -----------------------------------------------------------
  * The grid spreads a position across ~79 catalog columns plus 2..14 per block,
  * so editing or reviewing one person means a lot of horizontal travel. This
- * dialog is the same row turned ninety degrees: catalog sections and blocks as
- * cards in a reflowing grid, month families folded behind their totals, and a
- * review rail that keeps the derived figures on screen while you type.
+ * dialog is the same row turned ninety degrees: a section rail on the left, the
+ * row's sections and blocks as full-width bands down the middle, and a review
+ * rail that keeps the derived figures on screen while you type.
  *
  * It is an ADDITION, not a replacement — the grid stays fully editable, and both
  * surfaces write through the same path.
+ *
+ * Layout, and why it is not a card grid: sections hold anywhere from one field
+ * to fifteen, so laying them out as cards in a uniform column grid leaves a dead
+ * gutter under every card shorter than its row-mate — CSS grid sizes a row to
+ * its tallest item, and the raggedness grows with the number of blocks. Bands
+ * remove the problem rather than balancing it: each band owns the full width, so
+ * its height is dictated by its own content and there is no neighbour to align
+ * against. Density then lives INSIDE the band, on one lattice of equal tracks
+ * shared by every band in the form, so fields line up vertically from the top of
+ * the dialog to the bottom.
  *
  * Three things keep it honest:
  *   - values are read and written through the row's own GridColDef callbacks
@@ -25,19 +35,19 @@
  * previous value through the same path and is the way out of a mistake.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
+import ButtonBase from "@mui/material/ButtonBase";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
-import Collapse from "@mui/material/Collapse";
 import Dialog from "@mui/material/Dialog";
-import Divider from "@mui/material/Divider";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
-import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlined";
@@ -56,13 +66,17 @@ import { AccountOption, DepartmentOption } from "../../shared/mappingTables/type
 import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
 import { FieldCatalog, FieldDef } from "../../shared/positions/fields";
 import { BlockResultsById } from "../../shared/positions/liveSim";
-import { buildPositionForm, FormCard, matchFormFields } from "../../shared/positions/positionForm";
+import {
+  buildPositionForm,
+  fieldSpan,
+  FormCard,
+  FormNode,
+  isEssentialField,
+  matchFormFields,
+} from "../../shared/positions/positionForm";
 import { COMPUTES, PositionRow } from "../../shared/positions/rowModel";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
-import {
-  buildBlockColumns,
-  slotPresentation,
-} from "./blockColumns";
+import { buildBlockColumns, slotPresentation } from "./blockColumns";
 import {
   blockAccountKey,
   blockFieldKey,
@@ -89,12 +103,30 @@ const IDENTITY_KEYS = ["firstName", "lastName", "title", "deptName"] as const;
 
 const MAX_UNDO = 20;
 
+/** The form's one lattice. Every band lays its fields on these tracks, so a
+ *  field in Contract sits directly above a field in Basic Salary. */
+const CELL_MIN = 188;
+/** Month cells are narrow by nature — twelve of them, all the same shape. */
+const MONTH_CELL_MIN = 116;
+
+type Density = "essentials" | "all";
+
 interface UndoEntry {
   rowId: string;
   /** The row as it was before the edit — replayed wholesale through the same
    *  update path, so the undo is sanitized and diffed like any other edit. */
   before: PositionRow;
   label: string;
+}
+
+/** A card plus what this view is actually going to draw of it. */
+interface Band {
+  card: FormCard;
+  nodes: FormNode[];
+  /** Fields the Essentials view is holding back — surfaced as "+N more". */
+  hidden: number;
+  /** Fields matching the current search, for the rail's counter. */
+  hits: number;
 }
 
 export interface PositionFormDialogProps {
@@ -158,8 +190,14 @@ export default function PositionFormDialog({
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const bandRefs = useRef(new Map<string, HTMLElement>());
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [density, setDensity] = useState<Density>("essentials");
+  const [openBands, setOpenBands] = useState<Record<string, boolean>>({});
+  const [openFamilies, setOpenFamilies] = useState<Record<string, boolean>>({});
+  /** Bands where the user asked for the fields Essentials holds back. */
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [activeBand, setActiveBand] = useState<string>("");
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const columns = useMemo(() => {
@@ -214,26 +252,50 @@ export default function PositionFormDialog({
 
   // Block cells have no catalog def, and their headerName is prefixed with the
   // block label ("Pension — Multiplier") because a grid column has no other
-  // context. Inside a card already titled "Pension" that reads as a stutter, so
-  // the form takes the same short/unit pair the band header uses.
+  // context. Inside a band already titled "Pension" that reads as a stutter, so
+  // the form takes the same short/unit pair the band header uses. The owning
+  // block's label rides along so the search box can match "pension" and land on
+  // that block's cells.
   const blockLabels = useMemo(() => {
-    const labels = new Map<string, { short: string; unit: string }>();
+    const labels = new Map<string, { short: string; unit: string; block: string }>();
     for (const block of blocks) {
       for (const slot of blockInputSlots(block)) {
-        labels.set(blockFieldKey(block.costDefId, slot), slotPresentation(block, slot));
+        labels.set(blockFieldKey(block.costDefId, slot), {
+          ...slotPresentation(block, slot),
+          block: block.label,
+        });
       }
-      labels.set(blockAccountKey(block.costDefId), { short: "Account", unit: "posts to" });
+      labels.set(blockAccountKey(block.costDefId), {
+        short: "Account",
+        unit: "posts to",
+        block: block.label,
+      });
       labels.set(blockStatsAccountKey(block.costDefId), {
         short: "Stats account",
         unit: "posts to",
+        block: block.label,
       });
     }
     return labels;
   }, [blocks]);
-  const matches = useMemo(
-    () => (query.trim() ? matchFormFields(catalog, query) : null),
-    [catalog, query]
-  );
+
+  /** Field keys the search box is asking for, or null for "no filter". Covers
+   *  block cells too — a search that silently skipped half the form would send
+   *  the user back to the grid. */
+  const matches = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return null;
+    const hits = new Set(matchFormFields(catalog, query));
+    for (const [key, meta] of blockLabels) {
+      if (
+        meta.short.toLowerCase().includes(needle) ||
+        meta.block.toLowerCase().includes(needle)
+      ) {
+        hits.add(key);
+      }
+    }
+    return hits;
+  }, [catalog, blockLabels, query]);
 
   const editCtx = useMemo(
     () => ({ masked, maskableKeys, hotelClusters, currentOu }),
@@ -370,24 +432,90 @@ export default function PositionFormDialog({
     return column ? displayValue(column, shown) : "";
   }).filter(Boolean);
 
-  const renderField = (key: string, dense = false) => {
+  // ── What each band draws ──────────────────────────────────────────────
+  // Search wins over density: a field you went looking for is never withheld
+  // because the Essentials view would have hidden it.
+  const keysOf = (node: FormNode): string[] =>
+    node.kind === "field"
+      ? [node.key]
+      : node.kind === "monthFamily"
+        ? [node.summaryKey, ...node.keys].filter((key): key is string => !!key)
+        : node.keys;
+
+  /** The catalog def that decides whether a node is essential — a family is
+   *  represented by its Σ, which is the only line of it the form shows folded. */
+  const anchorDef = (node: FormNode): FieldDef | undefined =>
+    node.kind === "field"
+      ? defs.get(node.key)
+      : node.kind === "monthFamily" && node.summaryKey
+        ? defs.get(node.summaryKey)
+        : undefined;
+
+  const bands: Band[] = cards
+    .map((card) => {
+      const open = revealed[card.id] === true;
+      let hidden = 0;
+      let hits = 0;
+      const nodes = card.nodes.filter((node) => {
+        if (matches) {
+          const hit = keysOf(node).some((key) => matches.has(key));
+          if (hit) hits += 1;
+          return hit;
+        }
+        const def = anchorDef(node);
+        // Block slots have no def and are never held back: a block band that
+        // showed only its title would be a worse answer than a long form.
+        if (!def || open || density === "all" || isEssentialField(def)) return true;
+        hidden += 1;
+        return false;
+      });
+      return { card, nodes, hidden, hits };
+    })
+    // A block with no inputs at all (a plain SS scheme) still earns its band —
+    // its Total is the thing the user came to read.
+    .filter((band) => band.nodes.length > 0 || (!matches && !!band.card.totalKey));
+
+  /** Until the body has been scrolled, "you are here" is the first band. */
+  const currentBand = activeBand || bands[0]?.card.id || "";
+
+  const jumpTo = (id: string) => {
+    setOpenBands((state) => ({ ...state, [id]: true }));
+    requestAnimationFrame(() => {
+      const root = bodyRef.current;
+      const element = bandRefs.current.get(id);
+      if (root && element) root.scrollTop = element.offsetTop - 8;
+    });
+  };
+
+  const syncActiveBand = () => {
+    const root = bodyRef.current;
+    if (!root) return;
+    let current = bands[0]?.card.id ?? "";
+    for (const band of bands) {
+      const element = bandRefs.current.get(band.card.id);
+      if (element && element.offsetTop - root.scrollTop <= 12) current = band.card.id;
+    }
+    setActiveBand((previous) => (previous === current ? previous : current));
+  };
+
+  const renderField = (
+    key: string,
+    options?: { dense?: boolean; action?: ReactNode }
+  ) => {
     const column = columns.get(key);
     if (!column) return null;
     const def = defs.get(key);
     const presentation = def ? headerPresentation(def) : (blockLabels.get(key) ?? null);
-    const dimmed = !!matches && !matches.has(key);
+    const span = options?.dense ? 1 : fieldSpan(key, def);
 
     return (
-      <Box
-        key={key}
-        sx={{ opacity: dimmed ? 0.35 : 1, transition: "opacity 120ms" }}
-      >
+      <Box key={key} sx={{ minWidth: 0, gridColumn: `span ${span}` }}>
         <PositionFormField
           column={column}
           def={def}
           row={shown}
           label={presentation?.short ?? String(column.headerName ?? key)}
-          unit={dense ? null : presentation?.unit}
+          unit={presentation?.unit}
           hint={
             (def ? headerPresentation(def).hint : null) ??
             (column.description as string | undefined) ??
@@ -396,7 +524,8 @@ export default function PositionFormDialog({
           editable={cellEditable(shown, column, editCtx)}
           lockNote={lockNoteFor(def, shown, masked)}
           warn={key === "vacationWeightsTotal" && weightsDrift(shown)}
-          dense={dense}
+          dense={options?.dense}
+          action={options?.action}
           departments={departments}
           accounts={accounts}
           onCommit={commit}
@@ -405,42 +534,149 @@ export default function PositionFormDialog({
     );
   };
 
-  const renderCard = (card: FormCard) => {
-    const cardHidden =
-      !!matches &&
-      card.kind === "section" &&
-      card.nodes.every((node) =>
-        node.kind === "field" ? !matches.has(node.key) : !node.keys.some((k) => matches.has(k))
+  /** The twelve cells of a family, as a full-width shelf under their Σ. */
+  const renderMonths = (familyId: string, keys: string[]) => (
+    <Box
+      key={`${familyId}:months`}
+      sx={{
+        gridColumn: "1 / -1",
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fill, minmax(${MONTH_CELL_MIN}px, 1fr))`,
+        gap: 1,
+        p: 1,
+        borderRadius: 1,
+        bgcolor: "action.hover",
+      }}
+    >
+      {keys.map((key) => renderField(key, { dense: true }))}
+    </Box>
+  );
+
+  const renderNode = (card: FormCard, node: FormNode) => {
+    if (node.kind === "field") return renderField(node.key);
+
+    const familyId = `${card.id}:${node.kind === "monthFamily" ? node.vector : "months"}`;
+    const open = openFamilies[familyId] ?? false;
+    const toggle = (
+      <Tooltip title={open ? "Hide the twelve months" : "Show the twelve months"}>
+        <IconButton
+          size="small"
+          tabIndex={-1}
+          sx={{ p: 0.25 }}
+          onClick={() => setOpenFamilies((state) => ({ ...state, [familyId]: !open }))}
+        >
+          <ExpandMoreIcon
+            sx={{
+              fontSize: 16,
+              transform: open ? "rotate(180deg)" : "none",
+              transition: "transform 120ms",
+            }}
+          />
+        </IconButton>
+      </Tooltip>
+    );
+
+    // A family with a Σ hangs off that field's own cell; one without (a
+    // CUSTOM_MONTHLY block) gets a cell of the same shape holding just the
+    // toggle, so the lattice stays intact either way.
+    const head =
+      node.kind === "monthFamily" && node.summaryKey ? (
+        renderField(node.summaryKey, { action: toggle })
+      ) : (
+        <Box key={familyId} sx={{ minWidth: 0 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.25, height: 18 }}>
+            <Typography
+              variant="caption"
+              noWrap
+              sx={{ flex: 1, minWidth: 0, color: "text.secondary", lineHeight: 1.2 }}
+            >
+              Monthly amounts
+            </Typography>
+            {toggle}
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", height: 40 }}>
+            <Typography variant="body2" sx={{ color: "text.disabled" }}>
+              {open ? "12 months" : "12 months hidden"}
+            </Typography>
+          </Box>
+        </Box>
       );
 
     return (
-      <Paper
+      <Box key={familyId} sx={{ display: "contents" }}>
+        {head}
+        {open ? renderMonths(familyId, node.keys) : null}
+      </Box>
+    );
+  };
+
+  const renderBand = (band: Band) => {
+    const { card } = band;
+    const isBlock = card.kind === "block";
+    // Sections are open by default; blocks fold away in the Essentials view,
+    // where their Total in the header is usually the whole question.
+    const defaultOpen = !isBlock || density === "all";
+    const open = matches ? true : (openBands[card.id] ?? defaultOpen);
+    const total =
+      card.totalKey && columns.get(card.totalKey)
+        ? displayValue(columns.get(card.totalKey)!, shown)
+        : null;
+
+    return (
+      <Box
         key={card.id}
-        variant="outlined"
-        sx={{
-          p: 1.25,
-          minWidth: 0,
-          opacity: cardHidden ? 0.4 : 1,
-          borderColor: card.kind === "block" ? "primary.light" : "divider",
+        component="section"
+        ref={(element: HTMLElement | null) => {
+          if (element) bandRefs.current.set(card.id, element);
+          else bandRefs.current.delete(card.id);
         }}
+        sx={{ scrollMarginTop: 8 }}
       >
         <Stack
           direction="row"
           spacing={0.5}
-          sx={{ mb: 0.75, minWidth: 0, alignItems: "center" }}
+          sx={{
+            position: "sticky",
+            top: 0,
+            zIndex: 2,
+            alignItems: "center",
+            minWidth: 0,
+            py: 0.75,
+            bgcolor: "background.paper",
+            borderBottom: 1,
+            borderColor: "divider",
+          }}
         >
+          <IconButton
+            size="small"
+            tabIndex={-1}
+            sx={{ p: 0.25 }}
+            onClick={() => setOpenBands((state) => ({ ...state, [card.id]: !open }))}
+          >
+            <ExpandMoreIcon
+              sx={{
+                fontSize: 18,
+                transform: open ? "none" : "rotate(-90deg)",
+                transition: "transform 120ms",
+              }}
+            />
+          </IconButton>
           <Typography
             variant="subtitle2"
-            sx={{
-              flex: 1,
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              color: card.kind === "block" ? "primary.main" : "text.primary",
-            }}
+            noWrap
+            sx={{ minWidth: 0, color: isBlock ? "primary.main" : "text.primary" }}
           >
             {card.label || "Row"}
           </Typography>
+          <Box sx={{ flex: 1, minWidth: 8 }} />
+          {total ? (
+            <Typography
+              variant="body2"
+              sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}
+            >
+              {total}
+            </Typography>
+          ) : null}
           {card.block ? (
             <Tooltip title="Edit this block">
               <IconButton size="small" tabIndex={-1} onClick={() => onEditBlock(card.block!)}>
@@ -449,80 +685,32 @@ export default function PositionFormDialog({
             </Tooltip>
           ) : null}
         </Stack>
-        <Divider sx={{ mb: 1 }} />
 
-        <Stack spacing={0.75}>
-          {card.nodes.map((node) => {
-            if (node.kind === "field") return renderField(node.key);
-
-            const familyId = `${card.id}:${node.kind === "monthFamily" ? node.vector : "months"}`;
-            const open = expanded[familyId] ?? false;
-            return (
-              <Box key={familyId}>
-                <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    {node.kind === "monthFamily" && node.summaryKey ? (
-                      renderField(node.summaryKey)
-                    ) : (
-                      <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                        Monthly amounts
-                      </Typography>
-                    )}
-                  </Box>
-                  <Tooltip title={open ? "Hide the twelve months" : "Show the twelve months"}>
-                    <IconButton
-                      size="small"
-                      tabIndex={-1}
-                      onClick={() =>
-                        setExpanded((state) => ({ ...state, [familyId]: !open }))
-                      }
-                    >
-                      <ExpandMoreIcon
-                        fontSize="inherit"
-                        sx={{
-                          transform: open ? "rotate(180deg)" : "none",
-                          transition: "transform 120ms",
-                        }}
-                      />
-                    </IconButton>
-                  </Tooltip>
-                </Stack>
-                <Collapse in={open} unmountOnExit>
-                  <Box
-                    sx={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(4, 1fr)",
-                      gap: 0.75,
-                      pt: 0.75,
-                    }}
-                  >
-                    {node.keys.map((key) => renderField(key, true))}
-                  </Box>
-                </Collapse>
+        {open ? (
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: `repeat(auto-fill, minmax(${CELL_MIN}px, 1fr))`,
+              columnGap: 1.5,
+              rowGap: 1.25,
+              py: 1.5,
+              alignItems: "start",
+            }}
+          >
+            {band.nodes.map((node) => renderNode(card, node))}
+            {band.hidden > 0 ? (
+              <Box sx={{ gridColumn: "1 / -1" }}>
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  label={`+${band.hidden} more ${band.hidden === 1 ? "field" : "fields"}`}
+                  onClick={() => setRevealed((state) => ({ ...state, [card.id]: true }))}
+                />
               </Box>
-            );
-          })}
-
-          {card.totalKey ? (
-            <>
-              <Divider sx={{ mt: 0.5 }} />
-              <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                  Total
-                </Typography>
-                <Typography
-                  variant="body2"
-                  sx={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}
-                >
-                  {columns.get(card.totalKey)
-                    ? displayValue(columns.get(card.totalKey)!, shown) || "—"
-                    : "—"}
-                </Typography>
-              </Stack>
-            </>
-          ) : null}
-        </Stack>
-      </Paper>
+            ) : null}
+          </Box>
+        ) : null}
+      </Box>
     );
   };
 
@@ -570,7 +758,7 @@ export default function PositionFormDialog({
         }}
       >
         <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-          <Typography variant="h6" sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+          <Typography variant="h6" noWrap sx={{ minWidth: 0 }}>
             {identity.join(" · ") || "Position"}
           </Typography>
           <SaveDot status={status} />
@@ -588,12 +776,25 @@ export default function PositionFormDialog({
               />
             </Tooltip>
           ) : null}
-          <Box sx={{ flex: 1 }} />
+          <Box sx={{ flex: 1, minWidth: 8 }} />
+
+          <Tooltip title="Key fields hides posting accounts, mirrored codes and the rare overrides">
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={density}
+              onChange={(_event, next: Density | null) => next && setDensity(next)}
+              sx={{ "& .MuiToggleButton-root": { py: 0.25, px: 1, textTransform: "none" } }}
+            >
+              <ToggleButton value="essentials">Key</ToggleButton>
+              <ToggleButton value="all">All</ToggleButton>
+            </ToggleButtonGroup>
+          </Tooltip>
 
           <TextField
             size="small"
             inputRef={searchRef}
-            placeholder="Jump to field…"
+            placeholder="Find a field…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -611,7 +812,7 @@ export default function PositionFormDialog({
                 ),
               },
             }}
-            sx={{ width: 200 }}
+            sx={{ width: 180 }}
           />
 
           <Tooltip title="Undo the last change (Ctrl+Z)">
@@ -660,23 +861,53 @@ export default function PositionFormDialog({
         ) : null}
       </Box>
 
-      {/* ── Body + review rail ── */}
+      {/* ── Section rail · bands · review rail ── */}
       <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
         <Box
+          sx={{
+            width: 190,
+            flexShrink: 0,
+            borderRight: 1,
+            borderColor: "divider",
+            overflowY: "auto",
+            py: 1,
+            px: 0.75,
+            display: { xs: "none", md: "block" },
+          }}
+        >
+          <Stack spacing={0.25}>
+            {bands.map((band) => (
+              <RailItem
+                key={band.card.id}
+                label={band.card.label || "Row"}
+                block={band.card.kind === "block"}
+                active={currentBand === band.card.id}
+                badge={matches ? band.hits : null}
+                onClick={() => jumpTo(band.card.id)}
+              />
+            ))}
+            {matches && bands.length === 0 ? (
+              <Typography variant="caption" sx={{ color: "text.secondary", px: 1 }}>
+                No field matches “{query.trim()}”.
+              </Typography>
+            ) : null}
+          </Stack>
+        </Box>
+
+        <Box
           ref={bodyRef}
+          onScroll={syncActiveBand}
           sx={{
             flex: 1,
             minWidth: 0,
+            position: "relative",
             overflowY: "auto",
-            p: 1.5,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: 1.5,
-            alignItems: "start",
+            px: 2,
+            pb: 4,
           }}
         >
           {weightsDrift(shown) ? (
-            <Alert severity="warning" sx={{ gridColumn: "1 / -1", py: 0 }}>
+            <Alert severity="warning" sx={{ mt: 1.5, py: 0 }}>
               Vacation weights total{" "}
               {columns.get("vacationWeightsTotal")
                 ? displayValue(columns.get("vacationWeightsTotal")!, shown)
@@ -684,7 +915,12 @@ export default function PositionFormDialog({
               . The engine normalises them, but they are easier to reason about at 100%.
             </Alert>
           ) : null}
-          {cards.map(renderCard)}
+          {bands.map(renderBand)}
+          {bands.length === 0 ? (
+            <Typography variant="body2" sx={{ color: "text.secondary", mt: 3 }}>
+              No field matches “{query.trim()}”. Clear the search to see the whole position.
+            </Typography>
+          ) : null}
         </Box>
 
         <Box
@@ -696,6 +932,7 @@ export default function PositionFormDialog({
             p: 1.5,
             overflowY: "auto",
             bgcolor: "action.hover",
+            display: { xs: "none", sm: "block" },
           }}
         >
           <Typography variant="overline" sx={{ color: "text.secondary" }}>
@@ -718,7 +955,12 @@ export default function PositionFormDialog({
 
           {blocks.length > 0 ? (
             <>
-              <Divider sx={{ my: 1.25 }} />
+              <Typography
+                variant="overline"
+                sx={{ color: "text.secondary", display: "block", mt: 1.5 }}
+              >
+                Blocks
+              </Typography>
               <Stack spacing={0.75}>
                 {blocks.map((block) => {
                   const column = columns.get(`blk:${block.costDefId}:total`);
@@ -737,6 +979,60 @@ export default function PositionFormDialog({
         </Box>
       </Box>
     </Dialog>
+  );
+}
+
+/** One line of the section rail: where you are, and where a search landed. */
+function RailItem({
+  label,
+  block,
+  active,
+  badge,
+  onClick,
+}: {
+  label: string;
+  block: boolean;
+  active: boolean;
+  badge: number | null;
+  onClick: () => void;
+}) {
+  return (
+    <ButtonBase
+      onClick={onClick}
+      tabIndex={-1}
+      sx={{
+        display: "flex",
+        width: "100%",
+        gap: 0.75,
+        px: 1,
+        py: 0.5,
+        borderRadius: 1,
+        borderLeft: "2px solid",
+        borderColor: active ? "primary.main" : "transparent",
+        bgcolor: active ? "action.selected" : "transparent",
+        justifyContent: "flex-start",
+        "&:hover": { bgcolor: "action.hover" },
+      }}
+    >
+      <Typography
+        variant="body2"
+        noWrap
+        sx={{
+          flex: 1,
+          minWidth: 0,
+          textAlign: "left",
+          fontWeight: active ? 600 : 400,
+          color: block ? "primary.main" : active ? "text.primary" : "text.secondary",
+        }}
+      >
+        {label}
+      </Typography>
+      {badge !== null ? (
+        <Typography variant="caption" sx={{ color: "text.secondary" }}>
+          {badge}
+        </Typography>
+      ) : null}
+    </ButtonBase>
   );
 }
 

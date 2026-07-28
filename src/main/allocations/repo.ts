@@ -24,6 +24,7 @@ interface AllocationRow {
   name: string;
   spread_base: string;
   excluded_departments: string;
+  inject_account: string;
   sort_order: number;
   updated_at: string;
 }
@@ -43,7 +44,8 @@ function parseExcluded(raw: unknown): string[] {
 export function listAllocations(db: Db, scope: OuScope): AllocationDto[] {
   const rows = prepared(
     db,
-    `SELECT id, name, spread_base, excluded_departments, sort_order, updated_at
+    `SELECT id, name, spread_base, excluded_departments, inject_account,
+            sort_order, updated_at
        FROM allocations
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY sort_order, id`
@@ -55,6 +57,7 @@ export function listAllocations(db: Db, scope: OuScope): AllocationDto[] {
     // Historic/unknown bases are surfaced as-is; the dialog re-picks a valid one.
     spreadBase: row.spread_base as AllocationDto["spreadBase"],
     excludedDepartments: parseExcluded(row.excluded_departments),
+    injectAccount: row.inject_account ?? "",
     sortOrder: row.sort_order,
     updatedAt: row.updated_at,
   }));
@@ -108,12 +111,14 @@ export function saveAllocation(
   prepared(
     db,
     `INSERT INTO allocations
-       (id, ou, name, spread_base, excluded_departments, sort_order, updated_at, deleted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+       (id, ou, name, spread_base, excluded_departments, inject_account,
+        sort_order, updated_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name,
        spread_base = excluded.spread_base,
        excluded_departments = excluded.excluded_departments,
+       inject_account = excluded.inject_account,
        updated_at = excluded.updated_at,
        deleted_at = NULL`
   ).run(
@@ -122,6 +127,7 @@ export function saveAllocation(
     normalized.name,
     normalized.spreadBase,
     JSON.stringify(normalized.excludedDepartments),
+    normalized.injectAccount,
     sortOrder,
     opts.now
   );

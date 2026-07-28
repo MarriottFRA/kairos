@@ -20,6 +20,11 @@ import {
   ManualInputRowInput,
   SpreadMode,
 } from "../../shared/manualInput/ipc";
+import {
+  isRateDriven as isRateDrivenRate,
+  manualAmountForMonth,
+  num,
+} from "../../shared/manualInput/rowMath";
 
 export interface ManualGridRow {
   id: string;
@@ -44,22 +49,24 @@ export interface ManualGridRow {
 export const statsKey = (month: number) => `stat_${month}`;
 export const amountKey = (month: number) => `amt_${month}`;
 
-/** Coerce anything to a finite number, else 0. */
-export function num(value: unknown): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
+// The amount rule itself lives in shared/manualInput/rowMath.ts — the main
+// process derives the same number when it projects manual rows into the
+// persisted results, and two copies would eventually disagree. These are the
+// grid-row-shaped wrappers over it.
+export { num };
 
 /** Whether a row's monthly amounts are derived from a rate (vs. typed). */
 export function isRateDriven(row: ManualGridRow): boolean {
-  return num(row.rate) > 0;
+  return isRateDrivenRate(row.rate);
 }
 
 /** The amount shown for a month: stats*rate when rate-driven, else the typed amt. */
 export function amountForMonth(row: ManualGridRow, month: number): number {
-  return isRateDriven(row)
-    ? num(row[statsKey(month)]) * num(row.rate)
-    : num(row[amountKey(month)]);
+  return manualAmountForMonth(
+    row.rate,
+    row[statsKey(month)],
+    row[amountKey(month)]
+  );
 }
 
 export function totalStats(row: ManualGridRow): number {

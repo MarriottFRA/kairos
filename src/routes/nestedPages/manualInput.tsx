@@ -25,7 +25,14 @@ import AddIcon from "@mui/icons-material/Add";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import { useGridApiRef } from "@mui/x-data-grid-premium";
-import { useSelectedHotel, useSettingsStore } from "../../store/settings";
+import {
+  usePlanningScenarioId,
+  useSelectedHotel,
+  useSettingsStore,
+} from "../../store/settings";
+import { listScenarios } from "../../services/scenarioService";
+import { ScenarioDto } from "../../shared/positions/ipc";
+import { resolvePlanningScenario } from "../../shared/positions/scenarioResolve";
 import { ManualInputRow, ManualInputRowId } from "../../shared/manualInput/ipc";
 import {
   deleteManualRows,
@@ -52,7 +59,10 @@ type Toast = { severity: "success" | "error" | "info"; message: string } | null;
 export default function ManualInput() {
   const ou = useSelectedHotel();
   const budgetYear = useSettingsStore((s) => s.budgetYear);
+  const planningScenarioId = usePlanningScenarioId();
   const apiRef = useGridApiRef();
+
+  const [scenario, setScenario] = useState<ScenarioDto | null>(null);
 
   const [rows, setRows] = useState<ManualGridRow[]>([]);
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
@@ -100,15 +110,41 @@ export default function ManualInput() {
     };
   }, []);
 
-  // Load the hotel's rows whenever the selection changes.
+  // ── Resolve the planning scenario (same healing as the Results page) ──
+  // Manual rows post into that scenario's results, so the page has to know
+  // which scenario it is editing before it can load anything.
   useEffect(() => {
     if (!ou) {
+      setScenario(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const scenarios = await listScenarios(ou, budgetYear);
+        if (cancelled) return;
+        setScenario(
+          resolvePlanningScenario(scenarios, budgetYear, planningScenarioId)
+        );
+      } catch (error) {
+        console.error("Failed to resolve scenario for manual input:", error);
+        if (!cancelled) setScenario(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ou, budgetYear, planningScenarioId]);
+
+  // Load the hotel's rows whenever the selection changes.
+  useEffect(() => {
+    if (!ou || !scenario) {
       setRows([]);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    listManualRows(ou)
+    listManualRows(ou, scenario.id)
       .then((result) => {
         if (!cancelled) setRows(result.map(toGridRow));
       })
@@ -122,7 +158,7 @@ export default function ManualInput() {
     return () => {
       cancelled = true;
     };
-  }, [ou]);
+  }, [ou, scenario]);
 
   const applyServerRows = useCallback((result: ManualInputRow[]) => {
     setRows(result.map(toGridRow));
@@ -159,11 +195,11 @@ export default function ManualInput() {
 
   const persistRow = useCallback(
     async (row: ManualGridRow) => {
-      if (!ou) return;
-      const result = await saveManualRow(ou, toInput(row), userEmail);
+      if (!ou || !scenario) return;
+      const result = await saveManualRow(ou, scenario.id, toInput(row), userEmail);
       applyServerRows(result);
     },
-    [ou, userEmail, applyServerRows]
+    [ou, scenario, userEmail, applyServerRows]
   );
 
   // Cell edits + pastes flow through here; sanitize, persist, keep the sane row.
@@ -186,12 +222,17 @@ export default function ManualInput() {
   }, []);
 
   const handleAddRow = useCallback(async () => {
-    if (!ou) return;
+    if (!ou || !scenario) return;
     setBusy(true);
     const existing = new Set(rows.map((row) => row.id));
     try {
       // The backend mints the id; send an empty payload and take the refreshed list.
-      const result = await saveManualRow(ou, toInput(emptyGridRow("")), userEmail);
+      const result = await saveManualRow(
+        ou,
+        scenario.id,
+        toInput(emptyGridRow("")),
+        userEmail
+      );
       // The row not present before is the one just minted — queue it for focus.
       pendingFocusId.current =
         result.find((row) => !existing.has(row.id))?.id ?? null;
@@ -221,7 +262,7 @@ export default function ManualInput() {
       let last: ManualInputRow[] | null = null;
       for (const row of changed) {
         const filled = applySpread(row, budgetYear);
-        last = await saveManualRow(ou, toInput(filled), userEmail);
+        last = await saveManualRow(ou, scenario.id, toInput(filled), userEmail);
       }
       if (last) applyServerRows(last);
       setToast({
@@ -233,10 +274,10 @@ export default function ManualInput() {
     } finally {
       setBusy(false);
     }
-  }, [ou, selectedIds, rows, budgetYear, userEmail, applyServerRows]);
+  }, [ou, scenario, selectedIds, rows, budgetYear, userEmail, applyServerRows]);
 
   const handleDelete = useCallback(async () => {
-    if (!ou || selectedIds.length === 0) return;
+    if (!ou || !scenario || selectedIds.length === 0) return;
     if (
       !window.confirm(
         `Delete ${selectedIds.length} row${selectedIds.length === 1 ? "" : "s"}?`
@@ -247,6 +288,7 @@ export default function ManualInput() {
     try {
       const result = await deleteManualRows(
         ou,
+        scenario.id,
         selectedIds as ManualInputRowId[]
       );
       applyServerRows(result);
@@ -256,7 +298,7 @@ export default function ManualInput() {
     } finally {
       setBusy(false);
     }
-  }, [ou, selectedIds, applyServerRows]);
+  }, [ou, scenario, selectedIds, applyServerRows]);
 
   const hasSelection = selectedIds.length > 0;
 
