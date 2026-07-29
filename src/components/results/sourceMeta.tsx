@@ -42,6 +42,42 @@ export const SOURCE_META: Record<
   },
 };
 
+/**
+ * A row's origins as ONE cell.
+ *
+ * A strip of chips per row turned the column into visual noise and still could
+ * not be read at a glance — which was the entire point of having it. A merged
+ * row legitimately mixes origins (an engine account Manual Input also posts to),
+ * so the cell names the dominant one and counts the rest; the dock is where the
+ * per-line breakdown belongs, because that is where the numbers are.
+ */
+export function SourceSummaryCell({ sources }: { sources: OutputSource[] }) {
+  if (!sources || sources.length === 0) return null;
+
+  const [primary, ...rest] = sources;
+  const meta = SOURCE_META[primary] ?? SOURCE_META.ENGINE;
+  const title = sources
+    .map((source) => `${SOURCE_META[source]?.label ?? source}: ${SOURCE_META[source]?.hint ?? ""}`)
+    .join("\n");
+
+  return (
+    <Tooltip title={<span style={{ whiteSpace: "pre-line" }}>{title}</span>}>
+      <Chip
+        size="small"
+        variant="outlined"
+        color={meta.color}
+        label={rest.length > 0 ? `${meta.label} +${rest.length}` : meta.label}
+        sx={{
+          height: 20,
+          fontSize: "0.6875rem",
+          fontWeight: 600,
+          "& .MuiChip-label": { px: 0.75 },
+        }}
+      />
+    </Tooltip>
+  );
+}
+
 /** One source chip. `dense` is the in-grid size; the inspector uses the larger. */
 export function SourceChip({
   source,

@@ -25,7 +25,6 @@ import {
   DataGridPremium,
   GridColumnMenu,
   GridColumnMenuProps,
-  GRID_CHECKBOX_SELECTION_FIELD,
   GridActionsCellItem,
   GridCellParams,
   GridColDef,
@@ -57,11 +56,7 @@ import {
   cellEditable,
 } from "./columnFactory";
 import { buildBlockColumns, buildBlockGroupingEntries } from "./blockColumns";
-import {
-  healCollapsedFamilies,
-  healNewColumn,
-  healPinnedBand,
-} from "./gridLayout";
+import { healCollapsedFamilies, healNewColumn } from "./gridLayout";
 
 export const ROW_HEIGHT = 36;
 /** Two lines: the short name (up to 2 rows) over the muted unit tag. */
@@ -430,11 +425,12 @@ export default function PositionsGrid({
     // Both row actions live behind the one overflow menu in the gutter — an
     // inline duplicate icon would double the gutter's width for an action
     // nobody reaches for mid-scan.
-    // The gutter is pinned, so this cell renders for every visible row and never
-    // virtualizes away — and MUI calls getActions on every render of it, then
-    // clones each item again for the menu. The items only depend on the row and
-    // the three handlers, none of which change without rebuilding this column,
-    // so build them once per row instead of on every render. Deliberately still
+    // MUI calls getActions on every render of this cell, then clones each item
+    // again for the menu — and the gutter leads the grid, so the cell is on
+    // screen for every visible row until you scroll well to the right. The items
+    // only depend on the row and the three handlers, none of which change
+    // without rebuilding this column, so build them once per row instead of on
+    // every render. Deliberately still
     // a `type: "actions"` column: the roving-tabindex keyboard handling and the
     // menu's focus management come with it, and are not worth reimplementing.
     const actionItems = new WeakMap<PositionRow, React.ReactElement[]>();
@@ -476,7 +472,8 @@ export default function PositionsGrid({
       },
     };
 
-    // The gutter's members lead the array too, so unpinning keeps them together.
+    // The gutter's members lead the array, which is the only thing keeping them
+    // together now that nothing is pinned.
     const [controlColumns, dataColumns] = partition(
       buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames }),
       (column) => controlKeys.has(column.field)
@@ -651,15 +648,6 @@ export default function PositionsGrid({
   );
 
   const initialState = useMemo<GridInitialState>(() => {
-    const keysOfSection = (section: string) =>
-      catalog.fields
-        .filter((def) => def.section === section && def.visible)
-        .map((def) => def.key);
-    // Row controls, then the frozen identity block — both pinned whole (see
-    // healPinnedBand). The gutter reads select · state · active · actions.
-    const controlKeys = keysOfSection("control");
-    const piiKeys = keysOfSection("pii");
-
     // Twelve Additional Cost columns is a lot of width for a family most rows
     // leave empty — they start folded behind their summary column and expand
     // from the chevron on its header (see COLLAPSIBLE_MONTH_FAMILIES).
@@ -670,16 +658,6 @@ export default function PositionsGrid({
         columnVisibilityModel: Object.fromEntries(
           monthKeys.map((key) => [key, false])
         ),
-      },
-      pinnedColumns: {
-        left: [
-          GRID_CHECKBOX_SELECTION_FIELD,
-          "_status",
-          ...controlKeys,
-          "_actions",
-          ...piiKeys,
-        ],
-        right: [],
       },
       aggregation: {
         model: {
@@ -692,6 +670,10 @@ export default function PositionsGrid({
     // Deliberately computed once per mount: the grid only reads initialState
     // on mount, so later changes to restoredState must not retrigger this.
     const merged = restoredState ? { ...defaults, ...restoredState } : defaults;
+    // Pinning is off (see disableColumnPinning), but layouts saved while the
+    // gutter and identity block were frozen still carry the band — dropped here
+    // so the next save writes it out of the stored layout for good.
+    delete (merged as Record<string, unknown>).pinnedColumns;
     // A restored `columns` replaces the defaults wholesale, so the collapse
     // default and the summary column's slot are re-applied over it here.
     let healed = healCollapsedFamilies(merged, monthKeys);
@@ -701,8 +683,7 @@ export default function PositionsGrid({
     // Standard Title arrived with seed v22, so any layout saved before it lists
     // every other column and not this one — which strands it at the far right,
     // past Vacation, instead of beside the Job Title it belongs to.
-    healed = healNewColumn(healed, "standardJobTitle", "payType");
-    return healPinnedBand(healPinnedBand(healed, controlKeys), piiKeys);
+    return healNewColumn(healed, "standardJobTitle", "payType");
   }, []);
 
   return (
@@ -716,6 +697,11 @@ export default function PositionsGrid({
       rowGroupingModel={rowGroupingModel}
       cellSelection
       checkboxSelection
+      // No frozen columns: a pinned band renders as its own grid section on
+      // every scroll and buys little at this width. Off wholesale rather than
+      // merely unpinned, so the column menu stops offering it and no saved
+      // layout can quietly bring the split back.
+      disableColumnPinning
       // Clicking a cell must not clear a selection the user built to act on.
       disableRowSelectionOnClick
       onRowSelectionModelChange={handleSelectionChange}

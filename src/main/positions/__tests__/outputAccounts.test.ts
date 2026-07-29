@@ -145,8 +145,9 @@ describe("Recalculate → Results rows", () => {
         POSITION_COUNT_ACCOUNT,
       ].sort()
     );
-    // All under the position's own department.
-    expect(new Set(outputs.rows.map((row) => row.dept))).toEqual(new Set(["0410"]));
+    // All under the position's own department — shown the way Kairos writes a
+    // department code, whatever spelling the position was saved with.
+    expect(new Set(outputs.rows.map((row) => row.dept))).toEqual(new Set(["D0410"]));
   });
 
   it("reproduces the reported bug's shape when no account is picked", async () => {

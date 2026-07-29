@@ -317,6 +317,52 @@ describe("readOutputs over mixed sources", () => {
     expect(rows[0].valueKind).toBe("currency");
   });
 
+  it("merges spellings of the same combo, because the BST push cannot tell them apart", () => {
+    writeRun(
+      valuesDb,
+      scope,
+      SCENARIO,
+      { fingerprint: "fp", computedAt: NOW, positionCount: 1 },
+      [
+        {
+          positionId: "p1",
+          componentDefId: "c1",
+          label: "Base Salary",
+          dept: "D0410",
+          account: "A500100",
+          months: months(100),
+          total: 1200,
+          source: "ENGINE",
+          sourceRef: "p1",
+        },
+        // Manual Input lets the Dept Code be typed when no mapping tables are
+        // loaded — same combo to the workbook, different string here.
+        {
+          positionId: "manual:m1",
+          componentDefId: "manual:cost",
+          label: "Overtime",
+          dept: "0410",
+          account: "500100",
+          months: months(50),
+          total: 600,
+          source: "MANUAL",
+          sourceRef: "m1",
+        },
+      ]
+    );
+
+    const { rows } = readOutputs(structureDb, valuesDb, scope, SCENARIO);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dept).toBe("D0410");
+    expect(rows[0].account).toBe("A500100");
+    expect(rows[0].months[0]).toBe(150);
+    expect(rows[0].sources).toEqual(["ENGINE", "MANUAL"]);
+
+    // …and the drill-down still finds both, despite being asked in one spelling.
+    const lines = readOutputLines(valuesDb, scope, SCENARIO, "D0410", "A500100");
+    expect(lines.map((line) => line.source).sort()).toEqual(["ENGINE", "MANUAL"]);
+  });
+
   it("marks an allocation-only row as a rate, but a shared account as additive", () => {
     writeRun(
       valuesDb,

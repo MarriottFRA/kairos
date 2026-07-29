@@ -27,10 +27,12 @@ import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Divider from "@mui/material/Divider";
+import Drawer from "@mui/material/Drawer";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import useMediaQuery from "@mui/material/useMediaQuery";
 import CloseIcon from "@mui/icons-material/Close";
 import { OutputLineDto, OutputValueKind } from "../../shared/positions/ipc";
 import { loadOutputLines } from "../../services/outputsService";
@@ -39,6 +41,14 @@ import { formatResultValue, yearValueOf } from "./format";
 import { SourceChip } from "./sourceMeta";
 
 export const INSPECTOR_WIDTH = 340;
+
+/**
+ * Below this viewport width the panel stops being a dock and becomes an
+ * overlay. Derived, not picked: the grid's own columns (dept + account + source
+ * + twelve months + Year ≈ 1500px) plus the panel plus the navigation rail —
+ * past that the dock is taking space the table cannot spare.
+ */
+const MIN_WIDTH_FOR_DOCK = 1500;
 
 export interface ResultsInspectorProps {
   selection: ResultSelection | null;
@@ -82,6 +92,16 @@ export default function ResultsInspector({
   const [lines, setLines] = useState<OutputLineDto[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * Docked beside the grid, or slid in over it?
+   *
+   * The dock costs the grid a fixed 340px. That is a fair trade at a desk and a
+   * bad one on a laptop, where it would leave the table too narrow to read the
+   * months the panel is explaining. The threshold is the width at which the
+   * grid still shows a full year after paying for the panel.
+   */
+  const overlay = useMediaQuery(`(max-width:${MIN_WIDTH_FOR_DOCK}px)`);
 
   // Hold the last real selection through the close transition so the panel does
   // not flash empty on its way out (same trick as PositionFormDialog).
@@ -160,19 +180,33 @@ export default function ResultsInspector({
 
   const linesTotal = lines.reduce((sum, line) => sum + valueOf(line), 0);
 
-  return (
+  const panel = (
     <Box
-      sx={{
-        width: INSPECTOR_WIDTH,
-        flexShrink: 0,
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        borderLeft: 1,
-        borderColor: "divider",
-        pl: 2,
-        ml: 2,
-      }}
+      sx={
+        overlay
+          ? {
+              // Slid in over the grid: it owns its own edge and padding, since
+              // there is no sibling column to sit beside.
+              width: INSPECTOR_WIDTH,
+              maxWidth: "100vw",
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              p: 2,
+            }
+          : {
+              width: INSPECTOR_WIDTH,
+              flexShrink: 0,
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              borderLeft: 1,
+              borderColor: "divider",
+              pl: 2,
+              ml: 2,
+            }
+      }
     >
       <Stack
         direction="row"
@@ -194,6 +228,15 @@ export default function ResultsInspector({
           <Typography variant="caption" sx={{ color: "text.secondary" }}>
             {scopeLabel}
           </Typography>
+          {/* The grid's Source cell is a summary; the full set of origins for
+              this row is spelled out here, next to the lines it explains. */}
+          {row?.sources && row.sources.length > 0 && (
+            <Stack direction="row" spacing={0.5} sx={{ mt: 0.75, flexWrap: "wrap", rowGap: 0.5 }}>
+              {row.sources.map((source) => (
+                <SourceChip key={source} source={source} />
+              ))}
+            </Stack>
+          )}
         </Box>
         <IconButton size="small" onClick={onClose} aria-label="Close inspector">
           <CloseIcon fontSize="small" />
@@ -262,6 +305,31 @@ export default function ResultsInspector({
         </>
       )}
     </Box>
+  );
+
+  if (!overlay) return panel;
+
+  // Narrow window: slide the same panel in over the grid rather than taking a
+  // third of it. Deliberately NOT a modal — no backdrop, no focus trap, no
+  // scroll lock — because the grid underneath has to stay clickable: the
+  // question is usually asked across several cells in a row, and the panel
+  // re-reads as the selection moves.
+  return (
+    <Drawer
+      anchor="right"
+      open={!!selection}
+      onClose={onClose}
+      variant="temporary"
+      hideBackdrop
+      ModalProps={{
+        keepMounted: true,
+        disableEnforceFocus: true,
+        disableScrollLock: true,
+      }}
+      slotProps={{ paper: { sx: { boxShadow: 6 } } }}
+    >
+      {panel}
+    </Drawer>
   );
 }
 

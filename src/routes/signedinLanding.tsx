@@ -721,7 +721,13 @@ const handleSignOut = useCallback(async () => {
           </ListItem>
         </List>
       </Drawer>
-      <Box component="main" sx={{ flexGrow: 1, p: 2 }}>
+      {/* minWidth: 0 is load-bearing. A flex item's automatic minimum is its
+          content's min-content width, so without it this column can only grow —
+          any page whose content refuses to shrink pushes `main` wider than the
+          window, and everything laid out to the right of the fold becomes
+          unreachable (no scrollbar; the shell is a fixed-height flex row). That
+          is exactly how the Results inspector came to open off-screen. */}
+      <Box component="main" sx={{ flexGrow: 1, minWidth: 0, p: 2 }}>
         <DrawerHeader />
         <Outlet />
       </Box>

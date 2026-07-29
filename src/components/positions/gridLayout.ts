@@ -1,11 +1,10 @@
 /**
  * Saved-layout repairs for the Positions grid.
  * -----------------------------------------------------------
- * The grid's layout (column order, widths, visibility, pinning) is exported and
- * stored per user, then handed back as `initialState` on the next mount. That
- * snapshot is by definition older than the code reading it, so a layout saved
- * before a column existed — or before a band was pinned — has to be repaired
- * rather than trusted or thrown away.
+ * The grid's layout (column order, widths, visibility) is exported and stored
+ * per user, then handed back as `initialState` on the next mount. That snapshot
+ * is by definition older than the code reading it, so a layout saved before a
+ * column existed has to be repaired rather than trusted or thrown away.
  *
  * Every function here is a DEFAULT, not a reset: it only fills in what the saved
  * state is silent about, so a deliberate arrangement always survives. Kept free
@@ -13,36 +12,6 @@
  */
 
 import { GridInitialState } from "@mui/x-data-grid-premium";
-
-/**
- * A column group that straddles the pinned/scrolling boundary is drawn once on
- * EACH side, so its band header appears twice. Bands that live in the frozen
- * block are therefore pinned all-or-nothing: if any of a band's columns is
- * pinned left, they all are, contiguously, in catalog order.
- *
- * The band lands where its first pinned member already was, so healing one band
- * never reshuffles the ones around it — which matters once the gutter holds
- * more than one. Also heals layouts saved before a band existed.
- */
-export function healPinnedBand(
-  state: GridInitialState,
-  bandKeys: string[]
-): GridInitialState {
-  const left = state.pinnedColumns?.left;
-  if (!left || bandKeys.length === 0) return state;
-  const at = left.findIndex((field) => bandKeys.includes(field));
-  if (at < 0) return state;
-  const rest = left.filter((field) => !bandKeys.includes(field));
-  // `at` indexes the original array; clamp it into the filtered one.
-  const insertAt = Math.min(at, rest.length);
-  return {
-    ...state,
-    pinnedColumns: {
-      ...state.pinnedColumns,
-      left: [...rest.slice(0, insertAt), ...bandKeys, ...rest.slice(insertAt)],
-    },
-  };
-}
 
 /**
  * Fold the collapsible month families away in a layout that predates them.

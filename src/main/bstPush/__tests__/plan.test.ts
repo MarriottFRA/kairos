@@ -329,6 +329,19 @@ describe("buildPushPlan", () => {
     expect(hours.months[0]).toBe(1_234);
   });
 
+  it("never plans two writes for one combo, however the codes were spelled", () => {
+    const result = plan([
+      outRow("D0010", "A560320", 1000),
+      outRow("0010", "560320", 500), // same BST row, unprefixed
+    ]);
+    const matching = result.rows.filter((r) => r.combo === "0010-560320");
+    expect(matching).toHaveLength(1);
+    // Added, not overwritten: 1500 / 1000 scale.
+    expect(matching[0].months[0]).toBe(1.5);
+    expect(result.cellCount).toBe(12);
+    expect(result.warnings.join(" ")).toMatch(/more than one Results row/);
+  });
+
   it("classifies every row and counts what will land", () => {
     const result = plan([
       outRow("D0010", "A510000", 1000), // duplicate row on the sheet

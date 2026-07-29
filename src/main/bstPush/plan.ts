@@ -31,23 +31,22 @@ import {
   writesValues,
 } from "../../shared/bstPush/ipc";
 import { formatMonthRanges } from "../../shared/calendar";
+import {
+  bareAccount,
+  bareDept,
+  comboKeyOf,
+} from "../../shared/positions/comboKey";
 import type { OutputAggRowDto } from "../../shared/positions/ipc";
 import type { BstTarget, ComboLocation } from "./readTarget";
 
 /** Kairos "D0410" → the BST sheet name "0410". */
-export function toSheetName(dept: string): string {
-  return dept.replace(/^D/i, "");
-}
+export const toSheetName = bareDept;
 
 /** Kairos "A988112" → the BST account "988112". */
-export function toBareAccount(account: string): string {
-  return account.replace(/^A/i, "");
-}
+export const toBareAccount = bareAccount;
 
 /** Kairos codes → the BST's `dddd-dddddd` combo. */
-export function toCombo(dept: string, account: string): string {
-  return `${toSheetName(dept)}-${toBareAccount(account)}`;
-}
+export const toCombo = comboKeyOf;
 
 /** A9… accounts are counts and hours; everything else is money in thousands. */
 export function scaleForAccount(account: string): number {
@@ -187,16 +186,52 @@ export function buildClearScope(
   };
 }
 
+/**
+ * One row per combo, whatever the caller handed us.
+ *
+ * readOutputs already merges on the canonical combo, so in practice nothing is
+ * folded here. It stays because the alternative failure is silent and lands in
+ * a real workbook: two rows resolving to one BST row means one write lands on
+ * top of the other (or double-counts under "add"), and the number the user
+ * approved on the Results page is not the number the workbook ends up holding.
+ * Merging is the only outcome that keeps the page and the file agreeing.
+ */
+function mergeByCombo(outputs: OutputAggRowDto[]): {
+  rows: OutputAggRowDto[];
+  collisions: string[];
+} {
+  const byCombo = new Map<string, OutputAggRowDto>();
+  const collisions: string[] = [];
+
+  for (const row of outputs) {
+    const combo = toCombo(row.dept, row.account);
+    const existing = byCombo.get(combo);
+    if (!existing) {
+      byCombo.set(combo, { ...row, months: [...row.months] });
+      continue;
+    }
+    collisions.push(combo);
+    for (let m = 0; m < existing.months.length; m++) {
+      existing.months[m] += Number(row.months[m]) || 0;
+    }
+    existing.total += row.total;
+    existing.sources = [...new Set([...existing.sources, ...row.sources])];
+  }
+
+  return { rows: [...byCombo.values()], collisions: [...new Set(collisions)] };
+}
+
 export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
   const {
     target,
     filePath,
-    outputs,
     options,
     clearPrefixes,
     departmentNameByCode,
     accountNameByCode,
   } = input;
+
+  const { rows: outputs, collisions } = mergeByCombo(input.outputs);
 
   const warnings: string[] = [];
   const rows: PushComboRow[] = [];
@@ -312,6 +347,14 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
       `${duplicates.length} combo(s) appear on more than one row of their ` +
         `sheet (${duplicates.slice(0, 5).join(", ")}${duplicates.length > 5 ? ", …" : ""}). ` +
         `The first row wins, matching the old macro.`
+    );
+  }
+  if (collisions.length > 0) {
+    warnings.push(
+      `${collisions.length} combo(s) arrived as more than one Results row ` +
+        `(${collisions.slice(0, 5).join(", ")}${collisions.length > 5 ? ", …" : ""}) ` +
+        `and were added together, so nothing is lost — but the Results page ` +
+        `should be showing them as one row. Please report this.`
     );
   }
   if (nonFiniteRows > 0) {

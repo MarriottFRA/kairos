@@ -27,7 +27,7 @@ import {
 } from "@mui/x-data-grid-premium";
 import { OutputAggRowDto, OutputValueKind } from "../../shared/positions/ipc";
 import { formatResultValue, yearValueOf } from "./format";
-import { SourceChip } from "./sourceMeta";
+import { SourceSummaryCell } from "./sourceMeta";
 
 export const MONTH_SHORT = Array.from({ length: 12 }, (_, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "short" })
@@ -114,7 +114,7 @@ export default function ResultsGrid({
       {
         field: "sources",
         headerName: "Source",
-        width: 132,
+        width: 108,
         sortable: false,
         // Grouping rows have no sources of their own; leaving them blank is
         // honest — the group is a sum, not a thing with an origin.
@@ -122,12 +122,9 @@ export default function ResultsGrid({
           params.row?.sources ? (
             <Stack
               direction="row"
-              spacing={0.5}
               sx={{ alignItems: "center", height: "100%" }}
             >
-              {params.row.sources.map((source) => (
-                <SourceChip key={source} source={source} dense />
-              ))}
+              <SourceSummaryCell sources={params.row.sources} />
             </Stack>
           ) : null,
       },

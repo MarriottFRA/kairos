@@ -172,6 +172,21 @@ function createMainWindow(): void {
     logger.error('Failed to load:', validatedURL, 'Error:', errorDescription, 'Code:', errorCode);
   });
 
+  // Dev only: mirror the renderer's errors and warnings into the terminal that
+  // is running `npm start`. Without this, a React render that throws is
+  // invisible unless DevTools happens to be open — which makes a broken page
+  // indistinguishable from a page that simply does nothing when clicked. Errors
+  // and warnings only; info/debug would drown the IPC registration log.
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    mainWindow.webContents.on("console-message", (details) => {
+      const { level, message, sourceId, lineNumber } = details;
+      if (level !== "error" && level !== "warning") return;
+      const where = sourceId ? ` (${sourceId}:${lineNumber})` : "";
+      const log = level === "error" ? logger.error : logger.warn;
+      log(`[renderer] ${message}${where}`);
+    });
+  }
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
     // DevTools can be opened with Ctrl+Shift+I or F12 (Electron default shortcuts)

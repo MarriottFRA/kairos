@@ -132,8 +132,7 @@ import { uuidv7 } from "../../shared/engine/ids";
  *
  * Without this the grid appends unknown fields to the far right of the column
  * order, which both hides the new column and splits its section band in two.
- * The new field goes immediately after the last column of its section, and
- * inherits the section's pinning when the whole band is pinned.
+ * The new field goes immediately after the last column of its section.
  */
 function withNewFieldInLayout(
   state: GridInitialState,
@@ -166,19 +165,14 @@ function withNewFieldInLayout(
     };
   }
 
-  const left = next.pinnedColumns?.left;
-  if (left && bandKeys.every((band) => left.includes(band))) {
-    next.pinnedColumns = { ...next.pinnedColumns, left: insertAfter(left) };
-  }
-
   return next;
 }
 
 /**
  * Drop a removed column from the grid's exported layout — the mirror of
- * {@link withNewFieldInLayout}. A key left behind in orderedFields/pinned lists
- * is mostly tolerated by the grid, but a stale pinned key splits its section
- * band into two banners, so it has to be pruned everywhere it can appear.
+ * {@link withNewFieldInLayout}. A key left behind in orderedFields is mostly
+ * tolerated by the grid, but its width and visibility entries would come back
+ * to life if the column were ever re-added, so prune all three.
  */
 function withoutFieldInLayout(
   state: GridInitialState,
@@ -205,13 +199,6 @@ function withoutFieldInLayout(
       columns.dimensions = dimensions;
     }
     next.columns = columns;
-  }
-
-  if (next.pinnedColumns) {
-    const pinned = { ...next.pinnedColumns };
-    if (pinned.left) pinned.left = pinned.left.filter((field) => field !== key);
-    if (pinned.right) pinned.right = pinned.right.filter((field) => field !== key);
-    next.pinnedColumns = pinned;
   }
 
   return next;

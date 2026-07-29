@@ -19,6 +19,13 @@
 import type Database from "better-sqlite3-multiple-ciphers";
 import { accountAllowed } from "../../shared/positions/fields";
 import {
+  accountVariants,
+  comboKeyOf,
+  deptVariants,
+  displayAccount,
+  displayDept,
+} from "../../shared/positions/comboKey";
+import {
   OutputAggRowDto,
   OutputLineDto,
   OutputSource,
@@ -606,13 +613,16 @@ export function readOutputs(
   const byKey = new Map<string, OutputAggRowDto>();
   const sourcesByKey = new Map<string, Set<OutputSource>>();
   for (const line of lineRows) {
-    const key = `${line.dept}|${line.account}`;
+    // Keyed on the canonical combo, not the raw strings: "D0410" and a typed
+    // "0410" are one row on this page because they are one row in the BST.
+    const key = comboKeyOf(line.dept, line.account);
+    const account = displayAccount(line.account);
     let row = byKey.get(key);
     if (!row) {
       row = {
-        dept: line.dept,
-        account: line.account,
-        isStats: isStatsAccount(line.account),
+        dept: displayDept(line.dept),
+        account,
+        isStats: isStatsAccount(account),
         months: new Array(MONTHS).fill(0),
         total: 0,
         sources: [],
@@ -711,6 +721,10 @@ function resolveDisplayName(row: {
  *
  * Lines are returned largest-contribution first, so the answer to "why is this
  * number big" is the first row.
+ *
+ * dept/account arrive canonical (readOutputs merged the spellings away), so the
+ * match is against both spellings of each code — otherwise a row assembled from
+ * a typed "0410" would drill down to nothing.
  */
 export function readOutputLines(
   valuesDb: Db,
@@ -728,8 +742,15 @@ export function readOutputLines(
        FROM engine_output_lines l
        LEFT JOIN positions    p   ON p.id = l.position_id
        LEFT JOIN position_pii pii ON pii.position_id = l.position_id
-      WHERE l.ou = ? AND l.scenario_id = ? AND l.dept = ? AND l.account = ?`
-  ).all(scope.ou, scenarioId, dept, account) as Array<{
+      WHERE l.ou = ? AND l.scenario_id = ?
+        AND UPPER(TRIM(l.dept)) IN (?, ?)
+        AND UPPER(TRIM(l.account)) IN (?, ?)`
+  ).all(
+    scope.ou,
+    scenarioId,
+    ...deptVariants(dept),
+    ...accountVariants(account)
+  ) as Array<{
     source: string;
     source_ref: string;
     label: string;

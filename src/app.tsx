@@ -10,7 +10,7 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/ibm-plex-mono/600.css";
 // Import specific functions and components
-import { LicenseInfo } from "@mui/x-license";
+import { LicenseInfo, muiXTelemetrySettings } from "@mui/x-license";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
@@ -129,6 +129,11 @@ const router = createHashRouter([
   },
 ]);
 
+
+// MUI X pings x-telemetry.mui.com from @mui/x-license during development. It is
+// already a no-op in production builds, and our CSP blocks it in dev — this just
+// stops the blocked-request errors from flooding the renderer console.
+muiXTelemetrySettings.disableTelemetry();
 
 LicenseInfo.setLicenseKey("4e66d921d752befefa9384a027675566Tz0xMTkzODcsRT0xNzkyMDIyMzk5MDAwLFM9cHJlbWl1bSxMTT1hbm51YWwsUFY9UTEtMjAyNixRPTEsQVQ9bXVsdGksS1Y9Mg==");
 

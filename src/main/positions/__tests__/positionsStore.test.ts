@@ -1222,7 +1222,8 @@ describe("engine outputs", () => {
 
     const outputs = readOutputs(structureDb, valuesDb, OU_A, SCENARIO);
     expect(outputs.rows).toHaveLength(1);
-    expect(outputs.rows[0].account).toBe("522000");
+    // Canonical form: readOutputs normalises a bare code to Kairos's spelling.
+    expect(outputs.rows[0].account).toBe("A522000");
     expect(readOutputs(structureDb, valuesDb, OU_B, SCENARIO).run).toBeNull();
   });
 
