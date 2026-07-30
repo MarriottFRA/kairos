@@ -25,6 +25,7 @@ import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import EmailIcon from "@mui/icons-material/Email";
 import PersonAddAltRoundedIcon from "@mui/icons-material/PersonAddAltRounded";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import AccountPortalActions from "../components/account/AccountPortalActions";
 
 // ────────────────────────────────────────────────────────────
 // ANIMATIONS
@@ -171,6 +172,10 @@ export default function Register() {
   const [msVerifying, setMsVerifying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the current error is an account/access problem Atlas can fix — set
+  // where the error is classified, so broker-gate failures don't offer a
+  // pointless link-out.
+  const [errorIsAccountRelated, setErrorIsAccountRelated] = useState(false);
   const [success, setSuccess] = useState(false);
 
   // In-place Microsoft verification (fallback when landed here without an email).
@@ -206,6 +211,7 @@ export default function Register() {
 
     setLoading(true);
     setError(null);
+    setErrorIsAccountRelated(false);
 
     try {
       // Passwordless account request routed through the main process. Main
@@ -234,6 +240,9 @@ export default function Register() {
         } else {
           setError(msg || "An unexpected error occurred");
         }
+        // The server answered and refused: that is an account/permissions
+        // matter, and none of it can be resolved from the desktop app.
+        setErrorIsAccountRelated(true);
       }
     } finally {
       setLoading(false);
@@ -291,8 +300,18 @@ export default function Register() {
                     color: "text.secondary"
                   }}
                 >
-                  An administrator must approve your account before you can sign
-                  in. You'll also approve this device on your first sign-in.
+                  Your account still needs to be approved before you can sign in.
+                  Track it — and request the hotels and departments you need — on
+                  the Atlas portal.
+                </Typography>
+                <AccountPortalActions label="Open Atlas portal" fullWidth />
+                <Typography
+                  variant="caption"
+                  align="center"
+                  sx={{ color: "text.secondary", opacity: 0.8 }}
+                >
+                  This opens in your default web browser. You'll also approve this
+                  device on your first sign-in here.
                 </Typography>
                 <PremiumButton
                   fullWidth
@@ -362,9 +381,17 @@ export default function Register() {
                       border: `1px solid ${alpha("#ef4444", 0.2)}`,
                       backdropFilter: "blur(10px)",
                     }}
-                    onClose={() => setError(null)}
+                    onClose={() => {
+                      setError(null);
+                      setErrorIsAccountRelated(false);
+                    }}
                   >
                     {error}
+                    {errorIsAccountRelated && (
+                      <Box sx={{ mt: 1.5 }}>
+                        <AccountPortalActions label="Sort this out on Atlas" dense />
+                      </Box>
+                    )}
                   </Alert>
                 )}
                 {/* Microsoft-gated: verify company identity to request an account */}

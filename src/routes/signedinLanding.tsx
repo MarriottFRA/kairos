@@ -40,6 +40,9 @@ import Avatar from "@mui/material/Avatar";
 import SettingsIcon from "@mui/icons-material/Settings";
 import PersonIcon from "@mui/icons-material/Person";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutlined";
+import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
+import AccountPortalDialog from "../components/account/AccountPortalDialog";
+import { onAccessDenied } from "../services/api";
 import Tooltip from "@mui/material/Tooltip";
 import { alpha } from "@mui/material/styles";
 import Stack from "@mui/material/Stack";
@@ -189,6 +192,14 @@ export default function SignedInLanding() {
   const [hotelAnchorEl, setHotelAnchorEl] = useState<null | HTMLElement>(null);
   const hotelMenuOpen = Boolean(hotelAnchorEl);
 
+  // Shared by the account menu entry and the "you don't have access" handler.
+  const [portalDialogOpen, setPortalDialogOpen] = useState(false);
+  const [portalDialogCopy, setPortalDialogCopy] = useState<{
+    title?: string;
+    message?: string;
+    actionLabel?: string;
+  }>({});
+
   // Determine page title from route handle metadata
   const matches = useMatches();
   const pageTitle = React.useMemo(() => {
@@ -240,6 +251,15 @@ const handleProfile = () => {
   handleMenuClose();
 };
 
+// Account, access requests and permissions all live on the Atlas portal —
+// the desktop app has no API surface for them. The dialog explains that
+// before handing the user to their default browser.
+const handleAccountPortal = () => {
+  setPortalDialogCopy({});
+  setPortalDialogOpen(true);
+  handleMenuClose();
+};
+
 const handleSettings = () => {
   navigate("/signed-in-landing/settings");
   handleMenuClose();
@@ -276,6 +296,24 @@ const handleSignOut = useCallback(async () => {
 
     fetchCurrentUser();
   }, []);
+
+  // Surface a denied business call as an explanation rather than a silent
+  // no-op. Permissions are granted on Atlas, so the dialog is the same one the
+  // account menu opens — only the copy differs.
+  useEffect(
+    () =>
+      onAccessDenied(() => {
+        setPortalDialogCopy({
+          title: "You don't have access to this",
+          message:
+            "Your account isn't granted access to this part of Kairos yet. " +
+            "Request it on the Atlas portal — it opens in your default web browser.",
+          actionLabel: "Request access",
+        });
+        setPortalDialogOpen(true);
+      }),
+    []
+  );
 
   // Version-gated sync of the cached mapping reference tables, once per signed-in
   // session. These change extremely infrequently, so this is a cheap /version
@@ -495,6 +533,13 @@ const handleSignOut = useCallback(async () => {
           <PersonIcon fontSize="small" />
         </ListItemIcon>
         <ListItemText>My Profile</ListItemText>
+      </StyledMenuItem>
+
+      <StyledMenuItem onClick={handleAccountPortal}>
+        <ListItemIcon>
+          <OpenInNewRoundedIcon fontSize="small" />
+        </ListItemIcon>
+        <ListItemText>Account & access</ListItemText>
       </StyledMenuItem>
 
       <StyledMenuItem onClick={handleSettings}>
@@ -731,6 +776,15 @@ const handleSignOut = useCallback(async () => {
         <DrawerHeader />
         <Outlet />
       </Box>
+      {/* One shell-level instance, shared by the account menu and the
+          access-denied handler — never a stack of dialogs. */}
+      <AccountPortalDialog
+        open={portalDialogOpen}
+        onClose={() => setPortalDialogOpen(false)}
+        title={portalDialogCopy.title}
+        message={portalDialogCopy.message}
+        actionLabel={portalDialogCopy.actionLabel}
+      />
     </Box>
   );
 }

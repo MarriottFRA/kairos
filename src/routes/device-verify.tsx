@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import authService, { DeviceProgressEvent } from '../services/auth';
 import { useThemeMode } from '../store/settings';
+import AccountPortalPlainActions from '../components/account/AccountPortalPlainActions';
 import '../styles/auth.css';
 
 /**
@@ -253,9 +254,13 @@ const DeviceVerify: React.FC = () => {
                 <p style={{ marginBottom: '16px' }}>Your administrator has been notified and will review your request.</p>
                 <DeviceIdField deviceId={deviceId} isDark={isDark} />
                 <p style={{ fontSize: '13px', opacity: 0.7, marginBottom: '8px' }}>
-                  You can share this ID with your administrator if needed.
+                  You can share this ID with your approver if needed.
                 </p>
                 <p style={{ fontSize: '14px', opacity: 0.8 }}>You'll be able to sign in once your device is approved.</p>
+                {/* Until this device is approved the app can't reach the access
+                    API at all, so Atlas is the only place the user can watch
+                    the request or chase whoever approves it. */}
+                <AccountPortalPlainActions label="Check status on Atlas" isDark={isDark} />
               </div>
             </div>
             <button onClick={() => navigate('/')} className="submit-button" style={{ marginTop: '16px' }}>
@@ -283,8 +288,9 @@ const DeviceVerify: React.FC = () => {
                 </p>
                 <DeviceIdField deviceId={deviceId} isDark={isDark} />
                 <p style={{ fontSize: '13px', opacity: 0.7 }}>
-                  Send this ID to your administrator.
+                  Send this ID to your approver.
                 </p>
+                <AccountPortalPlainActions label="Manage devices on Atlas" isDark={isDark} />
               </div>
             </div>
             <button onClick={() => navigate('/')} className="submit-button" style={{ marginTop: '16px' }}>

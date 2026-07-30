@@ -21,6 +21,41 @@ interface MainFetchResult {
 // Statuses that must not carry a response body when reconstructing a Response.
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 
+// ── Access-denied notification ──────────────────────────────────────────────
+// A 403 on a business call means the session lacks a grant for that surface,
+// and no amount of retrying in the app will fix it — the grant is issued on
+// the Atlas portal. We only look at the status: the body is deliberately not
+// parsed, so this stays presentation-level and does not couple the renderer to
+// the server's error-code vocabulary.
+//
+// A single denied action often fans out into several parallel calls, so
+// listeners are notified at most once per window to avoid a stack of dialogs.
+const ACCESS_DENIED_QUIET_MS = 10_000;
+
+type AccessDeniedListener = (endpoint: string) => void;
+
+const accessDeniedListeners = new Set<AccessDeniedListener>();
+let lastAccessDeniedAt = 0;
+
+/** Subscribe to business-call 403s. Returns an unsubscribe function. */
+export function onAccessDenied(listener: AccessDeniedListener): () => void {
+  accessDeniedListeners.add(listener);
+  return () => accessDeniedListeners.delete(listener);
+}
+
+function notifyAccessDenied(endpoint: string): void {
+  const now = Date.now();
+  if (now - lastAccessDeniedAt < ACCESS_DENIED_QUIET_MS) return;
+  lastAccessDeniedAt = now;
+  accessDeniedListeners.forEach((listener) => {
+    try {
+      listener(endpoint);
+    } catch (err) {
+      console.error("Access-denied listener failed:", err);
+    }
+  });
+}
+
 class ApiService {
   /**
    * Fetch-compatible wrapper. Returns a real `Response` reconstructed from the
@@ -50,6 +85,10 @@ class ApiService {
     const responseBody = NULL_BODY_STATUSES.has(result.status)
       ? null
       : result.body ?? "";
+
+    if (result.status === 403) {
+      notifyAccessDenied(endpoint);
+    }
 
     return new Response(responseBody, { status: result.status });
   }

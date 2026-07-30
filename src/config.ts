@@ -15,6 +15,14 @@ export const API_BASE_URL = 'https://fastapi-fafyfgcmaqgsbncg.uksouth-01.azurewe
 // here if one is configured later.
 export const SWA_ORIGIN = 'https://red-mushroom-085f93603.2.azurestaticapps.net';
 
+// Browser portal for account, access requests, devices and permissions.
+// A desktop session that has not yet verified a device cannot reach the API's
+// `/access/*` surface at all, so a user who is unregistered, whose device is
+// still pending, or who holds no OU grant literally cannot self-serve from the
+// app — the portal only needs a broker token and no device. That is why every
+// account/access action here links out instead of being built in-app.
+export const ACCOUNT_PORTAL_URL = `${SWA_ORIGIN}/go/account`;
+
 // Entra `domain_hint` injected into the company sign-in flow. The SWA uses the
 // managed ("simple") AAD provider, which can't set `loginParameterNames`, so we
 // inject the hint client-side in the auth BrowserWindow (see MsBroker). With it,

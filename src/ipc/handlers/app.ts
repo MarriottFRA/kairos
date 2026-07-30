@@ -3,9 +3,10 @@
  * Handles app-level operations like version checks and updates
  */
 
-import { autoUpdater, net } from 'electron';
+import { autoUpdater, net, shell } from 'electron';
 import { BrowserWindow, app } from 'electron';
 import type { IpcHandler } from '../types';
+import { SWA_ORIGIN } from '../../config';
 import {
   isSecureDatabaseUnlocked,
   rebuildSecureSchema,
@@ -72,6 +73,26 @@ export function createAppHandlers(): Record<string, IpcHandler> {
   const handlers: Record<string, IpcHandler> = {
     'app:get-version': async () => {
       return { version: app.getVersion() };
+    },
+
+    // Open a portal link in the user's default browser. main.ts already routes
+    // window.open() to shell.openExternal, but the sandboxed renderer gets a
+    // null handle either way and so cannot tell success from failure — this
+    // channel throws, which lets the UI fall back to its copy-link affordance.
+    // Deliberately allowlisted to the SWA origin so it never degrades into a
+    // generic "open whatever the renderer asks for" primitive.
+    'app:open-external': async (_event, rawUrl) => {
+      let url: URL;
+      try {
+        url = new URL(String(rawUrl));
+      } catch {
+        throw new Error('Not a valid URL');
+      }
+      if (url.origin !== new URL(SWA_ORIGIN).origin) {
+        throw new Error(`Refusing to open non-portal URL: ${url.origin}`);
+      }
+      await shell.openExternal(url.toString());
+      return { success: true };
     },
 
     'app:check-for-updates': async () => {

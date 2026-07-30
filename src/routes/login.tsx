@@ -28,6 +28,8 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import InputAdornment from '@mui/material/InputAdornment';
 import IconButton from '@mui/material/IconButton';
 import KairosMark from '../components/KairosMark';
+import AccountPortalActions from '../components/account/AccountPortalActions';
+import AccountPortalPanel from '../components/account/AccountPortalPanel';
 
 // Styled Components — Kairos teal aesthetic (lightweight, no WebGL / liquid orbs)
 const PageRoot = styled('div')(({ theme }) => ({
@@ -181,6 +183,10 @@ const Login: React.FC = () => {
   const [info, setInfo] = useState(''); // non-error notices
   // Terminal "waiting for admin approval" message (account requested / pending).
   const [pendingMsg, setPendingMsg] = useState('');
+  // Whether the current error is an account/access problem the portal can fix.
+  // Set at the point the error is classified rather than re-sniffed at render,
+  // so broker-gate and connectivity failures never offer a pointless link-out.
+  const [errorIsAccountRelated, setErrorIsAccountRelated] = useState(false);
 
   // Background cold-start resume state — drives the "Continue session" button.
   const { status: authStatus, resolving, resumable } = useAuthStatus();
@@ -242,6 +248,7 @@ const Login: React.FC = () => {
     e.preventDefault();
     setError('');
     setInfo('');
+    setErrorIsAccountRelated(false);
     setIsLoading(true);
 
     try {
@@ -270,22 +277,31 @@ const Login: React.FC = () => {
         try {
           await authService.register(email);
           setPendingMsg(
-            'Your account has been requested. An administrator must approve it before you can sign in.'
+            'Your account has been requested. You can track it, or add the access you need, in the account portal.'
           );
         } catch (regErr: any) {
           const regMsg: string = regErr?.message ?? '';
           if (/pending approval/i.test(regMsg)) {
-            setPendingMsg('Your account is pending administrator approval.');
+            setPendingMsg(
+              'Your account is still awaiting approval. You can track it in the account portal.'
+            );
           } else {
             setError(regMsg || 'Could not request an account. Please try again.');
+            setErrorIsAccountRelated(true);
           }
         }
       } else if (/pending approval/i.test(msg)) {
-        setPendingMsg('Your account is pending administrator approval.');
+        setPendingMsg(
+          'Your account is still awaiting approval. You can track it in the account portal.'
+        );
       } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
         setError('Cannot connect to server. Please check your connection and try again.');
       } else {
         setError(msg || 'Sign-in failed. Please try again.');
+        // Anything that reached the server and was refused is, from here, an
+        // account or permissions problem — and none of those can be resolved
+        // from the desktop app.
+        setErrorIsAccountRelated(true);
       }
 
       setIsLoading(false);
@@ -385,9 +401,17 @@ const Login: React.FC = () => {
                     color: '#ef4444',
                   },
                 }}
-                onClose={() => setError('')}
+                onClose={() => {
+                  setError('');
+                  setErrorIsAccountRelated(false);
+                }}
               >
                 {error}
+                {errorIsAccountRelated && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <AccountPortalActions label="Sort this out in the portal" dense />
+                  </Box>
+                )}
               </Alert>
             )}
 
@@ -402,38 +426,25 @@ const Login: React.FC = () => {
             )}
 
             {pendingMsg ? (
-              // Terminal state: account requested / pending admin approval. The
-              // approval is out-of-band, so this is a clear "wait" screen — no spinner.
-              (<Stack spacing={3} sx={{
-                alignItems: "center"
-              }}>
-                <Box
-                  sx={{
-                    width: 64,
-                    height: 64,
-                    borderRadius: '50%',
-                    background: `linear-gradient(135deg, #f59e0b, #f97316)`,
-                    boxShadow: `0 20px 40px rgba(245,158,11,0.35)`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
+              // Terminal state: account requested / pending approval. Approval and
+              // any follow-up access request both happen on Atlas — a desktop
+              // session that hasn't verified a device can't reach that API at all —
+              // so this is a signpost, not a spinner.
+              (<AccountPortalPanel
+                title="Finish setting up on Atlas"
+                message={pendingMsg}
+                actionLabel="Open Atlas portal"
+                icon={<HourglassTopRoundedIcon sx={{ color: '#ffffff', fontSize: 32 }} />}
+                accent={['#f59e0b', '#f97316']}
+              >
+                <Button
+                  fullWidth
+                  onClick={() => navigate('/')}
+                  sx={{ color: theme.palette.text.secondary }}
                 >
-                  <HourglassTopRoundedIcon sx={{ color: '#ffffff', fontSize: 32 }} />
-                </Box>
-                <Typography variant="h6" sx={{ fontWeight: 700, textAlign: 'center' }}>
-                  Awaiting approval
-                </Typography>
-                <Typography
-                  variant="body2"
-                  sx={{ textAlign: 'center', color: theme.palette.text.secondary }}
-                >
-                  {pendingMsg}
-                </Typography>
-                <PremiumButton fullWidth size="large" onClick={() => navigate('/')}>
                   Back to Welcome
-                </PremiumButton>
-              </Stack>)
+                </Button>
+              </AccountPortalPanel>)
             ) : !msVerified ? (
               // Fallback entrance: reached /login without a verified email (deep
               // link / back). Verify the company Microsoft account in place first.

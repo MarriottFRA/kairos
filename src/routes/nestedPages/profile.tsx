@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Typography, Avatar, Card, CardContent, Divider, Stack, Button, Chip, CircularProgress, Alert, List, ListItem, ListItemText } from "@mui/material";
-import { alpha, useTheme } from "@mui/material/styles";
+import { useTheme } from "@mui/material/styles";
+import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
 import authService, { UserInfo, OUAccess } from "../../services/auth";
+import AccountPortalActions from "../../components/account/AccountPortalActions";
+import AccountPortalDialog from "../../components/account/AccountPortalDialog";
 
 // `window.ipcApi` is declared once, globally, in src/global.d.ts.
 
@@ -38,6 +41,7 @@ export default function Profile() {
   const [ouAccess, setOuAccess] = useState<OUAccess[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [portalDialogOpen, setPortalDialogOpen] = useState(false);
 
   useEffect(() => {
     const fetchUserData = async () => {
@@ -101,12 +105,16 @@ export default function Profile() {
                 <Chip size="small" variant="outlined" label="Member since 2025" />
               </Stack>
             </Box>
-            <Stack direction="row" spacing={1}>
-              <Button variant="contained" disabled>Edit Profile</Button>
-              <Button variant="outlined" disabled sx={{ bgcolor: alpha(theme.palette.text.primary, 0.02) }}>
-                Change Password
-              </Button>
-            </Stack>
+            {/* Profile details are owned by the Atlas portal — the desktop app
+                has no API surface to edit them, so link out rather than showing
+                controls that can never work. */}
+            <Button
+              variant="contained"
+              startIcon={<OpenInNewRoundedIcon />}
+              onClick={() => setPortalDialogOpen(true)}
+            >
+              Manage on Atlas
+            </Button>
           </Stack>
         </CardContent>
       </Card>
@@ -139,9 +147,15 @@ export default function Profile() {
           </Typography>
           <Divider sx={{ mb: 2 }} />
           {ouAccess.length === 0 ? (
-            <Typography variant="body2" sx={{ color: "text.secondary" }}>
-              No OU access configured
-            </Typography>
+            // The moment a user most needs to ask for access — don't leave it
+            // as a statement of fact.
+            <Stack spacing={2} sx={{ alignItems: "flex-start" }}>
+              <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                You don't have access to any hotels yet. Request the hotels and
+                departments you need on the Atlas portal.
+              </Typography>
+              <AccountPortalActions label="Request access" />
+            </Stack>
           ) : (
             <List dense>
               {ouAccess.map((access) => (
@@ -173,6 +187,12 @@ export default function Profile() {
           )}
         </CardContent>
       </Card>
+      <AccountPortalDialog
+        open={portalDialogOpen}
+        onClose={() => setPortalDialogOpen(false)}
+        title="Manage your account"
+        actionLabel="Open Atlas portal"
+      />
     </Box>
   );
 }

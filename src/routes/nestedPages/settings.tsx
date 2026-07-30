@@ -28,6 +28,7 @@ import {
   DialogActions,
 } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import AccountPortalActions from "../../components/account/AccountPortalActions";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useSettingsStore } from "../../store/settings";
 import authService, { Hotel } from "../../services/auth";
@@ -202,6 +203,23 @@ export default function Settings() {
       <Typography variant="h4" sx={{ mb: 3, fontWeight: 600 }}>
         Settings
       </Typography>
+      {/* Everything in this card is owned by the Atlas portal: a desktop
+          session that has not verified a device cannot reach the access API at
+          all, so none of it can be built in-app. */}
+      <Card variant="outlined" sx={{ mb: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+        <CardContent>
+          <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+            Account &amp; access
+          </Typography>
+          <Divider sx={{ mb: 2 }} />
+          <Typography variant="body2" sx={{ mb: 2, color: "text.secondary" }}>
+            Your account details, access requests, device approvals and
+            permissions are managed on the Atlas portal.
+          </Typography>
+          <AccountPortalActions label="Open Atlas portal" />
+        </CardContent>
+      </Card>
+
       <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
