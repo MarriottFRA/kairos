@@ -12,6 +12,7 @@ import {
   MANUAL_INPUT_TABLES_SQL,
   applyManualInputScenarioScope,
 } from "./main/manualInput/schema";
+import { KAIROS_SYNC_TABLES_SQL } from "./main/kairosSync/schema";
 import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 // Kairos secure store: the encrypted-at-rest database for feature data.
@@ -267,6 +268,11 @@ function createSchema(handle: SecureDb): void {
   handle.exec(POSITIONS_VALUE_TABLES_SQL);
   handle.exec(MANUAL_INPUT_TABLES_SQL);
   handle.exec(ENGINE_OUTPUTS_SQL);
+  // Server-sync bookkeeping: what the backend last confirmed it holds. Holds no
+  // plan data of its own and is rebuildable from GET /plans/{id}/manifest, but
+  // it lives here rather than in the plaintext store because a content hash over
+  // a payload containing an employee name is a guessing oracle.
+  handle.exec(KAIROS_SYNC_TABLES_SQL);
 
   // Stamp the baseline (1) without downgrading; the runner owns anything above.
   handle

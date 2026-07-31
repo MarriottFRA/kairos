@@ -41,6 +41,7 @@ import type {
   MappingTablesStatus,
 } from "../../shared/mappingTables/types";
 import LegacyImportCard from "../../components/settings/LegacyImportCard";
+import OracleImportCard from "../../components/settings/OracleImportCard";
 import StorageCleanupCard from "../../components/settings/StorageCleanupCard";
 
 export default function Settings() {
@@ -552,6 +553,15 @@ export default function Settings() {
       {/* One-shot migration off the Excel tool. Self-contained: everything it
           needs lives under components/settings + main/legacyImport. */}
       <LegacyImportCard
+        ou={selectedHotelOu ?? ""}
+        scenarioId={planningScenarioId}
+      />
+
+      {/* Append the associates an Oracle HR export lists to the selected plan
+          (the port of the Excel tool's Add_New_Rows_Oracle macro). Unlike the
+          legacy import this one runs into a plan that already has positions.
+          Self-contained: components/settings + main/oracleImport. */}
+      <OracleImportCard
         ou={selectedHotelOu ?? ""}
         scenarioId={planningScenarioId}
       />

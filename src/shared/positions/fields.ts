@@ -235,6 +235,16 @@ export const HOTEL_CLUSTER_KEY = "cluster";
 export const HOTEL_CLUSTER_MULT_KEY = "clusterMultiplierOverride";
 
 /**
+ * The department code a row belongs to.
+ *
+ * A read-only mirror auto-filled from the department NAME dropdown, and — since
+ * server sync — the authorization key too: it is what a delegation is granted
+ * over and what the grid locks against. Named here because the field seed, the
+ * grid's editability gate and the sync layer all have to agree on it.
+ */
+export const DEPARTMENT_CODE_KEY = "departmentCode";
+
+/**
  * The per-position posting accounts, keyed to the permanent system definition
  * each one routes. POSITION_EXTRA fields, so they live in `extra_values`.
  *

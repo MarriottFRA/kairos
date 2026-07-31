@@ -45,6 +45,8 @@ import {
   usePlanningScenarioId,
   useSelectedHotel,
 } from "../../store/settings";
+import { usePlanScope } from "../../hooks/usePlanScope";
+import PartialScopeAlert from "../../components/sync/PartialScopeAlert";
 
 type Kind = "all" | "costs" | "stats";
 
@@ -52,6 +54,9 @@ export default function Results() {
   const selectedHotelOu = useSelectedHotel();
   const budgetYear = useBudgetYear();
   const planningScenarioId = usePlanningScenarioId();
+
+  // Totals under-report silently under a partial scope. See PartialScopeAlert.
+  const planScope = usePlanScope(selectedHotelOu, planningScenarioId);
 
   const [scenario, setScenario] = useState<ScenarioDto | null>(null);
   const [outputs, setOutputs] = useState<OutputsResponse | null>(null);
@@ -180,6 +185,16 @@ export default function Results() {
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
           {error}
         </Alert>
+      )}
+      {planScope.scopeKind === "PARTIAL" && (
+        // Results are still shown — a delegate needs to see their own
+        // departments' numbers — but the TOTALS are the lie, because they
+        // under-report with nothing to say anything is missing. The banner is
+        // the disclosure; it stays until the scope widens.
+        <PartialScopeAlert
+          surface="results"
+          departments={planScope.ownership?.departments.map((row) => row.code) ?? null}
+        />
       )}
       {outputs?.diagnostics &&
         (unposted.length > 0 || outputs.diagnostics.allZeroPositions > 0) && (

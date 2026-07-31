@@ -44,6 +44,7 @@ import {
   FieldCatalog,
   FieldDef,
   fieldLabel,
+  DEPARTMENT_CODE_KEY,
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
   SectionId,
@@ -604,6 +605,27 @@ export interface EditabilityContext {
    *  subscription), so the cluster lookup below must not be a linear scan.
    *  Callers that already hold a map pass it; the form path may omit it. */
   clusterById?: ReadonlyMap<string, HotelClusterDto>;
+  /**
+   * Departments this user may WRITE on the published plan, from
+   * `GET /kairos/plans/{id}/department-ownership`. `undefined` means the plan
+   * was never published and the local file is the only copy — everything is
+   * editable, which is how the app behaved before sync existed and how it must
+   * keep behaving for a hotel that never opts in.
+   *
+   * A `Set` rather than an array because this is consulted for every rendered
+   * cell on every grid store update; a linear scan of thirty departments would
+   * be felt.
+   *
+   * Note that an OWNER is deliberately locked out of a department they have
+   * DELEGATED — the server reports `writable: false` for it, and the owner's
+   * route back is to withdraw the delegation. That is per the brief, not a bug.
+   */
+  writableDepartments?: ReadonlySet<string>;
+  /**
+   * The whole plan is read-only: an administrator holds a support lease
+   * (`423 kairos_plan_locked_by_support`), or the plan is archived.
+   */
+  planLocked?: boolean;
 }
 
 /**
@@ -674,12 +696,74 @@ function clusterResolverFor(
   return resolve;
 }
 
+/**
+ * Is this row's department writable by the signed-in user?
+ *
+ * Same shape as `clusterResolverFor` above, and for the same reason. The answer
+ * is a property of the ROW, not of the cell — every column on a delegated row
+ * gets the identical verdict — so resolving it per cell would repeat one
+ * `Set.has` and one property read across ~60 columns × every rendered row on
+ * every grid store update, to produce a value that cannot change unless the row
+ * object does.
+ *
+ * Two caches, exactly as the cluster resolver does it: an outer WeakMap keyed on
+ * the context (a new ownership answer or a new OU builds a new ctx and therefore
+ * a fresh, empty inner cache) and an inner WeakMap keyed on the row (safe
+ * because rows are copy-on-write everywhere — `sanitizeRow` and
+ * `sanitizeBlockInputs` both spread into new objects, and every `setRows` maps
+ * to fresh objects rather than mutating in place).
+ */
+const departmentWritableResolvers = new WeakMap<
+  object,
+  (row: PositionRow | undefined) => boolean
+>();
+
+function departmentWritableFor(
+  ctx: EditabilityContext
+): (row: PositionRow | undefined) => boolean {
+  const existing = departmentWritableResolvers.get(ctx);
+  if (existing) return existing;
+
+  const writable = ctx.writableDepartments;
+  const cache = new WeakMap<PositionRow, boolean>();
+
+  // Unpublished plan (or a full-scope user): the local file is the only copy and
+  // everything is editable, which is exactly how the app behaved before sync
+  // existed. Hand back a constant so the hot path costs one call and no lookups.
+  const resolve =
+    writable === undefined
+      ? () => true
+      : (row: PositionRow | undefined): boolean => {
+          if (!row) return true;
+          const hit = cache.get(row);
+          if (hit !== undefined) return hit;
+          const code =
+            typeof row[DEPARTMENT_CODE_KEY] === "string"
+              ? (row[DEPARTMENT_CODE_KEY] as string)
+              : "";
+          // A row with no department is owner-only server-side. Locking it for a
+          // delegate matches what a save would actually do, rather than letting
+          // them type into rows that come back DEPARTMENT_UNASSIGNED.
+          const allowed = code !== "" && writable.has(code);
+          cache.set(row, allowed);
+          return allowed;
+        };
+
+  departmentWritableResolvers.set(ctx, resolve);
+  return resolve;
+}
+
 export function cellEditable(
   row: PositionRow | undefined,
   column: Pick<GridColDef, "field" | "editable">,
   ctx: EditabilityContext
 ): boolean {
   if (column.editable === false) return false;
+  // Server-side authority first, and short-circuiting: a locked plan or a
+  // department somebody else holds makes every other question here moot, and
+  // the resolver is one map lookup after the first cell on the row.
+  if (ctx.planLocked) return false;
+  if (!departmentWritableFor(ctx)(row)) return false;
   // Blind edits and blind pastes into hidden fields are a data-integrity
   // hazard. Reveal to edit.
   if (ctx.masked && ctx.maskableKeys.has(column.field)) return false;

@@ -39,6 +39,7 @@ import {
 import {
   COLLAPSIBLE_MONTH_FAMILIES,
   collapsibleMonthKeys,
+  DEPARTMENT_CODE_KEY,
   FieldCatalog,
   SectionId,
   vectorKey,
@@ -242,6 +243,19 @@ export interface PositionsGridProps {
   /** Live-sim results feeding every block's Total column; null while loading. */
   blockResults: BlockResultsById | null;
   masked: boolean;
+  /**
+   * Departments this user may write, from the published plan's
+   * `/department-ownership`. Omit (undefined) when the plan was never published:
+   * the local file is then the only copy and every row is editable, which is how
+   * the app behaved before server sync and how it must keep behaving for a hotel
+   * that never opts in.
+   *
+   * A `Set` because `cellEditable` consults it for every rendered cell on every
+   * grid store update — see the resolver in columnFactory.
+   */
+  writableDepartments?: ReadonlySet<string>;
+  /** An administrator holds a support lease, or the plan is archived. */
+  planLocked?: boolean;
   groupByDept: boolean;
   /** False (the default) filters the grid down to budgeted positions. */
   showInactive: boolean;
@@ -341,6 +355,8 @@ export default function PositionsGrid({
   blocks,
   blockResults,
   masked,
+  writableDepartments,
+  planLocked,
   groupByDept,
   showInactive,
   loading,
@@ -405,6 +421,27 @@ export default function PositionsGrid({
     [catalog]
   );
 
+  /**
+   * Is this row in a department the user may write?
+   *
+   * The row-menu counterpart to `cellEditable`'s department gate, kept as one
+   * inline predicate rather than another cache: `getActions` already memoises
+   * its result per row in `actionItems`, so this runs once per row per column
+   * rebuild.
+   */
+  const rowWritable = useCallback(
+    (row: PositionRow): boolean => {
+      if (planLocked) return false;
+      if (!writableDepartments) return true; // never published — local file only
+      const code =
+        typeof row[DEPARTMENT_CODE_KEY] === "string"
+          ? (row[DEPARTMENT_CODE_KEY] as string)
+          : "";
+      return code !== "" && writableDepartments.has(code);
+    },
+    [writableDepartments, planLocked]
+  );
+
   const columns = useMemo<GridColDef<PositionRow>[]>(() => {
     const statusColumn: GridColDef<PositionRow> = {
       field: "_status",
@@ -444,6 +481,11 @@ export default function PositionsGrid({
       getActions: (params) => {
         const cached = actionItems.get(params.row);
         if (cached) return cached;
+        // Duplicating or deleting a row in a department somebody else holds would
+        // be accepted locally and then rejected at publish as
+        // DEPARTMENT_OUT_OF_SCOPE. Disabling here rather than at save time means
+        // the answer is the same one the server would give, given now.
+        const writable = rowWritable(params.row);
         const items = [
           <GridActionsCellItem
             key="edit"
@@ -457,6 +499,7 @@ export default function PositionsGrid({
             icon={<ContentCopyIcon fontSize="small" />}
             label="Duplicate position"
             onClick={() => onDuplicate(params.row)}
+            disabled={!writable}
             showInMenu
           />,
           <GridActionsCellItem
@@ -464,6 +507,7 @@ export default function PositionsGrid({
             icon={<DeleteOutlineIcon fontSize="small" />}
             label="Delete position"
             onClick={() => onDelete(params.row)}
+            disabled={!writable}
             showInMenu
           />,
         ];
@@ -484,7 +528,7 @@ export default function PositionsGrid({
     const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow]);
+  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable]);
 
   const columnGroupingModel = useMemo(
     () => [
@@ -506,8 +550,14 @@ export default function PositionsGrid({
       // cellEditable runs per rendered cell per grid store update — a click
       // alone fires two or three — so the cluster lookup it does must be O(1).
       clusterById: clusterMapById(hotelClusters),
+      // Server-side write scope. A new ownership answer produces a new ctx, and
+      // therefore fresh per-row caches both here and in columnFactory — which is
+      // what makes a revoked delegation lock the grid on the next render rather
+      // than at the next remount.
+      writableDepartments,
+      planLocked,
     }),
-    [masked, maskableKeys, hotelClusters, currentOu]
+    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked]
   );
 
   // Memo for the answer above, keyed row -> field.

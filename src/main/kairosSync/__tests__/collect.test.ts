@@ -1,0 +1,367 @@
+/**
+ * Publish-side decisions: what gets sent, in what order, in what batches.
+ *
+ * Each of these is a rule the server enforces and the client has to satisfy in
+ * advance, because the failure mode is a save that silently did less than the
+ * user thinks it did.
+ */
+
+import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3-multiple-ciphers";
+import {
+  ENGINE_OUTPUTS_SQL,
+  POSITIONS_STRUCTURE_TABLES_SQL,
+  POSITIONS_VALUE_TABLES_SQL,
+} from "../../positions/schema";
+import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
+import { KAIROS_SYNC_TABLES_SQL } from "../schema";
+import { contentHash } from "../hash";
+import { ShadowRow, shadowKey } from "../repo";
+import {
+  PUBLISH_ORDER,
+  chunkEntities,
+  collectLocalEntities,
+  filterToWriteScope,
+  purgesFor,
+  toCommitEntities,
+  LocalEntity,
+} from "../collect";
+import { CommitEntity } from "../../../shared/kairosSync/protocol";
+
+type Db = InstanceType<typeof Database>;
+
+const OU = "OU25RJ2";
+const PLAN = "plan-1";
+
+function makeStores(): { localDb: Db; secureDb: Db } {
+  const localDb = new Database(":memory:");
+  localDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+
+  const secureDb = new Database(":memory:");
+  secureDb.exec(POSITIONS_VALUE_TABLES_SQL);
+  secureDb.exec(MANUAL_INPUT_TABLES_SQL);
+  secureDb.exec(ENGINE_OUTPUTS_SQL);
+  secureDb.exec(KAIROS_SYNC_TABLES_SQL);
+
+  return { localDb, secureDb };
+}
+
+function seed(stores: { localDb: Db; secureDb: Db }): void {
+  stores.localDb
+    .prepare(
+      `INSERT INTO scenarios (id, ou, year, label, updated_at) VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(PLAN, OU, 2026, "Budget", "2026-07-01T00:00:00.000Z");
+
+  const insertPosition = stores.secureDb.prepare(
+    `INSERT INTO positions (id, ou, scenario_id, department_code, updated_at)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+  insertPosition.run("pos-rooms", OU, PLAN, "D0410", "2026-07-01T00:00:00.000Z");
+  insertPosition.run("pos-fb", OU, PLAN, "D0610", "2026-07-01T00:00:00.000Z");
+  // Deliberately unclassified: the column defaults to '' and such a row is
+  // owner-only server-side.
+  insertPosition.run("pos-none", OU, PLAN, "", "2026-07-01T00:00:00.000Z");
+
+  stores.secureDb
+    .prepare(
+      `INSERT INTO component_values
+         (position_id, component_def_id, ou, scenario_id, rate, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run("pos-rooms", "def-1", OU, PLAN, 0.07, "2026-07-01T00:00:00.000Z");
+
+  stores.secureDb
+    .prepare(
+      `INSERT INTO position_pii (position_id, ou, scenario_id, last_name, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run("pos-rooms", OU, PLAN, "Nowak", "2026-07-01T00:00:00.000Z");
+}
+
+describe("collectLocalEntities", () => {
+  it("returns positions before the rows that name them as a parent", () => {
+    // A child in a LATER chunk than its parent is an ORPHAN_ENTITY. Ordering
+    // here is what lets the chunker preserve that guarantee by simply not
+    // reordering.
+    const stores = makeStores();
+    seed(stores);
+    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+
+    const firstOf = (type: string) =>
+      entities.findIndex((entity) => entity.entityType === type);
+    expect(firstOf("position")).toBeLessThan(firstOf("position_pii"));
+    expect(firstOf("position")).toBeLessThan(firstOf("component_value"));
+    expect(firstOf("scenario")).toBeLessThan(firstOf("position"));
+  });
+
+  it("resolves an inherited row's department from its parent position", () => {
+    const stores = makeStores();
+    seed(stores);
+    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+
+    const pii = entities.find((entity) => entity.entityType === "position_pii");
+    const componentValue = entities.find(
+      (entity) => entity.entityType === "component_value"
+    );
+    expect(pii?.department).toBe("D0410");
+    expect(componentValue?.department).toBe("D0410");
+  });
+
+  it("publishes soft-deleted rows as tombstones rather than skipping them", () => {
+    // Dropping them means every other client keeps a row its owner deleted.
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb
+      .prepare(`UPDATE positions SET deleted_at = ? WHERE id = ?`)
+      .run("2026-07-02T00:00:00.000Z", "pos-fb");
+
+    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const deleted = entities.find((entity) => entity.entityId === "pos-fb");
+    expect(deleted).toBeDefined();
+    expect(deleted?.deleted).toBe(true);
+  });
+
+  it("omits personal details when the property forbids storing them", () => {
+    const stores = makeStores();
+    seed(stores);
+    const entities = collectLocalEntities(stores, {
+      ou: OU,
+      planId: PLAN,
+      includePii: false,
+    });
+    expect(entities.some((entity) => entity.entityType === "position_pii")).toBe(false);
+    // Everything else still goes.
+    expect(entities.some((entity) => entity.entityType === "position")).toBe(true);
+  });
+
+  it("stays inside its own hotel and scenario", () => {
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb
+      .prepare(
+        `INSERT INTO positions (id, ou, scenario_id, department_code, updated_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("pos-other", "OU99999", "plan-2", "D0410", "2026-07-01T00:00:00.000Z");
+
+    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    expect(entities.some((entity) => entity.entityId === "pos-other")).toBe(false);
+  });
+});
+
+describe("filterToWriteScope", () => {
+  const entities: LocalEntity[] = [
+    entity("position", "a", "D0410"),
+    entity("position", "b", "D0610"),
+    entity("position", "c", null),
+    entity("scenario", PLAN, null),
+  ];
+
+  it("lets an owner send everything", () => {
+    const { publishable, withheld } = filterToWriteScope(entities, {
+      canWriteStructure: true,
+      departments: null,
+    });
+    expect(publishable).toHaveLength(4);
+    expect(withheld).toHaveLength(0);
+  });
+
+  it("holds back departments a delegate does not hold", () => {
+    // Not for safety — the server would reject them anyway — but because a wall
+    // of DEPARTMENT_OUT_OF_SCOPE rejections looks exactly like a failed save.
+    const { publishable, withheld } = filterToWriteScope(entities, {
+      canWriteStructure: false,
+      departments: new Set(["D0410"]),
+    });
+    expect(publishable.map((e) => e.entityId)).toEqual(["a"]);
+    expect(withheld.map((e) => e.entityId).sort()).toEqual(["b", "c", PLAN]);
+  });
+
+  it("treats a row with no department as owner-only", () => {
+    // Matches the server: '' collapses to NULL and lands in the plan-wide branch.
+    const { publishable } = filterToWriteScope([entity("position", "c", null)], {
+      canWriteStructure: false,
+      departments: new Set(["D0410"]),
+    });
+    expect(publishable).toHaveLength(0);
+  });
+});
+
+describe("toCommitEntities", () => {
+  it("skips rows whose hash already matches the shadow", () => {
+    // The server would answer `unchanged` either way; not sending them is the
+    // difference between a 400-byte request and a two-megabyte one.
+    const row = entity("position", "a", "D0410");
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "a"),
+        { entityType: "position", entityId: "a", hash: row.hash, serverSeq: 5, deleted: false },
+      ],
+    ]);
+    expect(toCommitEntities([row], shadow)).toHaveLength(0);
+  });
+
+  it("sends a null baseHash for a row the server has never seen", () => {
+    const row = entity("position", "a", "D0410");
+    const commits = toCommitEntities([row], new Map());
+    expect(commits[0].baseHash).toBeNull();
+  });
+
+  it("sends the remembered hash as baseHash for a known row", () => {
+    const row = entity("position", "a", "D0410");
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "a"),
+        { entityType: "position", entityId: "a", hash: "old-hash", serverSeq: 5, deleted: false },
+      ],
+    ]);
+    const commits = toCommitEntities([row], shadow);
+    expect(commits[0].baseHash).toBe("old-hash");
+    expect(commits[0].hash).toBe(row.hash);
+  });
+
+  it("re-sends a row whose deletion state changed even at the same hash", () => {
+    const row = { ...entity("position", "a", "D0410"), deleted: true };
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "a"),
+        { entityType: "position", entityId: "a", hash: row.hash, serverSeq: 5, deleted: false },
+      ],
+    ]);
+    expect(toCommitEntities([row], shadow)).toHaveLength(1);
+  });
+
+  it("never puts a department on an inherited row", () => {
+    // The server derives it from the parent. Sending ours would be a second
+    // source of truth for an authorization input.
+    const pii = entity("position_pii", "pos-1", "D0410");
+    const commits = toCommitEntities([pii], new Map());
+    expect(commits[0].department).toBeNull();
+  });
+});
+
+describe("purgesFor", () => {
+  it("emits a purge for a published row that is now gone locally", () => {
+    // The 30-day tombstone cleanup hard-deletes rows. A plain absence is
+    // indistinguishable from "never existed", so the server keeps serving it and
+    // every client resurrects it.
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "gone"),
+        { entityType: "position", entityId: "gone", hash: "h", serverSeq: 3, deleted: false },
+      ],
+    ]);
+    const purges = purgesFor([], shadow);
+    expect(purges).toHaveLength(1);
+    expect(purges[0]).toMatchObject({ op: "purge", entityId: "gone", baseHash: "h" });
+  });
+
+  it("does not re-purge a row already recorded as a tombstone", () => {
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "gone"),
+        { entityType: "position", entityId: "gone", hash: "h", serverSeq: 3, deleted: true },
+      ],
+    ]);
+    expect(purgesFor([], shadow)).toHaveLength(0);
+  });
+
+  it("leaves rows that still exist locally alone", () => {
+    const row = entity("position", "here", "D0410");
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "here"),
+        { entityType: "position", entityId: "here", hash: "h", serverSeq: 3, deleted: false },
+      ],
+    ]);
+    expect(purgesFor([row], shadow)).toHaveLength(0);
+  });
+});
+
+describe("chunkEntities", () => {
+  const limits = { commitMaxEntities: 3, commitMaxBytes: 1_000_000 };
+
+  it("respects the entity ceiling", () => {
+    const chunks = chunkEntities(commits(7), limits);
+    expect(chunks.map((chunk) => chunk.length)).toEqual([3, 3, 1]);
+  });
+
+  it("respects the byte ceiling", () => {
+    const one = commits(1)[0];
+    const size = Buffer.byteLength(JSON.stringify(one), "utf8");
+    const chunks = chunkEntities(commits(5), {
+      commitMaxEntities: 1000,
+      commitMaxBytes: size * 2,
+    });
+    expect(chunks.every((chunk) => chunk.length <= 2)).toBe(true);
+    expect(chunks.flat()).toHaveLength(5);
+  });
+
+  it("preserves order, so a parent is never in a later chunk than its child", () => {
+    const ordered = commits(10);
+    const flat = chunkEntities(ordered, limits).flat();
+    expect(flat.map((entity) => entity.entityId)).toEqual(
+      ordered.map((entity) => entity.entityId)
+    );
+  });
+
+  it("gives an oversized entity its own chunk rather than dropping it", () => {
+    // The server rejects it as PAYLOAD_TOO_LARGE and says so, which is far
+    // better than the row silently vanishing on the client.
+    const big: CommitEntity = {
+      ...commits(1)[0],
+      payload: { blob: "x".repeat(5000) },
+    };
+    const chunks = chunkEntities([big], { commitMaxEntities: 10, commitMaxBytes: 100 });
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toHaveLength(1);
+  });
+
+  it("returns nothing for nothing", () => {
+    expect(chunkEntities([], limits)).toEqual([]);
+  });
+});
+
+describe("PUBLISH_ORDER", () => {
+  it("puts every parent ahead of the types that reference it", () => {
+    const index = (type: string) => PUBLISH_ORDER.indexOf(type as never);
+    expect(index("position")).toBeLessThan(index("position_pii"));
+    expect(index("position")).toBeLessThan(index("component_value"));
+  });
+});
+
+// ------------------------------------------------------------------ helpers
+
+function entity(
+  entityType: LocalEntity["entityType"],
+  entityId: string,
+  department: string | null
+): LocalEntity {
+  const payload = { id: entityId, departmentCode: department };
+  return {
+    entityType,
+    entityId,
+    parentId: entityType === "position_pii" ? entityId : null,
+    department,
+    deleted: false,
+    clientUpdatedAt: "2026-07-01T00:00:00.000Z",
+    hash: contentHash(payload),
+    payload,
+  };
+}
+
+function commits(count: number): CommitEntity[] {
+  return Array.from({ length: count }, (_unused, index): CommitEntity => ({
+    entityType: "position",
+    entityId: `id-${index}`,
+    op: "upsert" as const,
+    parentId: null,
+    department: "D0410",
+    baseHash: null,
+    hash: `h-${index}`,
+    deleted: false,
+    clientUpdatedAt: "2026-07-01T00:00:00.000Z",
+    payload: { id: `id-${index}`, departmentCode: "D0410" },
+  }));
+}

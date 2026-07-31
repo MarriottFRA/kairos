@@ -4,7 +4,8 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers } from "./handlers";
+import { KAIROS_SYNC_CHANNELS } from "../shared/kairosSync/ipc";
 import {
   loggingMiddleware,
   errorHandlingMiddleware,
@@ -130,6 +131,15 @@ export function initializeIpc(deps: {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 
+  // Register Oracle-report import handlers (append the associates an Oracle HR
+  // export lists to the selected plan — the port of Add_New_Rows_Oracle).
+  // OU-gated like the rest. Unlike the legacy import this one runs into a plan
+  // that already has positions: its guard is the employee number, not emptiness.
+  const oracleImportHandlers = createOracleImportHandlers();
+  Object.entries(oracleImportHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
   // Register KPI-driver handlers (define/persist/precompute reusable budget
   // aggregates in the plaintext local store). OU-gated like budget import.
   const kpiDriversHandlers = createKpiDriversHandlers();
@@ -176,6 +186,27 @@ export function initializeIpc(deps: {
   const hotelClustersHandlers = createHotelClustersHandlers();
   Object.entries(hotelClustersHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
+  });
+
+  // Register Kairos server-sync handlers (publish/pull a plan, the OU structure
+  // document, delegation, PII, BST and the artifacts). Everything plan-scoped is
+  // OU-gated like the rest; the three cross-property reads below are not,
+  // because they span hotels by definition — the same exception hotel clusters
+  // already makes. Server-side authority is re-resolved on every request
+  // regardless: the OU gate stops a request naming the wrong hotel, it does not
+  // decide what the user may see.
+  const CROSS_OU_SYNC_CHANNELS = new Set<string>([
+    KAIROS_SYNC_CHANNELS.myDelegations,
+    KAIROS_SYNC_CHANNELS.clusters,
+    KAIROS_SYNC_CHANNELS.clusterDivergence,
+  ]);
+  const kairosSyncHandlers = createKairosSyncHandlers(apiClient);
+  Object.entries(kairosSyncHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(
+      channel,
+      handler,
+      CROSS_OU_SYNC_CHANNELS.has(channel) ? [] : [ouGate]
+    );
   });
 
   // Initialize the registry (sets up the main IPC listener)

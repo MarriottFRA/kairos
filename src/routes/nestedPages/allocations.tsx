@@ -45,6 +45,8 @@ import AllocationsGrid from "../../components/allocations/AllocationsGrid";
 import AllocationDialog from "../../components/allocations/AllocationDialog";
 import { loadAccounts } from "../../services/mappingTablesService";
 import { AccountOption } from "../../shared/mappingTables/types";
+import { usePlanScope } from "../../hooks/usePlanScope";
+import PartialScopeAlert from "../../components/sync/PartialScopeAlert";
 
 const EMPTY: AllocationsViewResponse = { allocations: [], departments: [] };
 
@@ -52,6 +54,13 @@ export default function Allocations() {
   const selectedHotelOu = useSelectedHotel();
   const budgetYear = useBudgetYear();
   const planningScenarioId = usePlanningScenarioId();
+
+  // A delegate holding some of the plan's departments gets confidently wrong
+  // numbers here rather than incomplete ones: every column is renormalised to
+  // 100%, so a missing department silently inflates everybody else's share.
+  // Server-side `scope.kind` is what makes that detectable, and this is the gate.
+  const planScope = usePlanScope(selectedHotelOu, planningScenarioId);
+  const partialScope = planScope.scopeKind === "PARTIAL";
 
   const [scenario, setScenario] = useState<ScenarioDto | null>(null);
   const [view, setView] = useState<AllocationsViewResponse>(EMPTY);
@@ -205,13 +214,20 @@ export default function Allocations() {
           variant="contained"
           startIcon={<AddIcon />}
           onClick={openCreate}
-          disabled={!scenario || loading}
+          disabled={!scenario || loading || partialScope}
         >
           Add allocation
         </Button>
       </Stack>
 
       {error && <Alert severity="error">{error}</Alert>}
+
+      {partialScope && (
+        <PartialScopeAlert
+          surface="allocations"
+          departments={planScope.ownership?.departments.map((row) => row.code) ?? null}
+        />
+      )}
 
       {!scenario && !loading && !error && (
         <Alert severity="info">
@@ -231,7 +247,10 @@ export default function Allocations() {
           <CircularProgress />
         </Box>
       ) : (
-        hasDepartments && (
+        // The grid itself is withheld, not merely captioned: the whole failure
+        // mode of a partial scope here is that the percentages LOOK right.
+        hasDepartments &&
+        !partialScope && (
           <Box sx={{ flexGrow: 1, minHeight: 320 }}>
             {!hasAllocations && (
               <Alert severity="info" sx={{ mb: 2 }}>

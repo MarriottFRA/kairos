@@ -77,6 +77,19 @@ export class ApiClient {
     return response;
   }
 
+  /**
+   * The raw refresh-aware request: the `Response` itself, never thrown on.
+   *
+   * `getJson`/`postJson` consume the body and discard the response, which is
+   * fine for the endpoints they serve but makes conditional requests
+   * impossible — there is no way to read an `ETag`, and a 304 arrives as an
+   * empty body indistinguishable from a 200 with nothing in it. The Kairos sync
+   * loop is built on both, so it calls this and does its own status handling.
+   */
+  request(path: string, options: RequestInit = {}): Promise<Response> {
+    return this.authedFetch(path, options);
+  }
+
   // ── JSON convenience (business data handlers) ───────────────────
 
   /** GET a JSON resource through the refresh-aware path. */

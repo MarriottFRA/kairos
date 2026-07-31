@@ -113,6 +113,8 @@ import {
   useSettingsStore,
 } from "../../store/settings";
 import { useGridStatePersistence } from "../../hooks/useGridStatePersistence";
+import { usePlanScope } from "../../hooks/usePlanScope";
+import { usePresenceReporter } from "../../hooks/usePresenceReporter";
 import PositionsGrid from "../../components/positions/PositionsGrid";
 import PositionsToolbar, {
   MAX_BULK_ADD,
@@ -599,6 +601,34 @@ export default function Positions() {
     const map = new Map(kpiDrivers.map((entry) => [entry.driver.id as string, entry.series]));
     return (driverId: string) => map.get(driverId) ?? [];
   }, [kpiDrivers]);
+
+  /**
+   * What the server says this user may write on this plan.
+   *
+   * Unrestricted until the plan is published — a hotel that never syncs sees no
+   * difference. Once it is, `writableDepartments` locks the grid to exactly what
+   * a save would accept, including locking an owner out of a department they
+   * have delegated.
+   */
+  const planScope = usePlanScope(selectedHotelOu, scenario?.id ?? null);
+
+  /**
+   * Tell the server there is unpublished work here, about once a minute.
+   *
+   * Advisory only, and never a lock — but it is what lets the owner be warned
+   * before they withdraw a delegation from somebody mid-edit. Only runs once the
+   * plan is published; there is nobody to warn otherwise.
+   */
+  usePresenceReporter({
+    ou: selectedHotelOu,
+    planId: scenario?.id ?? null,
+    dirtyEntities: queueSnapshot.pendingRows,
+    departments: planScope.writableDepartments
+      ? [...planScope.writableDepartments]
+      : [],
+    lastLocalEditAt: null,
+    enabled: !planScope.unpublished,
+  });
 
   const liveSim = useMemo(() => {
     if (!blocksModel || !scenario || !selectedHotelOu) {
@@ -1494,6 +1524,8 @@ export default function Positions() {
             blocks={blocks}
             blockResults={liveSim.results}
             masked={masked}
+            writableDepartments={planScope.writableDepartments}
+            planLocked={planScope.planLocked}
             groupByDept={groupByDept}
             showInactive={showInactive}
             loading={loading}

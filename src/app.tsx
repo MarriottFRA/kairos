@@ -29,6 +29,8 @@ import Settings from "./routes/nestedPages/settings";
 import HelpSupport from "./routes/nestedPages/helpSupport";
 import Home from "./routes/nestedPages/home";
 import BudgetSync from "./routes/nestedPages/budgetSync";
+import Sync from "./routes/nestedPages/sync";
+import DelegationPage from "./routes/nestedPages/delegation";
 import BstPush from "./routes/nestedPages/bstPush";
 import KpiDrivers from "./routes/nestedPages/kpiDrivers";
 import ManualInput from "./routes/nestedPages/manualInput";
@@ -109,6 +111,19 @@ const router = createHashRouter([
         path: "results",
         element: <Results />,
         handle: { title: "Results" },
+      },
+      {
+        path: "sync",
+        element: <Sync />,
+        handle: { title: "Sync" },
+      },
+      {
+        // Reached from the Sync page with ?plan=<scenario id>. Not in the nav:
+        // delegation is always ABOUT a specific plan, and a nav entry would open
+        // it with nothing selected.
+        path: "delegation",
+        element: <DelegationPage />,
+        handle: { title: "Delegation" },
       },
       {
         path: "profile",

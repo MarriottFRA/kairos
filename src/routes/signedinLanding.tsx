@@ -32,6 +32,7 @@ import HubIcon from "@mui/icons-material/Hub";
 import BadgeIcon from "@mui/icons-material/Badge";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import AssessmentIcon from "@mui/icons-material/Assessment";
+import CloudSyncIcon from "@mui/icons-material/CloudSync";
 import ApartmentIcon from "@mui/icons-material/Apartment";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
@@ -762,6 +763,20 @@ const handleSignOut = useCallback(async () => {
                 <FileUploadIcon />
               </ListItemIcon>
               <ListItemText primary="BST Push" sx={listItemTextStyle} />
+            </ListItemButton>
+          </ListItem>
+          {/* Last, and deliberately apart from the pipeline above it: everything
+              before this point works offline and always has. Sync is the one tab
+              that talks to a server, and a hotel that never opens it loses
+              nothing. Delegation has no entry of its own — it is always ABOUT a
+              plan, so it is reached from a plan's card here. */}
+          <Divider sx={{ my: 1 }} />
+          <ListItem key="sync" disablePadding sx={{ display: "block" }}>
+            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/sync")}>
+              <ListItemIcon sx={listItemIconStyle}>
+                <CloudSyncIcon />
+              </ListItemIcon>
+              <ListItemText primary="Sync" sx={listItemTextStyle} />
             </ListItemButton>
           </ListItem>
         </List>

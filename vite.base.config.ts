@@ -29,6 +29,11 @@ const bundledModules = [
   // Pure JS utilities (can be bundled)
   'csv-parse',
   'xlsx',
+  // OOXML zip surgery for BST Push — main process. MUST stay bundled: the
+  // packaged app ships no node_modules except the hand-copied native list in
+  // forge.config.ts, so externalizing this makes main.js crash on launch with
+  // "Cannot find module 'fflate'".
+  'fflate',
   'uuid',
   '@faker-js/faker',
   '@fontsource/roboto'

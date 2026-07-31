@@ -87,6 +87,10 @@ import {
   usePlanningScenarioId,
   useSelectedHotel,
 } from "../../store/settings";
+import { pushEligibility, logBstPush } from "../../services/kairosSyncService";
+import { syncFailed } from "../../shared/kairosSync/ipc";
+import { BstPushEligibility } from "../../shared/kairosSync/protocol";
+import PushEligibilityAlert from "../../components/sync/PushEligibilityAlert";
 
 type Stage = "idle" | "review" | "done";
 type RowFilter = "all" | "problems";
@@ -359,6 +363,34 @@ export default function BstPush() {
   const [savingRules, setSavingRules] = useState(false);
   const [rulesRevision, setRulesRevision] = useState(0);
 
+  /**
+   * Whether the server will stand behind this push.
+   *
+   * Asked once per scenario rather than at commit time, because the answers are
+   * things the user has to act on BEFORE picking a file — a delegate cannot push
+   * at all, and a partial scope makes the push destructive rather than partial.
+   * A plan that was never published simply has no opinion, and the page behaves
+   * exactly as it did before sync existed.
+   */
+  const [eligibility, setEligibility] = useState<BstPushEligibility | null>(null);
+
+  useEffect(() => {
+    if (!ou || !planningScenarioId) {
+      setEligibility(null);
+      return;
+    }
+    let cancelled = false;
+    void pushEligibility(ou, planningScenarioId).then((result) => {
+      if (cancelled) return;
+      setEligibility(syncFailed(result) ? null : result.data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ou, planningScenarioId]);
+
+  const pushBlocked = eligibility !== null && !eligibility.allowed;
+
   // ── Resolve the planning scenario (same ladder as Results) ──
   useEffect(() => {
     if (!ou) {
@@ -569,6 +601,17 @@ export default function BstPush() {
         setReport(result.report);
         setStage("done");
         setFilter("all");
+        // The only record that Kairos changed the hotel's real workbook. It is
+        // what answers "why does the workbook disagree with the plan?" months
+        // later, so it is sent whenever the plan is published — and its failure
+        // is swallowed, because a logging outage must not make a successful push
+        // look like a failed one.
+        void logBstPush(ou, scenario.id, {
+          targetFile: result.report.file.sourceFileName,
+          rowsWritten: result.report.writeCount,
+          backupTaken: result.report.backupPath !== null,
+          monthPlan: { months: options.months },
+        });
       } else if (result.outcome !== "cancelled") {
         setRefusal(result);
         setStage("idle");
@@ -664,6 +707,8 @@ export default function BstPush() {
           {error}
         </Alert>
       )}
+      <PushEligibilityAlert eligibility={eligibility} />
+
       {refusalMessage && (
         <Alert
           severity="warning"
@@ -687,6 +732,7 @@ export default function BstPush() {
           outputs={outputs}
           budgetYear={budgetYear}
           onChoose={handleChooseFile}
+          disabled={pushBlocked}
         />
       )}
 
@@ -844,12 +890,15 @@ function IdleState({
   outputs,
   budgetYear,
   onChoose,
+  disabled,
 }: {
   scopeReady: boolean;
   busy: Stage | null | string;
   outputs: OutputsResponse | null;
   budgetYear: number;
   onChoose: () => void;
+  /** The server refuses this push — the reasons are in PushEligibilityAlert. */
+  disabled?: boolean;
 }) {
   const rowCount = outputs?.rows.length ?? 0;
   const nothingToPush = Boolean(outputs) && rowCount === 0;
@@ -936,7 +985,7 @@ function IdleState({
               )
             }
             onClick={onChoose}
-            disabled={!scopeReady || Boolean(busy) || nothingToPush}
+            disabled={!scopeReady || Boolean(busy) || nothingToPush || disabled}
           >
             {busy === "preview" ? "Reading the BST…" : "Choose BST file…"}
           </Button>
