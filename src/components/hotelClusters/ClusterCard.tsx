@@ -83,7 +83,11 @@ export default function ClusterCard({
       disableGutters
       sx={{ "&:before": { display: "none" } }}
     >
-      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+      {/* Rendered as a div, not MUI's default <button>: the summary row holds
+          action buttons, and a <button> can't nest inside one. ButtonBase still
+          applies role="button" plus Enter/Space handling, so toggling by
+          keyboard is unchanged. */}
+      <AccordionSummary component="div" expandIcon={<ExpandMoreIcon />}>
         <Stack
           direction="row"
           spacing={1}
