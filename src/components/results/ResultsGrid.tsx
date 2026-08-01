@@ -8,8 +8,13 @@
  *
  *   - a Source column, so a hand-entered number is never mistaken for a
  *     calculated one at a glance;
- *   - rate-aware formatting, because an allocation split is a decimal repeated
- *     twelve times and its "Year total" is an artefact of summing (see format.ts).
+ *   - percent-aware formatting, because an allocation split is a share out of
+ *     100 rather than money (see format.ts).
+ *
+ * The level-valued rows — headcount, position count, allocation splits — read
+ * as a January value followed by eleven zeroes. That is not a display trick: it
+ * is what the budget generates and what the push writes, because the BST reads
+ * such a statistic as the running sum of its months.
  *
  * Clicking any cell selects it — that is the whole inspector interaction. The
  * selected cell is outlined rather than the whole row, because the inspector

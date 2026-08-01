@@ -33,10 +33,7 @@ import {
   OutputsResponse,
 } from "../../shared/positions/ipc";
 import { STATS_ACCOUNT_FILTER } from "../../shared/positions/systemAccounts";
-import {
-  AllocationDto,
-  allocationPercentToDecimal,
-} from "../../shared/allocations/ipc";
+import { AllocationDto } from "../../shared/allocations/ipc";
 import {
   DepartmentAgg,
   computeAllocationColumn,
@@ -75,6 +72,57 @@ function sumMonths(months: number[]): number {
   return total;
 }
 
+/**
+ * Level series → change series. The BST's contract for a cumulative statistic.
+ *
+ * Headcount, position count and allocation splits are LEVELS, not monthly
+ * amounts: "5 heads" is one fact about the year, not five heads earned twelve
+ * times. The BST stores them as movements and reads the running SUM, so a level
+ * of 5 all year is loaded once, in January, and the other eleven months are 0 —
+ * exactly what the legacy budget generated. A mid-year starter loads its 5 in
+ * the month it comes online; a September leaver loads a −5 there. Sum the row up
+ * to any month and you get that month's level back, which is what makes this
+ * safe: nothing is lost, it is only encoded the way the target reads it.
+ *
+ * Posting the level in every month instead — what Kairos did until now — reads
+ * downstream as 5, 10, 15, … heads, because the BST adds the months up.
+ *
+ * The epsilon squashes float noise between two nominally equal months into a
+ * true 0, so a flat series really is January-only rather than January plus
+ * eleven values at the fifteenth decimal.
+ */
+/**
+ * Which definitions produce a LEVEL rather than a monthly amount, and therefore
+ * get delta-encoded on the way out.
+ *
+ * Both permanent heads qualify (the per-row Headcount and the pinned Position
+ * Count) and so does any STAT/HEADCOUNT block a user builds — they are all the
+ * same kind of number. Hours and FTE are NOT: hours genuinely accrue month by
+ * month. Resolved from the definitions rather than by hard-coded id, so a new
+ * headcount block is covered the day it is created.
+ */
+export function cumulativeStatDefIds(
+  definitions: Array<{ id: unknown; kind: string; statKind?: string }>
+): Set<string> {
+  return new Set(
+    definitions
+      .filter((def) => def.kind === "STAT" && def.statKind === "HEADCOUNT")
+      .map((def) => def.id as string)
+  );
+}
+
+export function toMonthlyDeltas(months: readonly number[]): number[] {
+  const out = new Array<number>(MONTHS).fill(0);
+  let previous = 0;
+  for (let m = 0; m < MONTHS; m++) {
+    const level = Number(months[m]) || 0;
+    const delta = level - previous;
+    out[m] = Math.abs(delta) < 1e-9 ? 0 : delta;
+    previous = level;
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Projection (simulation → output lines)
 // ---------------------------------------------------------------------------
@@ -108,10 +156,18 @@ export interface OutputProjection {
  * Lives here, beside the write it feeds, rather than inline in the IPC handler
  * that used to own it — it is a domain rule about what an output IS, and every
  * consumer of stored outputs must agree on it.
+ *
+ * `cumulativeDefIds` names the definitions whose lines are LEVELS rather than
+ * monthly amounts (the headcount stats) and are therefore delta-encoded on the
+ * way out — see toMonthlyDeltas. Passed in rather than read off the line because
+ * the engine result carries only a component's id and label, and because the
+ * engine has no business knowing how its numbers are stored: it emits the level
+ * in every active month, exactly as before, and this projection re-expresses it.
  */
 export function projectOutputLines(
   result: ProjectableResult,
-  positions: Array<{ id: unknown }>
+  positions: Array<{ id: unknown }>,
+  cumulativeDefIds: ReadonlySet<string> = new Set()
 ): OutputProjection {
   const lines: OutputLineWrite[] = [];
   const unpostedByLabel: Record<string, number> = {};
@@ -125,9 +181,17 @@ export function projectOutputLines(
           (unpostedByLabel[line.component.label] ?? 0) + 1;
         continue;
       }
-      const months = Array.from(line.months);
+      const levels = Array.from(line.months);
+      // The diagnostic asks "did this position produce any number at all", so it
+      // reads the LEVELS. A full-year headcount delta-encodes to a January value
+      // and eleven zeroes, and a leaver's nets to zero over the year — neither
+      // means the position was empty.
+      if (Math.abs(sumMonths(levels)) > 1e-9) nonZero++;
+
+      const months = cumulativeDefIds.has(line.component.id as string)
+        ? toMonthlyDeltas(levels)
+        : levels;
       const total = sumMonths(months);
-      if (Math.abs(total) > 1e-9) nonZero++;
       lines.push({
         positionId: position.id as string,
         componentDefId: line.component.id as string,
@@ -283,11 +347,12 @@ export function projectManualLines(
 /**
  * Allocations — the departments × allocations spread, posted as statistics.
  *
- * One line per department per allocation, carrying the DECIMAL fraction rather
- * than the percentage the Allocations page shows (0.1523, not 15.23) and the
- * same value in all twelve months: a split is a rate, not a monthly amount.
- * This is how the legacy BST carries them — the workbook multiplies against
- * them downstream — so the push needs no special case.
+ * One line per department per allocation, carrying the percentage as a PLAIN
+ * NUMBER — 15.23 for a 15.23% share, so a department's splits add up to 100 —
+ * in January only. That is how the BST holds a split: a level, loaded once, with
+ * later changes arriving as adjustment entries (a share moving 5 → 4 is loaded
+ * as −1 in the month it moves). A budget has no such changes, so the other
+ * eleven months are 0. See toMonthlyDeltas.
  *
  * Excluded departments post an explicit 0 rather than being omitted. A missing
  * row and a zero share look identical downstream, but only one of them says
@@ -310,10 +375,10 @@ export function projectAllocationLines(
     const excluded = new Set(allocation.excludedDepartments);
 
     for (const dept of departments) {
-      const decimal = allocationPercentToDecimal(
-        column.get(dept.departmentCode) ?? 0
-      );
-      const months = new Array<number>(MONTHS).fill(decimal);
+      const percent = column.get(dept.departmentCode) ?? 0;
+      // Same rule the headcount stats go through, applied to a series that is
+      // flat by construction: the whole share lands in January.
+      const months = toMonthlyDeltas(new Array<number>(MONTHS).fill(percent));
       lines.push({
         positionId: `alloc:${allocation.id}`,
         // One line per department, so the department code is what makes this
@@ -567,17 +632,16 @@ function normalizeSource(value: unknown): OutputSource {
 /**
  * How the Results grid should read this row's numbers.
  *
- * An allocation split is a ratio repeated across twelve months, so summing it
- * into a Year total is meaningless — "rate" tells the grid to show the value
- * instead. A row is only a rate if EVERY line in it is one: the moment a real
- * statistic shares the account, the numbers are additive again and pretending
- * otherwise would hide the collision.
+ * An allocation split is a share out of 100, so "percent" tells the grid to
+ * render it with a % sign rather than as money. A row is only a percent if EVERY
+ * line in it is one: the moment a real statistic shares the account, the numbers
+ * are ordinary counts again and pretending otherwise would hide the collision.
  */
 function resolveValueKind(
   isStats: boolean,
   sources: ReadonlySet<OutputSource>
 ): OutputValueKind {
-  if (sources.size === 1 && sources.has("ALLOCATION")) return "rate";
+  if (sources.size === 1 && sources.has("ALLOCATION")) return "percent";
   return isStats ? "count" : "currency";
 }
 

@@ -239,6 +239,11 @@ export async function commitImportPlan(
     sourceFileName: plan.preview.sourceFileName,
     positionsCreated: creates.length,
     blocksCreated: plan.blocks.map((block) => block.preview),
+    // What the file HAD, which is the build-by-hand list when nothing was
+    // created. `plan.blocks` is empty in that case; the preview is not.
+    blocksDetected: plan.preview.blocks,
+    blocksOmitted: plan.preview.blocksOmitted,
+    resolvedVersion: plan.preview.resolvedVersion,
     manualInputRowsCreated,
     allocationsCreated,
     calendarMonthsUpdated,

@@ -169,6 +169,21 @@ export function changedFieldKeys(
     if (def.storage === "COMPUTED") continue;
     if (!Object.is(oldRow[def.key], newRow[def.key])) changed.push(def.key);
   }
+
+  // Flipping Salary Entry (or Annual Basis) promotes a face that until now was
+  // only ever DERIVED into the one the row is typed in. hydrateBasicSalary
+  // computes that face at load time precisely so it does not read as an edit —
+  // which means on a row whose stored record never carried it (anything written
+  // before v19, or imported as monthly) both sides of this diff hold the same
+  // hydrated number and the face looks unchanged. The flip would then be saved
+  // alone, and the next load would take the STORED figure — 0 — as the typed
+  // one and zero the salary. So write the whole group whenever either selector
+  // moves: four scalars, and what the user sees is what is stored.
+  if (changed.includes(SALARY_ENTRY_MODE_KEY) || changed.includes(ANNUAL_DIVISOR_KEY)) {
+    for (const key of [BASIC_SALARY_ANNUAL_KEY, BASIC_SALARY_MONTHLY_KEY]) {
+      if (!changed.includes(key)) changed.push(key);
+    }
+  }
   return changed;
 }
 

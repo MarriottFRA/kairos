@@ -2,11 +2,11 @@
  * Result-number formatting. One module so the grid and the inspector can never
  * render the same figure two different ways.
  *
- * The interesting case is `rate`: an allocation split is a decimal share of 1,
- * repeated across all twelve months. Rendering it with the currency formatter
- * would show "0" for every department, and summing it into a Year total would
- * produce a number that means nothing. So rates get four decimals, and the Year
- * column shows the rate itself rather than a sum.
+ * The interesting case is `percent`: an allocation split is stored the way the
+ * BST holds it — a share out of 100, carried in January with zeroes after it —
+ * so the number itself is already the percentage and only needs a % sign. The
+ * Year column is a plain sum for every kind, which for a January-carried level
+ * gives that level back.
  */
 
 import type { OutputValueKind } from "../../shared/positions/ipc";
@@ -23,12 +23,10 @@ export function formatResultValue(
   if (!Number.isFinite(num)) return NO_VALUE;
   if (num === 0) return ZERO;
 
-  if (kind === "rate") {
-    // 0.1523 — the decimal the BST carries, not a rounded percentage.
-    return num.toLocaleString(undefined, {
-      minimumFractionDigits: 4,
-      maximumFractionDigits: 4,
-    });
+  if (kind === "percent") {
+    // 15.23% — the share as it is stored and as it is pushed, not a re-scaled
+    // decimal. Two places is what the Allocations grid shows.
+    return `${num.toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
   }
   return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
@@ -36,14 +34,11 @@ export function formatResultValue(
 /**
  * What the Year column should show for a row.
  *
- * For a rate row the twelve months are the SAME value, so their sum is an
- * artefact — show the rate. Everything else is additive and shows its total.
+ * Always the sum of the twelve months. For an ordinary monthly amount that is
+ * the year's cost; for a level-valued row (headcount, position count, an
+ * allocation split) the months are CHANGES, so their sum is the December level —
+ * the share, or the heads the budget ends the year with.
  */
-export function yearValueOf(row: {
-  months: number[];
-  total: number;
-  valueKind: OutputValueKind;
-}): number {
-  if (row.valueKind !== "rate") return row.total;
-  return row.months?.[0] ?? 0;
+export function yearValueOf(row: { total: number }): number {
+  return row.total;
 }

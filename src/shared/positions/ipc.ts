@@ -269,11 +269,11 @@ export type OutputSource = "ENGINE" | "MANUAL" | "ALLOCATION" | "BUYOUT";
  * How a row's numbers should be read.
  *  - currency: money (the default)
  *  - count:    statistics — heads, hours, covers
- *  - rate:     a ratio that is the SAME every month (allocation splits). The
- *              twelve months do not add up to anything meaningful, so the Year
- *              column shows the rate itself rather than a sum.
+ *  - percent:  an allocation split, a share out of 100 (15.23 = 15.23%). Held
+ *              in January with zeroes after it, like every other level-valued
+ *              statistic, so the Year column is the share itself.
  */
-export type OutputValueKind = "currency" | "count" | "rate";
+export type OutputValueKind = "currency" | "count" | "percent";
 
 /** One dept×account result row (source lines aggregated in the repo). */
 export interface OutputAggRowDto {
@@ -282,7 +282,15 @@ export interface OutputAggRowDto {
   /** Statistics account (the A9… range — count/hours/FTE lines, not currency).
    *  See STATS_ACCOUNT_FILTER; costs are every other account. */
   isStats: boolean;
-  /** Jan..Dec. */
+  /**
+   * Jan..Dec.
+   *
+   * Level-valued rows (headcount, position count, allocation splits) carry
+   * CHANGES, not levels: the value in January and 0 thereafter, with a movement
+   * in the month one occurs. That is how the BST stores a level — it reads the
+   * running sum — so the Year total of such a row is its December level.
+   * Everything else is a genuine monthly amount. See toMonthlyDeltas.
+   */
   months: number[];
   total: number;
   /** Every origin that contributed to this row, in a stable order. A row can

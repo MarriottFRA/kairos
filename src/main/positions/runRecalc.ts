@@ -10,6 +10,12 @@
  * Blank-account lines (calculation-only blocks) are computed but never written:
  * the workbook's "Blank" contract, enforced in projectOutputLines.
  *
+ * The engine is untouched by the level-vs-movement encoding of the headcount
+ * stats: it emits the count in every active month as it always has, and the
+ * projection re-expresses that as the January-plus-changes series the BST reads
+ * (see toMonthlyDeltas). Choosing WHICH definitions get that treatment is the
+ * only part that needs the scenario's definitions, so it happens here.
+ *
  * Dependencies come in by argument (db handles, calendar/defaults lookups) so
  * this stays unit-testable and Electron-free.
  */
@@ -24,6 +30,7 @@ import {
 } from "./loadScenarioInput";
 import {
   computeFingerprint,
+  cumulativeStatDefIds,
   projectAllocationLines,
   projectBuyoutLines,
   projectManualLines,
@@ -89,9 +96,13 @@ export async function runRecalc(
   }
   const result = simulate(compiled.plan);
 
+  // Headcount stats are LEVELS, not monthly amounts, and the BST reads a level
+  // as the running sum of its months — so they post as changes: the count in
+  // January (or in the month the position comes online), zero thereafter.
   const { lines, unpostedByLabel, allZeroPositions } = projectOutputLines(
     result,
-    input.positions
+    input.positions,
+    cumulativeStatDefIds(input.definitions)
   );
 
   // ---- the three non-engine sources ----------------------------------------

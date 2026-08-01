@@ -25,6 +25,7 @@ import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { loadScenarioInput } from "../loadScenarioInput";
 import { resolveOuScope } from "../ouScope";
 import {
+  cumulativeStatDefIds,
   projectOutputLines,
   readOutputs,
   writeRun,
@@ -44,6 +45,9 @@ const SCOPE = resolveOuScope("OU12345");
 const NOW = { now: "2026-01-01T00:00:00.000Z" };
 const YEAR = 2027;
 const CALENDAR = buildDefaultCalendar(SCOPE.ou, YEAR, DEFAULT_WEEKEND_MASK);
+
+/** A level carried the way the BST reads one: loaded in January, unchanged after. */
+const janOnly = (value: number) => [value, ...new Array(11).fill(0)];
 
 const ACCOUNTS = {
   salaryAccountCode: "A511000",
@@ -112,7 +116,11 @@ async function recalculate() {
   if (!("plan" in compiled)) {
     throw new Error(`compile failed: ${JSON.stringify(compiled.errors)}`);
   }
-  const projection = projectOutputLines(simulate(compiled.plan), input.positions);
+  const projection = projectOutputLines(
+    simulate(compiled.plan),
+    input.positions,
+    cumulativeStatDefIds(input.definitions)
+  );
   writeRun(
     valuesDb,
     SCOPE,
@@ -199,11 +207,49 @@ describe("Recalculate → Results rows", () => {
     const row = (account: string) =>
       outputs.rows.find((entry) => entry.account === account)!;
 
-    // Count 2, every month active, on both heads — the per-row account and the
-    // pinned one report the same heads under different accounts.
-    expect(row(ACCOUNTS.headCountAccount).months).toEqual(new Array(12).fill(2));
-    expect(row(POSITION_COUNT_ACCOUNT).months).toEqual(new Array(12).fill(2));
+    // Count 2, active all year, on both heads — the per-row account and the
+    // pinned one report the same heads under different accounts. A headcount is
+    // a LEVEL, so it is loaded once in January: the BST reads such a statistic
+    // as the running sum of its months, and repeating 2 twelve times would
+    // report 24 heads by December.
+    expect(row(ACCOUNTS.headCountAccount).months).toEqual(janOnly(2));
+    expect(row(POSITION_COUNT_ACCOUNT).months).toEqual(janOnly(2));
+    // Hours are NOT a level — they genuinely accrue month by month.
+    expect(row(ACCOUNTS.workingHoursAccount).months.filter((m) => m > 0).length).toBe(12);
     expect(row(ACCOUNTS.workingHoursAccount).total).toBeGreaterThan(0);
+  });
+
+  it("loads a mid-year starter's heads in the month it comes online", async () => {
+    // Seasonality 0 until March: no heads to report before then, then 2.
+    writePosition({
+      ...ACCOUNTS,
+      seasonality: [0, 0, ...new Array(10).fill(1)],
+    });
+    const { outputs } = await recalculate();
+    const heads = outputs.rows.find(
+      (entry) => entry.account === POSITION_COUNT_ACCOUNT
+    )!;
+
+    // The change, in the month it happens — the running sum is 0, 0, 2, 2 … 2,
+    // which is the truth about this position.
+    expect(heads.months).toEqual([0, 0, 2, ...new Array(9).fill(0)]);
+  });
+
+  it("loads a leaver's departure as a negative movement", async () => {
+    // Active through August, gone from September.
+    writePosition({
+      ...ACCOUNTS,
+      seasonality: [...new Array(8).fill(1), ...new Array(4).fill(0)],
+    });
+    const { outputs } = await recalculate();
+    const heads = outputs.rows.find(
+      (entry) => entry.account === POSITION_COUNT_ACCOUNT
+    )!;
+
+    expect(heads.months).toEqual([2, 0, 0, 0, 0, 0, 0, 0, -2, 0, 0, 0]);
+    // Running sum back to zero by year end — the Year column reports the
+    // December level, not twelve months of heads added together.
+    expect(heads.total).toBe(0);
   });
 
   it("keeps salary and vacation cost adding back up to the gross wage", async () => {
@@ -248,7 +294,7 @@ describe("Recalculate → Results rows", () => {
     expect(pinned).toHaveLength(1);
     // Count 2 — NOT 4. readOutputs sums lines sharing a dept|account key, so
     // letting both heads post here would silently double the reported heads.
-    expect(pinned[0].months).toEqual(new Array(12).fill(2));
+    expect(pinned[0].months).toEqual(janOnly(2));
   });
 
   it("recalculates a hotel that never opened the Blocks page", async () => {

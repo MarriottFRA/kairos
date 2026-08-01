@@ -171,7 +171,7 @@ export default function AllocationDialog({
             />
             <Typography variant="caption" color="text.secondary">
               {injectAccount
-                ? "Each department's share posts to this account on the Results page as a decimal (0.1523, not 15.23), the same value every month."
+                ? "Each department's share posts to this account on the Results page as the percentage itself (15.23, not 0.1523), in January only — the BST reads a split as a level, so later changes arrive as adjustments."
                 : "No account: the split is still calculated and shown here, but it is not included in the Results output or the BST push."}
             </Typography>
           </Stack>

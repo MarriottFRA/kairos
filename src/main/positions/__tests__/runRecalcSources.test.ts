@@ -190,14 +190,24 @@ describe("runRecalc assembles every source", () => {
     expect(rowFor(outputs, "D0410", MANUAL_COST_ACCOUNT)).toBeUndefined();
   });
 
-  it("posts allocation splits as decimals", async () => {
+  it("posts allocation splits as percentages, in January only", async () => {
     addAllocation();
     const outputs = await recalc();
     const alloc = rowFor(outputs, "D0410", ALLOC_ACCOUNT)!;
-    // One department in the scenario, so it carries the whole share.
-    expect(alloc.months).toEqual(new Array(12).fill(1));
+    // One department in the scenario, so it carries the whole share: 100, not
+    // 1, and loaded once — the BST reads a split as the running sum.
+    expect(alloc.months).toEqual([100, ...new Array(11).fill(0)]);
+    expect(alloc.total).toBe(100);
     expect(alloc.sources).toEqual(["ALLOCATION"]);
-    expect(alloc.valueKind).toBe("rate");
+    expect(alloc.valueKind).toBe("percent");
+  });
+
+  it("posts the position count as a January level, without touching the engine", async () => {
+    const outputs = await recalc();
+    const heads = outputs.rows.find((row) => row.isStats)!;
+    // Two heads, active all year — one load in January, nothing after it.
+    expect(heads.months).toEqual([2, ...new Array(11).fill(0)]);
+    expect(heads.sources).toEqual(["ENGINE"]);
   });
 
   it("counts a buyout exactly once, despite the compiler also aggregating it", async () => {

@@ -293,13 +293,7 @@ export default function ResultsInspector({
                 fontFamily: "'IBM Plex Mono', monospace",
               }}
             >
-              {formatResultValue(
-                // A rate row's lines all carry the same decimal; summing them
-                // across departments would be nonsense, so show the cell's own
-                // value instead of the column sum.
-                kind === "rate" ? lines[0] && valueOf(lines[0]) : linesTotal,
-                kind
-              )}
+              {formatResultValue(linesTotal, kind)}
             </Typography>
           </Stack>
         </>

@@ -32,6 +32,10 @@ import {
   NotLegacyWorkbookError,
   parseLegacyWorkbook,
 } from "../../main/legacyImport/parseWorkbook";
+import {
+  coreAnchorMismatches,
+  isUnreadableLayout,
+} from "../../main/legacyImport/layout";
 import { analyzeWorkbook, ImportPlan } from "../../main/legacyImport/analyze";
 import { commitImportPlan } from "../../main/legacyImport/commit";
 import {
@@ -116,6 +120,20 @@ function buildPlan(
 ): ImportPlan {
   const sourceFileName = path.basename(filePath);
   const workbook = parseLegacyWorkbook(readWorkbookBytes(filePath), sourceFileName);
+
+  // The sheet names were enough to say "this is a Payroll Budget Tool file";
+  // this says "…and its columns are still where every version puts them". An
+  // unrecognised BLOCK region only costs the blocks, but a core region that has
+  // moved would mis-read salaries, so refuse the file rather than degrade.
+  const mismatches = coreAnchorMismatches(workbook);
+  if (isUnreadableLayout(workbook)) {
+    throw new NotLegacyWorkbookError(
+      `"${sourceFileName}" has a column layout this tool does not recognise ` +
+        `(${mismatches.join("; ")}). Importing it would read the wrong columns, ` +
+        `so nothing was changed.`
+    );
+  }
+
   const departmentNameByCode = new Map(
     listDepartments(localDbHandle()).map((dept) => [dept.code, dept.name])
   );

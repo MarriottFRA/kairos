@@ -6,16 +6,21 @@
  * what a percentage multiplies against, how a column maps to a field — lives in
  * analyze.ts, so this file stays a stable description of the workbook's shape.
  *
- * Layout (verified against "Payroll Budget Tool 3.6.3", 161 associates):
+ * Layout (verified against "Payroll Budget Tool" 3.6.1 and 3.6.3):
  *   Associate Details  row 2 = block band names, row 3 = column names,
- *                      row 4+ = one row per associate. Columns are FIXED — the
- *                      VBA engine itself indexes them by number (see
- *                      `Base_Single_Month_Column = 31` and friends in
- *                      OLD VBA Engine.txt), so the file structure is locked and
- *                      positional reads are the same contract the old tool had.
+ *                      row 4+ = one row per associate. Columns are fixed WITHIN
+ *                      a version — the VBA engine itself indexes them by number
+ *                      (see `Base_Single_Month_Column = 31` and friends in OLD
+ *                      VBA Engine.txt) — but NOT across versions: 3.6.1 has no
+ *                      Overtime band, so its DR..DX are 3.6.3's Custom-1 months
+ *                      and everything from DY onward sits seven columns left.
+ *                      This reader stays positional and reports the version and
+ *                      the header rows; `layout.ts` decides which map applies.
  *   Settings           B31 full-time weekly hours, B4 entered year,
- *                      B9:B24 + B35:B37 the Social-Security base tick boxes.
- *   Menu               C11:N11 calendar days, C12:N12 public holidays.
+ *                      B29 the tool's own version, B9:B24 + B35:B37 the
+ *                      Social-Security base tick boxes.
+ *   Menu               B1 the version again, C11:N11 calendar days,
+ *                      C12:N12 public holidays.
  *   Buyout & Manual    row 1 machine names, row 2 human names, row 3+ data.
  *   Allocations        five fixed column pairs at B/D/F/H/J.
  *   Budget_Import      G5 hotel name, D5 OU (a BST pull, may be absent).
@@ -106,6 +111,23 @@ export interface LegacyWorkbook {
   fullTimeWeeklyHours: number | null;
   /** Settings!B4, e.g. "Yr 2024" → 2024. */
   enteredYear: number | null;
+  /**
+   * Settings!B29 ("Version 3.6.3") / C29 ("_V3.6.3"), reduced to "3.6.3".
+   *
+   * The tool states its own version, which matters because the layout is NOT
+   * the same across the 3.6.x line: 3.6.1 has no Overtime band, so every column
+   * from DY onward sits seven to the left of where 3.6.3 puts it. Advisory
+   * only — `layout.ts` trusts the sheet's own headers first and uses this to
+   * corroborate, because a hotel that copied its data into a newer template
+   * can leave the version cell saying the old number.
+   */
+  declaredVersion: string | null;
+  /**
+   * Settings!C37 === "CN_A20" — the Overtime row of the Social-Security
+   * inclusion list, which only exists from the version that added the band.
+   * A second, independent signal for the same question.
+   */
+  hasOvertimeSetting: boolean;
   /** Menu!C12:N12 — public holidays per month, Jan..Dec. */
   publicHolidaysByMonth: number[] | null;
   /** Menu!C11:N11 — calendar days per month, Jan..Dec (the daily-spread basis). */
@@ -166,6 +188,15 @@ function parseYear(value: string | null): number | null {
   if (!value) return null;
   const match = value.match(/(\d{4})/);
   return match ? Number(match[1]) : null;
+}
+
+/** "Version 3.6.3" / "_V3.6.3" → "3.6.3". */
+function parseVersion(...candidates: Array<string | null>): string | null {
+  for (const candidate of candidates) {
+    const match = candidate?.match(/(\d+\.\d+(?:\.\d+)?)/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 /** Read twelve consecutive cells across one row into a Jan..Dec vector. */
@@ -454,6 +485,12 @@ export function parseLegacyWorkbook(
     allocationDepartments: allocations.departments,
     fullTimeWeeklyHours: numberAt(settings, "B31"),
     enteredYear: parseYear(textAt(settings, "B4")),
+    declaredVersion: parseVersion(
+      textAt(settings, "B29"),
+      textAt(settings, "C29"),
+      textAt(menu, "B1")
+    ),
+    hasOvertimeSetting: textAt(settings, "C37") === "CN_A20",
     publicHolidaysByMonth: readMonthRow(menu, 12, 2), // C12:N12
     calendarDaysByMonth: readMonthRow(menu, 11, 2), // C11:N11
     ssBaseFlags: readSsBaseFlags(settings),

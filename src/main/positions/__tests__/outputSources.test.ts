@@ -21,11 +21,13 @@ import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
 import type { DepartmentAgg } from "../../../shared/allocations/compute";
 import {
   computeFingerprint,
+  cumulativeStatDefIds,
   projectAllocationLines,
   projectBuyoutLines,
   projectManualLines,
   readOutputLines,
   readOutputs,
+  toMonthlyDeltas,
   writeRun,
 } from "../outputsRepo";
 import { resolveOuScope } from "../ouScope";
@@ -58,6 +60,9 @@ beforeEach(() => {
 
 const months = (value: number) => new Array(12).fill(value);
 
+/** A level carried the way the BST reads one: loaded in January, unchanged after. */
+const janOnly = (value: number) => [value, ...new Array(11).fill(0)];
+
 function manualRow(over: Record<string, unknown> = {}) {
   return {
     id: "m1",
@@ -86,6 +91,65 @@ function dept(code: string, headcount: number): DepartmentAgg {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// The level encoding
+// ---------------------------------------------------------------------------
+
+describe("toMonthlyDeltas", () => {
+  it("loads a flat level once, in January", () => {
+    expect(toMonthlyDeltas(months(5))).toEqual(janOnly(5));
+  });
+
+  it("loads a level in the month it first appears", () => {
+    const march = [0, 0, ...new Array(10).fill(5)];
+    expect(toMonthlyDeltas(march)).toEqual([0, 0, 5, ...new Array(9).fill(0)]);
+  });
+
+  it("emits a negative movement when a level drops", () => {
+    const leaver = [...new Array(8).fill(5), ...new Array(4).fill(0)];
+    expect(toMonthlyDeltas(leaver)).toEqual([5, 0, 0, 0, 0, 0, 0, 0, -5, 0, 0, 0]);
+  });
+
+  it("is lossless — the running sum is the original level series", () => {
+    const levels = [0, 3, 3, 7, 7, 7, 4, 4, 4, 4, 9, 9];
+    const deltas = toMonthlyDeltas(levels);
+    let running = 0;
+    expect(deltas.map((delta) => (running += delta))).toEqual(levels);
+  });
+
+  it("squashes float noise between nominally equal months to a true zero", () => {
+    // 100/3 computed twice can differ in the last bits; a split must not read
+    // as "January plus eleven microscopic adjustments".
+    const third = 100 / 3;
+    const noisy = months(third).map((value, m) => (m % 2 ? value + 1e-13 : value));
+    expect(toMonthlyDeltas(noisy)).toEqual(janOnly(third));
+  });
+
+  it("treats a short or ragged series as zeroes rather than NaN", () => {
+    expect(toMonthlyDeltas([2, 2])).toEqual([2, 0, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe("cumulativeStatDefIds", () => {
+  it("picks the headcount stats and nothing else", () => {
+    const ids = cumulativeStatDefIds([
+      { id: "sys-poscount:OU", kind: "STAT", statKind: "HEADCOUNT" },
+      { id: "sys-stat:OU:HEADCOUNT", kind: "STAT", statKind: "HEADCOUNT" },
+      { id: "custom-heads", kind: "STAT", statKind: "HEADCOUNT" },
+      // Hours genuinely accrue month by month, and FTE is a ratio — neither is
+      // a level the BST accumulates.
+      { id: "sys-stat:OU:HOURS", kind: "STAT", statKind: "HOURS" },
+      { id: "sys-stat:OU:FTE", kind: "STAT", statKind: "FTE" },
+      { id: "base-salary", kind: "BASE_SALARY" },
+    ]);
+    expect([...ids].sort()).toEqual([
+      "custom-heads",
+      "sys-poscount:OU",
+      "sys-stat:OU:HEADCOUNT",
+    ]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Manual input
@@ -146,7 +210,7 @@ describe("projectManualLines", () => {
 describe("projectAllocationLines", () => {
   const departments = [dept("D0410", 3), dept("D0420", 1)];
 
-  it("posts the DECIMAL share, not the percentage", () => {
+  it("posts the percentage as a plain number, in January only", () => {
     const lines = projectAllocationLines(
       [
         {
@@ -161,8 +225,11 @@ describe("projectAllocationLines", () => {
     );
 
     const front = lines.find((line) => line.dept === "D0410")!;
-    // 3 of 4 heads = 75% -> 0.75, the same value every month.
-    expect(front.months).toEqual(months(0.75));
+    // 3 of 4 heads = 75, not 0.75 — a share out of 100, loaded once. The BST
+    // reads a split as the running sum of its months, so repeating it would
+    // report 900% by December.
+    expect(front.months).toEqual(janOnly(75));
+    expect(front.total).toBe(75);
     expect(front.account).toBe("A975010");
     expect(front.source).toBe("ALLOCATION");
     expect(front.detail).toMatchObject({ percent: 75, spreadBase: "HEADCOUNT" });
@@ -187,8 +254,8 @@ describe("projectAllocationLines", () => {
     // different statement from "not considered".
     expect(excluded.months).toEqual(months(0));
     expect(excluded.detail).toMatchObject({ excluded: true });
-    // The remaining department re-normalizes to the whole share.
-    expect(lines.find((line) => line.dept === "D0420")!.months).toEqual(months(1));
+    // The remaining department re-normalizes to the whole share — 100, in January.
+    expect(lines.find((line) => line.dept === "D0420")!.months).toEqual(janOnly(100));
   });
 
   it("posts nothing when the allocation has no inject account (Blank contract)", () => {
@@ -363,7 +430,7 @@ describe("readOutputs over mixed sources", () => {
     expect(lines.map((line) => line.source).sort()).toEqual(["ENGINE", "MANUAL"]);
   });
 
-  it("marks an allocation-only row as a rate, but a shared account as additive", () => {
+  it("marks an allocation-only row as a percent, but a shared account as a count", () => {
     writeRun(
       valuesDb,
       scope,
@@ -383,7 +450,7 @@ describe("readOutputs over mixed sources", () => {
           [dept("D0410", 1), dept("D0420", 1)]
         ),
         // A real statistic sharing the allocation's account in one department:
-        // the numbers become additive again and must not be shown as a rate.
+        // the numbers are ordinary counts again and must not be shown as a %.
         {
           positionId: "p1",
           componentDefId: "c1",
@@ -401,8 +468,8 @@ describe("readOutputs over mixed sources", () => {
     const { rows } = readOutputs(structureDb, valuesDb, scope, SCENARIO);
     const pure = rows.find((row) => row.dept === "D0410")!;
     const shared = rows.find((row) => row.dept === "D0420")!;
-    expect(pure.valueKind).toBe("rate");
-    expect(pure.months[0]).toBeCloseTo(0.5);
+    expect(pure.valueKind).toBe("percent");
+    expect(pure.months[0]).toBeCloseTo(50);
     expect(shared.valueKind).toBe("count");
   });
 });

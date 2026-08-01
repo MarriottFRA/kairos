@@ -19,10 +19,12 @@ import {
 } from "../fields";
 import {
   basicSalaryCellLocked,
+  changedFieldKeys,
   newDraftRow,
   PositionRow,
   salaryEntryModeOf,
   sanitizeRow,
+  toPatch,
   toRow,
 } from "../rowModel";
 import { PositionRecord } from "../ipc";
@@ -185,41 +187,39 @@ describe("which cell is live", () => {
   });
 });
 
-describe("rows saved before the pairing existed", () => {
-  /** A stored record with no salaryEntryMode — i.e. everything written pre-v19. */
-  function legacyRecord(monthly: number, workingMonths = 12): PositionRecord {
-    return {
-      id: "legacy",
-      scenarioId: "s1",
-      lineageId: "legacy",
-      active: true,
-      departmentCode: "0410",
-      jobTypeCode: "Associate",
-      cluster: "",
-      clusterMultiplierOverride: null,
-      clusterLinkId: "",
-      payType: "SALARIED",
-      headcount: 1,
-      fte: 1,
-      seasonality: Array.from({ length: MONTHS }, (_v, m) =>
-        m < workingMonths ? 1 : 0
-      ),
-      monthlyBaseSalary: monthly,
-      hourlyRate: 0,
-      additionalMonthlyCosts: new Array(MONTHS).fill(0),
-      meritIncreasePct: 0,
-      manualYearlyIncrease: 0,
-      increaseMonth: 13,
-      dailyContractHours: 8,
-      yearlyHoursWorked: 0,
-      vacationDays: 0,
-      vacationMonthlyWeights: new Array(MONTHS).fill(1 / 12),
-      accrualDaysPerMonth: 0,
-      extraValues: {},
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    };
-  }
+/** A stored record with no salaryEntryMode — i.e. everything written pre-v19. */
+function legacyRecord(monthly: number, workingMonths = 12): PositionRecord {
+  return {
+    id: "legacy",
+    scenarioId: "s1",
+    lineageId: "legacy",
+    active: true,
+    departmentCode: "0410",
+    jobTypeCode: "Associate",
+    cluster: "",
+    clusterMultiplierOverride: null,
+    clusterLinkId: "",
+    payType: "SALARIED",
+    headcount: 1,
+    fte: 1,
+    seasonality: Array.from({ length: MONTHS }, (_v, m) => (m < workingMonths ? 1 : 0)),
+    monthlyBaseSalary: monthly,
+    hourlyRate: 0,
+    additionalMonthlyCosts: new Array(MONTHS).fill(0),
+    meritIncreasePct: 0,
+    manualYearlyIncrease: 0,
+    increaseMonth: 13,
+    dailyContractHours: 8,
+    yearlyHoursWorked: 0,
+    vacationDays: 0,
+    vacationMonthlyWeights: new Array(MONTHS).fill(1 / 12),
+    accrualDaysPerMonth: 0,
+    extraValues: {},
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
 
+describe("rows saved before the pairing existed", () => {
   it("reads as Monthly entry, so the stored engine input is untouched", () => {
     const row = toRow(legacyRecord(5_000));
     expect(salaryEntryModeOf(row)).toBe("MONTHLY");
@@ -236,6 +236,84 @@ describe("rows saved before the pairing existed", () => {
     const edited = sanitize({ ...loaded, headcount: 3 }, loaded);
     expect(edited[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
     expect(edited[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+  });
+});
+
+describe("switching which face the row types", () => {
+  /** Replay a patch the way positionWrites does: ENGINE keys land on their own
+   *  column, POSITION_EXTRA keys in extra_values. */
+  function applyPatch(
+    record: PositionRecord,
+    fields: Record<string, unknown>
+  ): PositionRecord {
+    const next = { ...record, extraValues: { ...record.extraValues } } as PositionRecord;
+    for (const [key, value] of Object.entries(fields)) {
+      const def = BUILTIN_CATALOG.fields.find((field) => field.key === key);
+      if (def?.storage === "ENGINE") (next as unknown as Record<string, unknown>)[key] = value;
+      else (next.extraValues as Record<string, unknown>)[key] = value;
+    }
+    return next;
+  }
+
+  function flipTo(row: PositionRow, mode: string): PositionRow {
+    return sanitize({ ...row, [SALARY_ENTRY_MODE_KEY]: mode }, row);
+  }
+
+  it("keeps the amount, in both directions", () => {
+    const monthly = toRow(legacyRecord(5_000, 9));
+    const annual = flipTo(monthly, "ANNUAL");
+    expect(annual[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(annual[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
+
+    const back = flipTo(annual, "MONTHLY");
+    expect(back[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
+    expect(back[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+  });
+
+  it("saves both faces, not just the selector", () => {
+    // The Annual face on a pre-v19 row exists only because hydrate derived it,
+    // so old and new agree and the plain diff calls it unchanged — yet the flip
+    // is exactly what makes it the figure the row is typed in.
+    const loaded = toRow(legacyRecord(5_000, 9));
+    const changed = changedFieldKeys(loaded, flipTo(loaded, "ANNUAL"), BUILTIN_CATALOG);
+    expect(changed).toContain(SALARY_ENTRY_MODE_KEY);
+    expect(changed).toContain(BASIC_SALARY_ANNUAL_KEY);
+    expect(changed).toContain(BASIC_SALARY_MONTHLY_KEY);
+  });
+
+  it("still shows the amount after the page is reloaded", () => {
+    const record = legacyRecord(5_000, 9);
+    const loaded = toRow(record);
+    const flipped = flipTo(loaded, "ANNUAL");
+    const { positionFields } = toPatch(
+      flipped,
+      changedFieldKeys(loaded, flipped, BUILTIN_CATALOG),
+      BUILTIN_CATALOG
+    );
+
+    const reloaded = toRow(applyPatch(record, positionFields));
+    expect(reloaded[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(reloaded[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
+    // And the next edit must not re-derive the monthly base from a stored 0.
+    const edited = sanitize({ ...reloaded, headcount: 2 }, reloaded);
+    expect(edited[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
+  });
+
+  it("does the same when only the divisor basis moves", () => {
+    const loaded = toRow(legacyRecord(5_000, 9));
+    const rebased = sanitize({ ...loaded, [ANNUAL_DIVISOR_KEY]: "TWELVE" }, loaded);
+    expect(changedFieldKeys(loaded, rebased, BUILTIN_CATALOG)).toContain(
+      BASIC_SALARY_ANNUAL_KEY
+    );
+  });
+
+  it("does not drag the salary group into an unrelated edit", () => {
+    const loaded = toRow(legacyRecord(5_000, 9));
+    const edited = sanitize({ ...loaded, headcount: 3 }, loaded);
+    const changed = changedFieldKeys(loaded, edited, BUILTIN_CATALOG);
+    expect(changed).toContain("headcount");
+    expect(changed).not.toContain(BASIC_SALARY_ANNUAL_KEY);
+    expect(changed).not.toContain(BASIC_SALARY_MONTHLY_KEY);
   });
 });
 

@@ -27,6 +27,12 @@
  * flat yearly amount but §4 spreads it weighted by the monthly base-salary
  * curve, and "Stock Options" reads monthly but §5 divides the yearly figure
  * over working months — which is the same thing.
+ *
+ * Every column below is stated in 3.6.3 terms and mapped through the resolved
+ * layout before it is read — 3.6.1 has no Overtime band and sits seven columns
+ * to the left from DY on (see layout.ts). Blocks are also OPTIONAL: the
+ * importer can read a band but cannot know what a hotel has used it for, so the
+ * default is to describe every band it found and let the user build the blocks.
  */
 
 import {
@@ -45,10 +51,12 @@ import {
 } from "../../shared/manualInput/ipc";
 import {
   LegacyBlockPreview,
+  LegacyBlocksOmission,
   LegacyImportOptions,
   LegacyImportPreview,
 } from "../../shared/legacyImport/ipc";
 import { JOB_TYPE_OPTIONS } from "../../shared/positions/fieldSeed";
+import { LegacyLayout, mapColumn, resolveLayout } from "./layout";
 import { LegacyAssociateRow, LegacyWorkbook, MONTHS } from "./parseWorkbook";
 
 // ---------------------------------------------------------------------------
@@ -376,13 +384,105 @@ const FAMILIES: Family[] = [
  * Total columns that a percentage band's formula may cite, mapped to what they
  * mean. Base salary is `AZ` (Budget Year Basic Salary — the merit-adjusted
  * series); everything else is another band's own total.
+ *
+ * Built per layout: on a file without the Overtime band the totals a formula
+ * cites are the shifted letters, so a fixed map would read a pension base as
+ * unresolvable and silently drop a term.
  */
-const TOTAL_COLUMN_MEANING: Record<string, string> = {
-  [COL.budgetYearSalary]: "@salary",
-  ...Object.fromEntries(
-    FAMILIES.map((family) => [family.totalCol, family.key])
-  ),
-};
+function totalColumnMeaning(families: Family[]): Record<string, string> {
+  return {
+    [COL.budgetYearSalary]: "@salary",
+    ...Object.fromEntries(families.map((family) => [family.totalCol, family.key])),
+  };
+}
+
+/**
+ * Restate the canonical (3.6.3) family list in the columns this file actually
+ * uses. A band with no home in this layout — Overtime on 3.6.1 — is dropped
+ * rather than pointed at whatever now sits in its place.
+ */
+export function familiesForLayout(layout: LegacyLayout): Family[] {
+  if (layout.hasOvertime) return FAMILIES;
+
+  const shift = (letter: string): string | null => mapColumn(letter, layout);
+  const families: Family[] = [];
+
+  for (const family of FAMILIES) {
+    const bandCol = shift(family.bandCol);
+    const totalCol = shift(family.totalCol);
+    const inputCols = family.inputCols.map(shift);
+    if (!bandCol || !totalCol || inputCols.some((column) => column === null)) {
+      continue;
+    }
+
+    const spec = family.spec;
+    let shifted: FamilySpec | null = null;
+    switch (spec.kind) {
+      case "MULTIPLIER": {
+        const rateCol = shift(spec.rateCol);
+        const accountCol = shift(spec.accountCol);
+        if (rateCol && accountCol) shifted = { ...spec, rateCol, accountCol };
+        break;
+      }
+      case "FLAT_MONTHLY": {
+        const amountCol = shift(spec.amountCol);
+        const accountCol = shift(spec.accountCol);
+        if (amountCol && accountCol) shifted = { ...spec, amountCol, accountCol };
+        break;
+      }
+      case "COUNT_RATE": {
+        const accountCol = shift(spec.accountCol);
+        const unitRateCol = shift(spec.unitRateCol);
+        const qtyCol = spec.qtyCol ? shift(spec.qtyCol) : undefined;
+        const statsAccountCol = spec.statsAccountCol
+          ? shift(spec.statsAccountCol)
+          : undefined;
+        const qtyOk = spec.qtyCol ? !!qtyCol : true;
+        const statsOk = spec.statsAccountCol ? !!statsAccountCol : true;
+        if (accountCol && unitRateCol && qtyOk && statsOk) {
+          shifted = {
+            ...spec,
+            accountCol,
+            unitRateCol,
+            qtyCol: qtyCol ?? undefined,
+            statsAccountCol: statsAccountCol ?? undefined,
+          };
+        }
+        break;
+      }
+      case "CUSTOM_MONTHLY": {
+        const firstMonthCol = shift(spec.firstMonthCol);
+        const accountCol = shift(spec.accountCol);
+        if (firstMonthCol && accountCol) {
+          shifted = { ...spec, firstMonthCol, accountCol };
+        }
+        break;
+      }
+    }
+    if (!shifted) continue;
+
+    families.push({
+      ...family,
+      bandCol,
+      totalCol,
+      inputCols: inputCols as string[],
+      spec: shifted,
+    });
+  }
+  return families;
+}
+
+/**
+ * The Social-Security block: seven margin/rate pairs, the two caps and the
+ * account, stated in 3.6.3 columns. Never imported — only described.
+ */
+const SS_COLUMNS = {
+  firstMargin: "EY",
+  monthlyCap: "FM",
+  yearlyCap: "FN",
+  account: "FO",
+} as const;
+const SS_BRACKETS = 7;
 
 /**
  * Column references inside a formula. Deliberately narrow: it must not mistake
@@ -519,7 +619,11 @@ export interface PlannedPosition {
 
 export interface ImportPlan {
   preview: LegacyImportPreview;
-  /** Dependency-ordered: a block's composite base is always created first. */
+  /**
+   * Dependency-ordered: a block's composite base is always created first.
+   * EMPTY when the blocks are not being imported — `preview.blocks` still
+   * describes what was found, but nothing here means nothing written.
+   */
   blocks: PlannedBlock[];
   positions: PlannedPosition[];
   manualRows: ManualInputRowInput[];
@@ -595,6 +699,7 @@ function resolveMultiplierBase(
   rateCol: string,
   totalCol: string,
   label: string,
+  meaning: Record<string, string>,
   warnings: string[]
 ): { keys: string[]; includesSalary: boolean } {
   const formula = workbook.formulas[totalCol];
@@ -615,10 +720,10 @@ function resolveMultiplierBase(
   const unresolved: string[] = [];
 
   for (const token of tokens) {
-    const meaning = TOTAL_COLUMN_MEANING[token];
-    if (meaning === "@salary") includesSalary = true;
-    else if (meaning && meaning !== family.key) keys.push(meaning);
-    else if (!meaning) unresolved.push(token);
+    const resolved = meaning[token];
+    if (resolved === "@salary") includesSalary = true;
+    else if (resolved && resolved !== family.key) keys.push(resolved);
+    else if (!resolved) unresolved.push(token);
   }
 
   if (unresolved.length > 0) {
@@ -652,13 +757,16 @@ function describeBase(
 
 function planBlocks(
   workbook: LegacyWorkbook,
+  layout: LegacyLayout,
   warnings: string[]
 ): { blocks: PlannedBlock[]; skipped: string[] } {
   const skipped: string[] = [];
   const labelByKey = new Map<string, string>();
   const planned: PlannedBlock[] = [];
+  const families = familiesForLayout(layout);
+  const meaning = totalColumnMeaning(families);
 
-  for (const family of FAMILIES) {
+  for (const family of families) {
     const label = bandLabel(workbook, family);
     const rows = usedRows(workbook, family);
     if (rows.length === 0) {
@@ -689,6 +797,7 @@ function planBlocks(
           spec.rateCol,
           family.totalCol,
           label,
+          meaning,
           warnings
         );
         baseBlockKeys = resolved.keys;
@@ -1206,21 +1315,39 @@ function planAllocations(
 // Social Security — reported, never imported
 // ---------------------------------------------------------------------------
 
-/** Social-Security columns: seven margin/rate pairs, then the two caps. */
-const SS_FIRST_MARGIN_COL = "EY";
-const SS_MONTHLY_CAP_COL = "FM";
-const SS_YEARLY_CAP_COL = "FN";
-const SS_ACCOUNT_COL = "FO";
-const SS_BRACKETS = 7;
-
 /**
  * The old tool holds the NI/SS bands PER ASSOCIATE, so one workbook can carry
  * several schemes; Kairos runs one scheme for the whole hotel. Rather than pick
  * one and silently mis-charge everyone else, describe what is in the file and
  * leave the setup to the user.
+ *
+ * Reads through the layout like everything else past DR: on 3.6.1 these columns
+ * are seven to the left, and the fixed map would have reported Custom-2 monthly
+ * amounts as tax margins.
  */
-function describeSocialSecurity(workbook: LegacyWorkbook): string[] {
-  const first = columnIndex(SS_FIRST_MARGIN_COL);
+function describeSocialSecurity(
+  workbook: LegacyWorkbook,
+  layout: LegacyLayout
+): string[] {
+  // These columns sit past DR, so an unidentified layout cannot place them
+  // either. A guessed set of tax bands reads as fact and would be acted on —
+  // saying nothing is the only honest option.
+  if (!layout.blocksReadable) {
+    return [
+      `Social Security / NI could not be read: it sits in the same part of the ` +
+        `sheet as the benefit bands, which this file's layout does not let the ` +
+        `import identify. Set it up from Positions → add a Social Security ` +
+        `block, using the bands in your workbook.`,
+    ];
+  }
+
+  const firstMargin = mapColumn(SS_COLUMNS.firstMargin, layout);
+  const monthlyCapCol = mapColumn(SS_COLUMNS.monthlyCap, layout);
+  const yearlyCapCol = mapColumn(SS_COLUMNS.yearlyCap, layout);
+  const accountCol = mapColumn(SS_COLUMNS.account, layout);
+  if (!firstMargin || !monthlyCapCol || !yearlyCapCol || !accountCol) return [];
+
+  const first = columnIndex(firstMargin);
   const signatures = new Map<string, number>();
 
   for (const row of workbook.associates) {
@@ -1232,13 +1359,13 @@ function describeSocialSecurity(workbook: LegacyWorkbook): string[] {
       brackets.push(`${(rate * 100).toFixed(3)}% above ${margin}`);
     }
     if (brackets.length === 0) continue;
-    const monthlyCap = num(row.cells[SS_MONTHLY_CAP_COL]);
-    const yearlyCap = num(row.cells[SS_YEARLY_CAP_COL]);
+    const monthlyCap = num(row.cells[monthlyCapCol]);
+    const yearlyCap = num(row.cells[yearlyCapCol]);
     const caps = [
       monthlyCap ? `monthly cap ${monthlyCap}` : null,
       yearlyCap ? `yearly cap ${yearlyCap}` : null,
     ].filter(Boolean);
-    const account = toAccountCode(row.cells[SS_ACCOUNT_COL]);
+    const account = toAccountCode(row.cells[accountCol]);
     const signature = `${brackets.join("; ")}${
       caps.length ? ` (${caps.join(", ")})` : ""
     } → ${account || "no account"}`;
@@ -1305,8 +1432,32 @@ export function analyzeWorkbook(
   context: AnalyzeContext
 ): ImportPlan {
   const warnings: string[] = [];
+  const layout = resolveLayout(workbook, context.options.version);
+  warnings.push(...layout.notes);
 
-  const { blocks, skipped } = planBlocks(workbook, warnings);
+  // Blocks are read whenever the layout is known, whether or not they are being
+  // imported: the preview lists them either way, so a user who leaves the
+  // toggle off still gets the band names, bases and accounts to build from.
+  //
+  // Their fidelity warnings are collected separately and only surfaced when the
+  // blocks are actually created — "Pension keeps a per-row account column"
+  // describes a block that would otherwise not exist.
+  const blockWarnings: string[] = [];
+  const detected = layout.blocksReadable
+    ? planBlocks(workbook, layout, blockWarnings)
+    : { blocks: [], skipped: [] };
+
+  const importBlocks = context.options.blocks && layout.blocksReadable;
+  const blocksOmitted: LegacyBlocksOmission | null = importBlocks
+    ? null
+    : layout.blocksReadable
+      ? "not_requested"
+      : "layout_unknown";
+  if (importBlocks) warnings.push(...blockWarnings);
+
+  const blocks = importBlocks ? detected.blocks : [];
+  const skipped = detected.skipped;
+
   const positions = planPositions(
     workbook,
     context.departmentNameByCode,
@@ -1319,7 +1470,7 @@ export function analyzeWorkbook(
     ? planAllocations(workbook, warnings)
     : [];
 
-  warnings.push(...describeSocialSecurity(workbook));
+  warnings.push(...describeSocialSecurity(workbook, layout));
 
   // Two columns are deliberately left behind; say so rather than let a user
   // discover it on the grid.
@@ -1327,6 +1478,15 @@ export function analyzeWorkbook(
     `The Cluster column was not imported — clusters need weights and member ` +
       `hotels that the workbook does not carry. Set them up on the Clusters page.`
   );
+
+  if (blocksOmitted === "not_requested" && detected.blocks.length > 0) {
+    warnings.push(
+      `${detected.blocks.length} benefit block(s) were found but not imported ` +
+        `— "Benefit blocks" is switched off. They are listed above with the ` +
+        `base and account each one uses, so you can build them on the ` +
+        `Positions page and paste the values in from Excel.`
+    );
+  }
 
   if (blocks.some((block) => block.input.spread === "DAYS")) {
     warnings.push(
@@ -1342,8 +1502,14 @@ export function analyzeWorkbook(
     fileHotelName: workbook.hotelName,
     fileOu: workbook.ou,
     fileYear: workbook.enteredYear,
+    fileVersion: layout.declaredVersion,
+    resolvedVersion: layout.version,
+    versionSource: layout.source,
+    versionNotes: layout.notes,
     positionCount: positions.length,
-    blocks: blocks.map((block) => block.preview),
+    // Everything found, so an unimported band is still a recipe.
+    blocks: detected.blocks.map((block) => block.preview),
+    blocksOmitted,
     skippedBlocks: skipped,
     manualInputRowCount: manualRows.length,
     allocationNames: allocations.map((allocation) => allocation.name),

@@ -34,6 +34,9 @@ import CallSplitIcon from "@mui/icons-material/CallSplit";
 import AssessmentIcon from "@mui/icons-material/Assessment";
 import CloudSyncIcon from "@mui/icons-material/CloudSync";
 import ApartmentIcon from "@mui/icons-material/Apartment";
+import GroupsIcon from "@mui/icons-material/Groups";
+import SummarizeIcon from "@mui/icons-material/Summarize";
+import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import LogoutIcon from "@mui/icons-material/Logout";
@@ -90,6 +93,92 @@ const UserInfoSection = styled(Box)(({ theme }) => ({
   alignItems: 'center',
   gap: theme.spacing(2),
 }));
+
+// The drawer, as data. Sections are ordered the way a hotel actually works
+// through the tool — set the shape of the estate up, key the numbers in, move
+// them to and from the BST, then read them back out.
+//
+// `path` omitted means the row is not navigable: `comingSoon` rows are the
+// reports we have designed but not built, and `hint` is the plain caption at
+// the end of a section. Both are deliberately un-clickable rather than routed
+// to an empty page — a dead-end screen reads as a bug, a greyed row reads as a
+// roadmap.
+type NavItem = {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  path?: string;
+  comingSoon?: boolean;
+  hint?: boolean;
+};
+
+type NavSection = {
+  key: string;
+  // Untitled sections render bare — only Home, which needs no explaining.
+  title?: string;
+  items: NavItem[];
+};
+
+const NAV_SECTIONS: NavSection[] = [
+  {
+    key: "top",
+    items: [{ key: "home", label: "Home", icon: <HomeIcon />, path: "home" }],
+  },
+  {
+    // Both are estate-shape questions answered once per year and then left
+    // alone, and both are legitimately skippable — a single hotel never opens
+    // Clusters. They sit above the daily work so they are found on day one and
+    // ignored thereafter.
+    key: "setup",
+    title: "Setup",
+    items: [
+      { key: "clusters", label: "Clusters", icon: <HubIcon />, path: "clusters" },
+      { key: "kpi-drivers", label: "KPI Drivers", icon: <InsightsIcon />, path: "kpi-drivers" },
+    ],
+  },
+  {
+    // Positions leads: it is where the overwhelming majority of the time in
+    // this tool is spent. It is not styled any heavier than its neighbours —
+    // bolding one row would read as "selected" and fight the real active state.
+    key: "data-input",
+    title: "Data Input",
+    items: [
+      { key: "positions", label: "Positions", icon: <BadgeIcon />, path: "positions" },
+      { key: "manual-input", label: "Manual Input", icon: <EditNoteIcon />, path: "manual-input" },
+      { key: "allocations", label: "Allocations", icon: <CallSplitIcon />, path: "allocations" },
+    ],
+  },
+  {
+    // Grouped by the system on the other end rather than by pipeline order:
+    // everything here is a conversation with the BST workbook. Results sits
+    // between the two halves because it is exactly what a push sends.
+    key: "bst",
+    title: "BST",
+    items: [
+      { key: "budget-pull", label: "BST Pull", icon: <FileDownloadIcon />, path: "budget-pull" },
+      { key: "results", label: "Results", icon: <AssessmentIcon />, path: "results" },
+      { key: "bst-push", label: "BST Push", icon: <FileUploadIcon />, path: "bst-push" },
+    ],
+  },
+  {
+    key: "reports",
+    title: "Reports",
+    items: [
+      { key: "staffing-overview", label: "Staffing Overview", icon: <GroupsIcon />, comingSoon: true },
+      { key: "summary-reporting", label: "Summary Reporting", icon: <SummarizeIcon />, comingSoon: true },
+      { key: "more-reports", label: "More reports to come", icon: <MoreHorizIcon />, hint: true },
+    ],
+  },
+  {
+    // Deliberately last and on its own: everything above works offline and
+    // always has. Sync is the one tab that talks to a server, and a hotel that
+    // never opens it loses nothing. Delegation has no entry of its own — it is
+    // always ABOUT a plan, so it is reached from a plan's card here.
+    key: "online",
+    title: "Online",
+    items: [{ key: "sync", label: "Sync", icon: <CloudSyncIcon />, path: "sync" }],
+  },
+];
 
 export default function SignedInLanding() {
   const drawerWidth = 240;
@@ -220,6 +309,40 @@ export default function SignedInLanding() {
   const listItemButtonStyle = [{ minHeight: 48, px: 2.5 }, open ? { justifyContent: "initial" } : { justifyContent: "center" }];
   const listItemIconStyle = [{ minWidth: 0, justifyContent: "center" }, open ? { mr: 3 } : { mr: "auto" }];
   const listItemTextStyle = [open ? { opacity: 1 } : { opacity: 0 }];
+
+  // Section headings are labels, not rows: quiet, tight to the group they
+  // introduce, and indented to the same gutter as the item text below them.
+  const navSectionHeaderStyle = {
+    display: "block",
+    px: 2.5,
+    pt: 2,
+    pb: 0.5,
+    color: "text.secondary",
+    fontWeight: 700,
+    fontSize: "0.6875rem",
+    letterSpacing: "0.08em",
+    lineHeight: 1.6,
+  };
+
+  // Sized down from the default chip so it reads as an annotation on the row
+  // rather than a second control competing with it.
+  const comingSoonChipStyle = {
+    height: 18,
+    fontSize: "0.625rem",
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    color: "text.secondary",
+    flexShrink: 0,
+    ml: 1,
+    "& .MuiChip-label": { px: 0.75 },
+  };
+
+  const navHintStyle = {
+    minHeight: 36,
+    px: 2.5,
+    gap: 1,
+    color: "text.disabled",
+  };
 
 
 const handleMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
@@ -688,97 +811,72 @@ const handleSignOut = useCallback(async () => {
         </DrawerHeader>
         <Divider />
         <List>
-          {/* Main Navigation */}
-          <ListItem key="home" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/home")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <HomeIcon />
-              </ListItemIcon>
-              <ListItemText primary="Home" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="budget-pull" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/budget-pull")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <FileDownloadIcon />
-              </ListItemIcon>
-              <ListItemText primary="BST Pull" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="kpi-drivers" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/kpi-drivers")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <InsightsIcon />
-              </ListItemIcon>
-              <ListItemText primary="KPI Drivers" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="manual-input" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/manual-input")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <EditNoteIcon />
-              </ListItemIcon>
-              <ListItemText primary="Manual Input" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          {/* Clusters sits with the configuration tabs, right before the
-              Positions grid that consumes them. */}
-          <ListItem key="clusters" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/clusters")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <HubIcon />
-              </ListItemIcon>
-              <ListItemText primary="Clusters" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="positions" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/positions")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <BadgeIcon />
-              </ListItemIcon>
-              <ListItemText primary="Positions" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="allocations" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/allocations")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <CallSplitIcon />
-              </ListItemIcon>
-              <ListItemText primary="Allocations" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          <ListItem key="results" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/results")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <AssessmentIcon />
-              </ListItemIcon>
-              <ListItemText primary="Results" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          {/* Last in the pipeline: the Results rows are what a push sends, so
-              the push sits directly after them. */}
-          <ListItem key="bst-push" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/bst-push")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <FileUploadIcon />
-              </ListItemIcon>
-              <ListItemText primary="BST Push" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
-          {/* Last, and deliberately apart from the pipeline above it: everything
-              before this point works offline and always has. Sync is the one tab
-              that talks to a server, and a hotel that never opens it loses
-              nothing. Delegation has no entry of its own — it is always ABOUT a
-              plan, so it is reached from a plan's card here. */}
-          <Divider sx={{ my: 1 }} />
-          <ListItem key="sync" disablePadding sx={{ display: "block" }}>
-            <ListItemButton sx={listItemButtonStyle} onClick={() => navigate("/signed-in-landing/sync")}>
-              <ListItemIcon sx={listItemIconStyle}>
-                <CloudSyncIcon />
-              </ListItemIcon>
-              <ListItemText primary="Sync" sx={listItemTextStyle} />
-            </ListItemButton>
-          </ListItem>
+          {NAV_SECTIONS.map((section, sectionIndex) => (
+            <React.Fragment key={section.key}>
+              {/* The section break has to survive the rail. Expanded, the
+                  heading carries it; collapsed there is no room for a label, so
+                  a rule stands in — otherwise the icons run together into one
+                  undifferentiated column. */}
+              {sectionIndex > 0 &&
+                (open ? (
+                  <Typography variant="overline" sx={navSectionHeaderStyle}>
+                    {section.title}
+                  </Typography>
+                ) : (
+                  <Divider sx={{ my: 1 }} />
+                ))}
+              {section.items.map((item) =>
+                item.hint ? (
+                  // Not a control — a sign-off for the section. Pointless in
+                  // the rail, where there is no text to read.
+                  open && (
+                    <ListItem key={item.key} sx={navHintStyle}>
+                      <MoreHorizIcon fontSize="small" sx={{ opacity: 0.6 }} />
+                      <Typography variant="caption" sx={{ fontStyle: "italic" }}>
+                        {item.label}
+                      </Typography>
+                    </ListItem>
+                  )
+                ) : (
+                  <ListItem key={item.key} disablePadding sx={{ display: "block" }}>
+                    {item.comingSoon ? (
+                      // A disabled button swallows its own hover events, so the
+                      // tooltip has to hang off a wrapper that is still live.
+                      <Tooltip title="Coming soon" placement="right">
+                        <span>
+                          <ListItemButton disabled sx={listItemButtonStyle}>
+                            <ListItemIcon sx={listItemIconStyle}>{item.icon}</ListItemIcon>
+                            {/* These labels are the longest in the drawer and
+                                share their row with the chip. Dropped a step in
+                                size so "Staffing Overview" still fits on one
+                                line at 240px; noWrap is the belt-and-braces so a
+                                longer future report clips instead of reflowing
+                                the row to two lines. */}
+                            <ListItemText
+                              primary={item.label}
+                              sx={listItemTextStyle}
+                              slotProps={{ primary: { noWrap: true, sx: { fontSize: "0.8125rem" } } }}
+                            />
+                            {open && (
+                              <Chip label="Soon" size="small" variant="outlined" sx={comingSoonChipStyle} />
+                            )}
+                          </ListItemButton>
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <ListItemButton
+                        sx={listItemButtonStyle}
+                        onClick={() => navigate(`/signed-in-landing/${item.path}`)}
+                      >
+                        <ListItemIcon sx={listItemIconStyle}>{item.icon}</ListItemIcon>
+                        <ListItemText primary={item.label} sx={listItemTextStyle} />
+                      </ListItemButton>
+                    )}
+                  </ListItem>
+                )
+              )}
+            </React.Fragment>
+          ))}
         </List>
       </Drawer>
       {/* minWidth: 0 is load-bearing. A flex item's automatic minimum is its

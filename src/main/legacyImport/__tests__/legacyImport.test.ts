@@ -31,7 +31,10 @@ import { listAllocations } from "../../allocations/repo";
 import { listRows as listManualRows } from "../../manualInput/repo";
 import { loadScenarioValues } from "../../positions/positionsRepo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
-import { DEFAULT_LEGACY_IMPORT_OPTIONS } from "../../../shared/legacyImport/ipc";
+import {
+  DEFAULT_LEGACY_IMPORT_OPTIONS,
+  LegacyImportOptions,
+} from "../../../shared/legacyImport/ipc";
 import type { CalendarYear } from "../../../shared/calendar";
 import type { PositionDefaults } from "../../../shared/positionDefaults";
 
@@ -43,11 +46,18 @@ import {
   analyzeWorkbook,
   columnIndex,
   columnLetter,
+  familiesForLayout,
   splitPayClass,
   toAccountCode,
   toDepartmentCode,
   toIsoDate,
 } from "../analyze";
+import {
+  coreAnchorMismatches,
+  isUnreadableLayout,
+  mapColumn,
+  resolveLayout,
+} from "../layout";
 import { commitImportPlan } from "../commit";
 
 type Db = InstanceType<typeof Database>;
@@ -139,10 +149,27 @@ function associate(options: AssociateOptions): Record<string, Cell> {
   };
 }
 
-/** Row-2 band names and row-3 column names, as the real sheet carries them. */
+/**
+ * Row-2 band names and row-3 column names, as the real sheet carries them.
+ *
+ * The row-3 entries are not decoration: `layout.ts` reads DR to tell a 3.6.3
+ * file from a 3.6.1 one, and checks the spread of core anchors (A/E/O/R/AE/AU/
+ * AZ/BA/BR) to refuse a workbook whose whole layout has moved.
+ */
 const HEADERS: Record<string, Cell> = {
   A2: "Associate Details",
   A3: "Hiring Date",
+  E3: "Department",
+  O3: "HC",
+  R3: "Jan",
+  AE3: "Monthly Basic Salary",
+  AU3: "Increase Month",
+  AZ3: "Budget Year Basic Salary",
+  BA3: "CONTRACT - Yrly Vacation Days",
+  BR3: "Benefits account Code",
+  DR3: "Monthly Hours",
+  DS3: "Cost Per Hour",
+  DY3: "Custom 1 - Jan",
   BT2: "Pension",
   BW2: "Indemnity / End of Service",
   CA2: "Stock Options",
@@ -161,10 +188,54 @@ const HEADERS: Record<string, Cell> = {
 };
 
 /**
+ * Restate a 3.6.3 Associate Details sheet in 3.6.1's columns.
+ *
+ * 3.6.1 has no Overtime band, so its DR..DX ARE 3.6.3's Custom-1 months and
+ * everything from DY onward sits seven columns left. Deriving the older fixture
+ * from the newer one — rather than hand-writing a second cell map — is what
+ * makes "both versions produce identical blocks" a real assertion: if the shift
+ * in `layout.ts` were wrong, the two would disagree.
+ */
+function to361(cells: Record<string, Cell>): Record<string, Cell> {
+  const OVERTIME_FIRST = columnIndex("DR");
+  const AFTER_OVERTIME = columnIndex("DY");
+  const out: Record<string, Cell> = {};
+
+  for (const [address, value] of Object.entries(cells)) {
+    const match = address.match(/^([A-Z]+)(\d+)$/);
+    if (!match) continue;
+    const [, letter, row] = match;
+    const index = columnIndex(letter);
+    if (index < OVERTIME_FIRST) {
+      out[address] = value;
+      continue;
+    }
+    // The Overtime band has no home in 3.6.1 — it is not moved, it is absent.
+    if (index < AFTER_OVERTIME) continue;
+    out[`${columnLetter(index - (AFTER_OVERTIME - OVERTIME_FIRST))}${row}`] =
+      value;
+  }
+  return out;
+}
+
+interface WorkbookOptions {
+  /** Which layout to write the Associate Details sheet in. */
+  version?: "3.6.1" | "3.6.3";
+  /** Omit the Settings version cells, as an unbadged copy would. */
+  omitVersionCell?: boolean;
+  /** Extra Settings cells / overrides. */
+  settings?: Record<string, Cell>;
+}
+
+/**
  * Two associates: one on every band, one salaried nine-month starter, so the
  * working-months arithmetic of the daily-spread bands is exercised.
  */
-function buildWorkbook(overrides: Record<string, Cell> = {}): Buffer {
+function buildWorkbook(
+  overrides: Record<string, Cell> = {},
+  workbookOptions: WorkbookOptions = {}
+): Buffer {
+  const version = workbookOptions.version ?? "3.6.3";
   const associateCells: Record<string, Cell> = {
     ...HEADERS,
     ...associate({
@@ -228,7 +299,11 @@ function buildWorkbook(overrides: Record<string, Cell> = {}): Buffer {
   };
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheet(associateCells), "Associate Details");
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheet(version === "3.6.1" ? to361(associateCells) : associateCells),
+    "Associate Details"
+  );
   XLSX.utils.book_append_sheet(
     wb,
     sheet({
@@ -238,6 +313,14 @@ function buildWorkbook(overrides: Record<string, Cell> = {}): Buffer {
       B9: true,
       A31: "Full Time Hours (w)",
       B31: 40,
+      ...(workbookOptions.omitVersionCell
+        ? {}
+        : { A29: "Version", B29: `Version ${version}`, C29: `_V${version}` }),
+      // The Social-Security inclusion list gains its Overtime row with the band.
+      ...(version === "3.6.3"
+        ? { A37: "Overtime", B37: false, C37: "CN_A20" }
+        : {}),
+      ...(workbookOptions.settings ?? {}),
     }),
     "Settings"
   );
@@ -327,18 +410,35 @@ function buildWorkbook(overrides: Record<string, Cell> = {}): Buffer {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
-function parseFixture(overrides?: Record<string, Cell>) {
-  return parseLegacyWorkbook(buildWorkbook(overrides), "fixture.xlsm");
+function parseFixture(
+  overrides?: Record<string, Cell>,
+  workbookOptions?: WorkbookOptions
+) {
+  return parseLegacyWorkbook(
+    buildWorkbook(overrides, workbookOptions),
+    "fixture.xlsm"
+  );
 }
 
-function planFixture(overrides?: Record<string, Cell>) {
-  return analyzeWorkbook(parseFixture(overrides), {
+const DEPARTMENTS = new Map([
+  ["D0400", "Information & Telecom Systems"],
+  ["D0430", "Engineering"],
+]);
+
+/**
+ * Blocks are ON here, unlike the app default. Most of this file is about how a
+ * band becomes a block, which cannot be asserted with the toggle off; the
+ * toggle's own behaviour has its own describe block below.
+ */
+function planFixture(
+  overrides?: Record<string, Cell>,
+  options: Partial<LegacyImportOptions> = {},
+  workbookOptions?: WorkbookOptions
+) {
+  return analyzeWorkbook(parseFixture(overrides, workbookOptions), {
     filePath: "C:/tmp/fixture.xlsm",
-    options: DEFAULT_LEGACY_IMPORT_OPTIONS,
-    departmentNameByCode: new Map([
-      ["D0400", "Information & Telecom Systems"],
-      ["D0430", "Engineering"],
-    ]),
+    options: { ...DEFAULT_LEGACY_IMPORT_OPTIONS, blocks: true, ...options },
+    departmentNameByCode: DEPARTMENTS,
   });
 }
 
@@ -638,16 +738,278 @@ describe("analyzeWorkbook — positions, manual input and allocations", () => {
     const workbook = parseFixture();
     const plan = analyzeWorkbook(workbook, {
       filePath: "x",
-      options: { calendarAndHours: false, manualInput: false, allocations: false },
+      options: {
+        calendarAndHours: false,
+        manualInput: false,
+        allocations: false,
+        blocks: false,
+        version: "auto",
+      },
       departmentNameByCode: new Map(),
     });
     expect(plan.manualRows).toEqual([]);
     expect(plan.allocations).toEqual([]);
     expect(plan.publicHolidaysByMonth).toBeNull();
     expect(plan.weeklyHours).toBeNull();
-    // Positions and blocks are not optional — they are the import.
+    // Positions are not optional — they are the import.
     expect(plan.positions).toHaveLength(2);
-    expect(plan.blocks.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Version layouts
+// ---------------------------------------------------------------------------
+
+describe("layout detection", () => {
+  it("reads the version off the file", () => {
+    expect(parseFixture().declaredVersion).toBe("3.6.3");
+    expect(parseFixture(undefined, { version: "3.6.1" }).declaredVersion).toBe(
+      "3.6.1"
+    );
+    // Only 3.6.3 carries the Overtime row of the Social-Security list.
+    expect(parseFixture().hasOvertimeSetting).toBe(true);
+    expect(
+      parseFixture(undefined, { version: "3.6.1" }).hasOvertimeSetting
+    ).toBe(false);
+  });
+
+  it("identifies the layout from the sheet's own headings", () => {
+    const newer = resolveLayout(parseFixture());
+    expect(newer).toMatchObject({
+      version: "3.6.3",
+      hasOvertime: true,
+      source: "headers",
+      blocksReadable: true,
+    });
+
+    const older = resolveLayout(parseFixture(undefined, { version: "3.6.1" }));
+    expect(older).toMatchObject({
+      version: "3.6.1",
+      hasOvertime: false,
+      source: "headers",
+      blocksReadable: true,
+    });
+    expect(older.notes).toEqual([]);
+  });
+
+  it("falls back to the version cell when the headings are unfamiliar", () => {
+    // Row 2 and row 3 at DR wiped: nothing to read the layout from but B29.
+    const layout = resolveLayout(
+      parseFixture({ DR2: "", DR3: "", DY2: "", DY3: "" })
+    );
+    expect(layout.source).toBe("version-cell");
+    expect(layout.version).toBe("3.6.3");
+    expect(layout.notes.join(" ")).toMatch(/not recognised/);
+  });
+
+  it("gives up on the block region rather than guess it", () => {
+    const layout = resolveLayout(
+      parseFixture({ DR2: "", DR3: "", DY2: "", DY3: "" }, {
+        omitVersionCell: true,
+      })
+    );
+    expect(layout.source).toBe("unknown");
+    expect(layout.blocksReadable).toBe(false);
+    expect(layout.notes.join(" ")).toMatch(/Positions.*still import/s);
+  });
+
+  it("lets the user force a version, and says when that contradicts the file", () => {
+    const forced = resolveLayout(parseFixture(), "3.6.1");
+    expect(forced).toMatchObject({ version: "3.6.1", hasOvertime: false, source: "forced" });
+    expect(forced.notes.join(" ")).toMatch(/You selected 3\.6\.1/);
+
+    // Agreeing with the file is not worth a note.
+    expect(resolveLayout(parseFixture(), "3.6.3").notes).toEqual([]);
+  });
+
+  it("trusts the columns over a version cell that disagrees", () => {
+    // 3.6.1 columns badged as 3.6.3 — what pasting into a new template gives.
+    const workbook = parseFixture(undefined, { version: "3.6.1" });
+    const layout = resolveLayout({ ...workbook, declaredVersion: "3.6.3" });
+    expect(layout.version).toBe("3.6.1");
+    expect(layout.source).toBe("headers");
+    expect(layout.notes.join(" ")).toMatch(/says it is version 3\.6\.3/);
+  });
+
+  it("maps a 3.6.3 column onto the same content in 3.6.1", () => {
+    const older = resolveLayout(parseFixture(undefined, { version: "3.6.1" }));
+    // Before the Overtime band: untouched.
+    expect(mapColumn("BT", older)).toBe("BT");
+    expect(mapColumn("DQ", older)).toBe("DQ");
+    // The band itself has no home there.
+    expect(mapColumn("DR", older)).toBeNull();
+    expect(mapColumn("DX", older)).toBeNull();
+    // After it: seven to the left.
+    expect(mapColumn("DY", older)).toBe("DR");
+    expect(mapColumn("EY", older)).toBe("ER");
+    expect(mapColumn("FO", older)).toBe("FH");
+
+    const newer = resolveLayout(parseFixture());
+    for (const column of ["BT", "DR", "DY", "EY", "FO"]) {
+      expect(mapColumn(column, newer)).toBe(column);
+    }
+  });
+
+  it("drops the Overtime family on a layout that has no Overtime band", () => {
+    const older = resolveLayout(parseFixture(undefined, { version: "3.6.1" }));
+    const keys = familiesForLayout(older).map((family) => family.key);
+    expect(keys).not.toContain("overtime");
+    // Everything else survives, in its own columns.
+    expect(keys).toContain("customMonthly1");
+    const custom1 = familiesForLayout(older).find(
+      (family) => family.key === "customMonthly1"
+    )!;
+    expect(custom1.bandCol).toBe("DR");
+    expect(custom1.totalCol).toBe("ED");
+  });
+});
+
+describe("analyzeWorkbook — 3.6.1 layout", () => {
+  /** The same logical file, written in each version's columns. */
+  function bothVersions(overrides?: Record<string, Cell>) {
+    return {
+      newer: planFixture(overrides, {}, { version: "3.6.3" }),
+      older: planFixture(overrides, {}, { version: "3.6.1" }),
+    };
+  }
+
+  it("produces identical blocks whichever layout the file uses", () => {
+    const { newer, older } = bothVersions();
+    expect(older.blocks.map((block) => block.key)).toEqual(
+      newer.blocks.map((block) => block.key)
+    );
+    expect(older.blocks.map((block) => block.preview)).toEqual(
+      newer.blocks.map((block) => block.preview)
+    );
+    // …down to the per-row values, which is where a bad shift would show up.
+    for (const [index, block] of older.blocks.entries()) {
+      expect([...block.valuesByRow.entries()]).toEqual([
+        ...newer.blocks[index].valuesByRow.entries(),
+      ]);
+    }
+  });
+
+  it("produces identical positions whichever layout the file uses", () => {
+    const { newer, older } = bothVersions();
+    expect(older.positions).toEqual(newer.positions);
+  });
+
+  it("reads Social Security from the columns that version actually uses", () => {
+    const { newer, older } = bothVersions();
+    const note = (plan: typeof newer) =>
+      plan.warnings.find((warning) => warning.startsWith("Social Security"));
+    expect(note(older)).toBeDefined();
+    expect(note(older)).toEqual(note(newer));
+    // The 3.6.1 rates live in ER..; reading EY there would report a Custom-2
+    // monthly amount as a tax margin.
+    expect(note(older)).toContain("4.550%");
+  });
+
+  it("never invents an Overtime block on a file that has no Overtime band", () => {
+    // Data in DR/DS, which on 3.6.1 is Custom 1's January and February. The old
+    // fixed map read exactly this as overtime hours × cost per hour.
+    const older = planFixture(undefined, {}, { version: "3.6.1" });
+    expect(older.blocks.some((block) => block.key === "overtime")).toBe(false);
+    expect(older.preview.skippedBlocks).not.toContain("Overtime - Flat Spread");
+  });
+
+  it("reports the version it read the file as", () => {
+    const older = planFixture(undefined, {}, { version: "3.6.1" });
+    expect(older.preview.resolvedVersion).toBe("3.6.1");
+    expect(older.preview.fileVersion).toBe("3.6.1");
+    expect(older.preview.versionSource).toBe("headers");
+  });
+});
+
+describe("core-layout anchors", () => {
+  it("passes a workbook whose core columns are where they belong", () => {
+    expect(coreAnchorMismatches(parseFixture())).toEqual([]);
+    expect(isUnreadableLayout(parseFixture())).toBe(false);
+    expect(
+      coreAnchorMismatches(parseFixture(undefined, { version: "3.6.1" }))
+    ).toEqual([]);
+  });
+
+  it("treats a blank heading as unknown, not as wrong", () => {
+    // A workbook stripped of its header rows still imports; absence is not
+    // evidence that the layout moved.
+    expect(coreAnchorMismatches(parseFixture({ AE3: "", AZ3: "" }))).toEqual([]);
+  });
+
+  it("tolerates one renamed heading but not a shifted layout", () => {
+    expect(
+      coreAnchorMismatches(parseFixture({ AE3: "Base Pay Monthly" }))
+    ).toHaveLength(1);
+    expect(isUnreadableLayout(parseFixture({ AE3: "Base Pay Monthly" }))).toBe(
+      false
+    );
+
+    // Two or more disagreeing means the columns themselves have moved.
+    const shifted = parseFixture({
+      AE3: "Increase Month",
+      AZ3: "Something Else",
+      BA3: "Not Vacation Days",
+    });
+    expect(isUnreadableLayout(shifted)).toBe(true);
+  });
+});
+
+describe("the benefit-blocks toggle", () => {
+  it("imports nothing block-shaped when it is off", () => {
+    const plan = planFixture(undefined, { blocks: false });
+    expect(plan.blocks).toEqual([]);
+    expect(plan.preview.blocksOmitted).toBe("not_requested");
+  });
+
+  it("still describes every band it found, so they can be built by hand", () => {
+    const off = planFixture(undefined, { blocks: false });
+    const on = planFixture(undefined, { blocks: true });
+    // The recipe is the same table the import would have created.
+    expect(off.preview.blocks).toEqual(on.preview.blocks);
+    expect(off.preview.blocks.length).toBeGreaterThan(0);
+    const pension = off.preview.blocks.find((b) => b.label === "Pension")!;
+    expect(pension.baseSummary).toBe("Base Salary + Food Allowance");
+    expect(off.warnings.join(" ")).toMatch(/found but not imported/);
+  });
+
+  it("leaves out warnings about blocks it is not creating", () => {
+    // "Pension keeps a per-row account column" describes a block that will not
+    // exist — saying it would send the user looking for something that is not
+    // there.
+    const off = planFixture(undefined, { blocks: false });
+    expect(off.warnings.some((w) => /per-row account column/.test(w))).toBe(
+      false
+    );
+    const on = planFixture(undefined, { blocks: true });
+    expect(on.warnings.some((w) => /per-row account column/.test(w))).toBe(true);
+  });
+
+  it("refuses to import blocks it cannot place, even when asked to", () => {
+    const plan = planFixture(
+      { DR2: "", DR3: "", DY2: "", DY3: "" },
+      { blocks: true },
+      { omitVersionCell: true }
+    );
+    expect(plan.blocks).toEqual([]);
+    expect(plan.preview.blocksOmitted).toBe("layout_unknown");
+    // …and does not offer a recipe read from columns it could not identify.
+    expect(plan.preview.blocks).toEqual([]);
+    // Social Security lives in the same unplaceable stretch of the sheet, so it
+    // must not be described either — a guessed tax band reads as fact.
+    const ss = plan.warnings.find((w) => w.startsWith("Social Security"))!;
+    expect(ss).toMatch(/could not be read/);
+    expect(ss).not.toMatch(/%/);
+    // The rest of the import is unaffected.
+    expect(plan.positions).toHaveLength(2);
+    expect(plan.manualRows).toHaveLength(2);
+  });
+
+  it("leaves positions, manual input and allocations alone either way", () => {
+    const off = planFixture(undefined, { blocks: false });
+    const on = planFixture(undefined, { blocks: true });
+    expect(off.positions).toEqual(on.positions);
+    expect(off.manualRows).toEqual(on.manualRows);
+    expect(off.allocations).toEqual(on.allocations);
   });
 });
 
@@ -788,6 +1150,46 @@ describe("commitImportPlan", () => {
     const report = await run(plan);
     expect(report.warnings).toEqual(plan.warnings);
     expect(report.blocksCreated).toHaveLength(plan.blocks.length);
+  });
+
+  it("writes no blocks and no block values when the toggle is off", async () => {
+    const plan = planFixture(undefined, { blocks: false });
+    const report = await run(plan);
+
+    expect(listBlocks(localDb, OU)).toEqual([]);
+    expect(report.blocksCreated).toEqual([]);
+    expect(report.blocksOmitted).toBe("not_requested");
+    // The report still carries the build-it-yourself list.
+    expect(report.blocksDetected.length).toBeGreaterThan(0);
+    expect(report.resolvedVersion).toBe("3.6.3");
+
+    // The positions land in full — only the benefit values are absent.
+    const values = loadScenarioValues(secureDb, OU, SCENARIO);
+    expect(values.positions).toHaveLength(2);
+    expect(values.componentValues).toEqual([]);
+    expect(values.positions[0].monthlyBaseSalary).toBeGreaterThan(0);
+  });
+
+  it("imports a 3.6.1 workbook to the same blocks as a 3.6.3 one", async () => {
+    await run(planFixture(undefined, {}, { version: "3.6.1" }));
+
+    const blocks = listBlocks(localDb, OU);
+    const byLabel = new Map(blocks.map((block) => [block.label, block]));
+    // The composite base survives the column shift: BV = BT*(AZ+CP).
+    expect(byLabel.get("Pension")!.base).toEqual({
+      kind: "COMPOSITE",
+      includeBaseSalary: true,
+      blockIds: [byLabel.get("Food Allowance")!.id],
+    });
+
+    const values = loadScenarioValues(secureDb, OU, SCENARIO);
+    const first = values.positions.find((p) => p.departmentCode === "D0400")!;
+    const pension = values.componentValues.find(
+      (value) =>
+        value.componentDefId === byLabel.get("Pension")!.costDefId &&
+        value.positionId === first.id
+    )!;
+    expect(pension.rate).toBe(0.0585);
   });
 
   it("does not fail the whole import when an allocation name is taken", async () => {

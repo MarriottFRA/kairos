@@ -21,8 +21,9 @@ export const ALLOCATIONS_SQL = `
       -- JSON array of department_code strings zeroed out before normalizing.
       excluded_departments TEXT NOT NULL DEFAULT '[]',
       -- The account this allocation's split posts to on the Results page, one
-      -- stat row per department carrying the DECIMAL fraction (0.1523, not
-      -- 15.23). '' = not posted, the same "Blank" contract the engine uses for
+      -- stat row per department carrying the PERCENTAGE itself (15.23, not
+      -- 0.1523), in January with zeroes after it -- the BST reads a split as a
+      -- level. '' = not posted, the same "Blank" contract the engine uses for
       -- calculation-only blocks. The legacy workbook also carried a TARGET
       -- DEPARTMENT (the cost's owner); it is deliberately not modelled here —
       -- posting a row per department has no use for it.

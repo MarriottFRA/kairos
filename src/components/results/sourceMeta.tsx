@@ -33,7 +33,7 @@ export const SOURCE_META: Record<
   ALLOCATION: {
     label: "alloc",
     color: "info",
-    hint: "An allocation split, posted as a decimal share of 1 (0.1523 = 15.23%).",
+    hint: "An allocation split, posted as a share out of 100 (15.23 = 15.23%) in January.",
   },
   BUYOUT: {
     label: "buyout",

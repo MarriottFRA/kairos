@@ -86,9 +86,11 @@ export interface AllocationDto {
   excludedDepartments: string[];
   /**
    * The account this allocation's split posts to on the Results page: one stat
-   * row per department carrying the DECIMAL fraction (0.1523, not 15.23), the
-   * same value in all 12 months. '' = not posted — the same "Blank" contract
-   * the engine applies to calculation-only blocks.
+   * row per department carrying the PERCENTAGE itself (15.23, not 0.1523, so a
+   * department's splits add to 100), in January with zeroes after it — the BST
+   * reads a split as a level, i.e. the running sum of its months. '' = not
+   * posted, the same "Blank" contract the engine applies to calculation-only
+   * blocks.
    */
   injectAccount: string;
   sortOrder: number;
@@ -104,15 +106,6 @@ export interface AllocationInput {
   excludedDepartments: string[];
   /** Omit or blank = the split is computed but not posted to Results. */
   injectAccount?: string;
-}
-
-/**
- * Percent (what the Allocations grid shows) → the decimal the Results page and
- * the BST carry. Kept here beside the contract so the projector and any future
- * consumer cannot drift on the factor.
- */
-export function allocationPercentToDecimal(percent: number): number {
-  return Number.isFinite(percent) ? percent / 100 : 0;
 }
 
 /** One department row of the spread grid. `values` maps allocationId → percent. */

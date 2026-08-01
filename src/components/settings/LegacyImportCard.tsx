@@ -26,8 +26,10 @@ import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
 import FormControlLabel from "@mui/material/FormControlLabel";
+import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
+import TextField from "@mui/material/TextField";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
@@ -37,11 +39,15 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 
 import {
+  BLOCKS_OMISSION_LABEL,
   DEFAULT_LEGACY_IMPORT_OPTIONS,
   LegacyBlockPreview,
+  LegacyBlocksOmission,
   LegacyImportOptions,
   LegacyImportPreview,
   LegacyImportReport,
+  LegacyVersionChoice,
+  SUPPORTED_LEGACY_VERSIONS,
 } from "../../shared/legacyImport/ipc";
 import {
   commitLegacyImport,
@@ -55,36 +61,73 @@ export interface LegacyImportCardProps {
   scenarioId: string;
 }
 
-/** The block table, shared by the confirm dialog and the report. */
-function BlockTable({ blocks }: { blocks: LegacyBlockPreview[] }) {
+/**
+ * The block table, shared by the confirm dialog and the report.
+ *
+ * Doubles as the build-it-yourself recipe when `omitted` is set: the same
+ * columns say what to create as what would have been created, which is the
+ * whole reason the importer still reads the bands with the toggle off.
+ */
+function BlockTable({
+  blocks,
+  omitted,
+}: {
+  blocks: LegacyBlockPreview[];
+  omitted?: LegacyBlocksOmission | null;
+}) {
+  if (blocks.length === 0) return null;
   return (
-    <Table size="small">
-      <TableHead>
-        <TableRow>
-          <TableCell>Block</TableCell>
-          <TableCell>How it calculates</TableCell>
-          <TableCell>Account</TableCell>
-          <TableCell align="right">Rows</TableCell>
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {blocks.map((block) => (
-          <TableRow key={block.label}>
-            <TableCell>{block.label}</TableCell>
-            <TableCell sx={{ color: "text.secondary" }}>
-              {block.baseSummary
-                ? `% of ${block.baseSummary}`
-                : block.spreadSummary ?? "—"}
-            </TableCell>
-            <TableCell sx={{ color: "text.secondary" }}>
-              {block.accountSummary}
-            </TableCell>
-            <TableCell align="right">{block.usedRows}</TableCell>
+    <>
+      {omitted && (
+        <Alert severity="warning" sx={{ mb: 1 }}>
+          {BLOCKS_OMISSION_LABEL[omitted]}
+        </Alert>
+      )}
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell>Block</TableCell>
+            <TableCell>How it calculates</TableCell>
+            <TableCell>Account</TableCell>
+            <TableCell align="right">Rows</TableCell>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHead>
+        <TableBody>
+          {blocks.map((block) => (
+            <TableRow key={block.label}>
+              <TableCell>{block.label}</TableCell>
+              <TableCell sx={{ color: "text.secondary" }}>
+                {block.baseSummary
+                  ? `% of ${block.baseSummary}`
+                  : block.spreadSummary ?? "—"}
+              </TableCell>
+              <TableCell sx={{ color: "text.secondary" }}>
+                {block.accountSummary}
+              </TableCell>
+              <TableCell align="right">{block.usedRows}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </>
   );
+}
+
+/** How the column map was chosen, in the user's terms. */
+function versionLine(preview: LegacyImportPreview): string {
+  if (preview.versionSource === "unknown") {
+    return preview.fileVersion
+      ? `This file says it is version ${preview.fileVersion}, which this tool ` +
+          `has no column map for.`
+      : `This file does not say which version of the tool it is.`;
+  }
+  const how =
+    preview.versionSource === "forced"
+      ? "you selected it"
+      : preview.versionSource === "headers"
+        ? "read from the sheet's own column headings"
+        : "read from the file's version cell";
+  return `Reading this file as version ${preview.resolvedVersion} (${how}).`;
 }
 
 function WarningList({ warnings }: { warnings: string[] }) {
@@ -109,14 +152,17 @@ function WarningList({ warnings }: { warnings: string[] }) {
 function reportText(report: LegacyImportReport): string {
   const lines = [
     `Imported from ${report.sourceFileName}`,
+    `Read as Excel tool version: ${report.resolvedVersion ?? "not recognised"}`,
     `Positions: ${report.positionsCreated}`,
     `Manual input rows: ${report.manualInputRowsCreated}`,
     `Allocations: ${report.allocationsCreated.join(", ") || "none"}`,
     `Calendar months updated: ${report.calendarMonthsUpdated}`,
     `Full-time weekly hours: ${report.weeklyHoursUpdated ?? "unchanged"}`,
     "",
-    "Blocks:",
-    ...report.blocksCreated.map(
+    report.blocksOmitted
+      ? "Blocks found but NOT imported — build these by hand:"
+      : "Blocks:",
+    ...report.blocksDetected.map(
       (block) =>
         `  - ${block.label} (${block.blockType}) — ${
           block.baseSummary ? `% of ${block.baseSummary}` : block.spreadSummary ?? ""
@@ -195,7 +241,11 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
         setReport(result.report);
         setMessage({
           severity: "success",
-          text: `Imported ${result.report.positionsCreated} positions and ${result.report.blocksCreated.length} blocks.`,
+          text: result.report.blocksOmitted
+            ? `Imported ${result.report.positionsCreated} positions. ` +
+              `${result.report.blocksDetected.length} benefit block(s) were ` +
+              `found but not imported — see the report.`
+            : `Imported ${result.report.positionsCreated} positions and ${result.report.blocksCreated.length} blocks.`,
         });
       } else if (result.outcome === "scenario_not_empty") {
         setMessage({
@@ -245,10 +295,10 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
 
           <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
             Bring an existing Payroll Budget Tool workbook (.xlsm) across in one
-            go: every associate, the benefit blocks the file actually uses, the
-            manual-input sheet, allocations, public holidays and the full-time
-            week. Nothing is written until you have seen exactly what it would
-            create. It only runs into a plan that has no positions yet.
+            go: every associate, the manual-input sheet, allocations, public
+            holidays and the full-time week. Nothing is written until you have
+            seen exactly what it would create. It only runs into a plan that has
+            no positions yet.
           </Typography>
 
           <Stack>
@@ -288,7 +338,66 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
               }
               label="Allocations sheet"
             />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={options.blocks}
+                  onChange={(event) => setOption("blocks", event.target.checked)}
+                />
+              }
+              label="Benefit blocks (pension, allowances, incentives…)"
+            />
           </Stack>
+
+          {options.blocks ? (
+            <Alert severity="warning" sx={{ mt: 1 }}>
+              The import reads each band's columns, but it cannot know what your
+              hotel has <em>used</em> them for — one hotel's "Custom Allowance 2"
+              is another's shift differential, and a band's total formula may
+              have been edited. Blocks created this way need checking against
+              your workbook. Building them yourself is usually more accurate, and
+              the preview lists every band it found either way, so you can create
+              them on the Positions page and paste each column in from Excel.
+            </Alert>
+          ) : (
+            <Typography
+              variant="body2"
+              sx={{ mt: 1, color: "text.secondary" }}
+            >
+              Blocks are left off by default. The preview still lists every
+              benefit band in the file — with the base and account each one uses
+              — so you can build them yourself and paste the values in.
+            </Typography>
+          )}
+
+          <TextField
+            select
+            size="small"
+            fullWidth
+            sx={{ mt: 2 }}
+            label="Excel tool version"
+            value={options.version}
+            onChange={(event) =>
+              setOptions((current) => ({
+                ...current,
+                version: event.target.value as LegacyVersionChoice,
+              }))
+            }
+            helperText={
+              options.version === "auto"
+                ? "Read from the file. 3.6.1 has no Overtime band, which moves every column after it — getting this wrong imports the wrong values."
+                : `Forced to ${options.version}. Only override this if the file's own headings are wrong.`
+            }
+          >
+            <MenuItem value="auto">Detect automatically (recommended)</MenuItem>
+            {SUPPORTED_LEGACY_VERSIONS.map((version) => (
+              <MenuItem key={version} value={version}>
+                {version}
+                {version === "3.6.1" ? " — no Overtime band" : " — with Overtime"}
+              </MenuItem>
+            ))}
+          </TextField>
 
           {!scenarioId && (
             <Alert severity="info" sx={{ mt: 2 }}>
@@ -333,9 +442,25 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
                 currently have selected. There is no undo.
               </Alert>
 
+              <Alert
+                severity={
+                  preview.versionSource === "unknown" ? "warning" : "info"
+                }
+              >
+                {versionLine(preview)}
+              </Alert>
+
               <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
                 <Chip label={`${preview.positionCount} positions`} />
-                <Chip label={`${preview.blocks.length} blocks`} />
+                <Chip
+                  label={
+                    preview.blocksOmitted
+                      ? `${preview.blocks.length} blocks found, none imported`
+                      : `${preview.blocks.length} blocks`
+                  }
+                  color={preview.blocksOmitted ? "default" : "primary"}
+                  variant={preview.blocksOmitted ? "outlined" : "filled"}
+                />
                 <Chip label={`${preview.manualInputRowCount} manual rows`} />
                 <Chip
                   label={`${preview.allocationNames.length} allocations`}
@@ -345,12 +470,25 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
                 )}
               </Stack>
 
-              <Box>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                  Blocks it would create
-                </Typography>
-                <BlockTable blocks={preview.blocks} />
-              </Box>
+              {preview.blocks.length > 0 ? (
+                <Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    {preview.blocksOmitted
+                      ? "Benefit blocks found in this file"
+                      : "Blocks it would create"}
+                  </Typography>
+                  <BlockTable
+                    blocks={preview.blocks}
+                    omitted={preview.blocksOmitted}
+                  />
+                </Box>
+              ) : (
+                preview.blocksOmitted === "layout_unknown" && (
+                  <Alert severity="warning">
+                    {BLOCKS_OMISSION_LABEL.layout_unknown}
+                  </Alert>
+                )
+              )}
 
               {preview.skippedBlocks.length > 0 && (
                 <Typography variant="body2" sx={{ color: "text.secondary" }}>
@@ -390,8 +528,13 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
                   label={`${report.positionsCreated} positions`}
                 />
                 <Chip
-                  color="success"
-                  label={`${report.blocksCreated.length} blocks`}
+                  color={report.blocksOmitted ? "default" : "success"}
+                  variant={report.blocksOmitted ? "outlined" : "filled"}
+                  label={
+                    report.blocksOmitted
+                      ? `${report.blocksDetected.length} blocks not imported`
+                      : `${report.blocksCreated.length} blocks`
+                  }
                 />
                 <Chip
                   color="success"
@@ -404,7 +547,10 @@ export default function LegacyImportCard({ ou, scenarioId }: LegacyImportCardPro
                   />
                 )}
               </Stack>
-              <BlockTable blocks={report.blocksCreated} />
+              <BlockTable
+                blocks={report.blocksDetected}
+                omitted={report.blocksOmitted}
+              />
               <WarningList warnings={report.warnings} />
             </Stack>
           )}
