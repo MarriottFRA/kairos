@@ -1,7 +1,7 @@
 {
   "name": "kairos",
   "productName": "Kairos",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "Kairos - Marriott EMEA FRA desktop application",
   "main": ".vite/build/main.js",
   "scripts": {
