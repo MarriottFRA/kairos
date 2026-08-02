@@ -13,7 +13,7 @@ import { simulate } from "../../../shared/engine/simulate";
 import { POSITIONS_STRUCTURE_TABLES_SQL } from "../../positions/schema";
 import { resolveOuScope } from "../../positions/ouScope";
 import { getComponentDefinitions } from "../../positions/structureRepo";
-import { applyBlocksStructureV12 } from "../schema";
+import { applyStructureColumns } from "../schema";
 import {
   blockCostDefId,
   blockStatDefId,
@@ -47,7 +47,7 @@ let db: Db;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(db);
+  applyStructureColumns(db);
 });
 
 function flatMonthly(overrides: Partial<BlockInput> = {}): BlockInput {
@@ -418,6 +418,140 @@ describe("saveBlock — definition projection", () => {
   });
 });
 
+describe("saveBlock — compound (COMBINE) bases", () => {
+  function compound(overrides: Partial<BlockInput> = {}): BlockInput {
+    return {
+      blockType: "MULTIPLIER",
+      label: "Cost Per Hour",
+      accountCode: "",
+      accountLocked: true,
+      base: {
+        kind: "COMBINE",
+        op: "DIV",
+        left: { kind: "BASE_SALARY" },
+        right: { kind: "STAT", stat: "HOURS" },
+      },
+      ...overrides,
+    };
+  }
+
+  it("compiles to a COMBINE selector and seeds the stat head it references", () => {
+    saveBlock(db, OU_A, compound(), NOW);
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const cost = defs.find((def) => def.label === "Cost Per Hour")!;
+    expect(cost.spreadMethod).toBe("PERCENT_OF");
+    expect(cost.baseSelector).toEqual({
+      kind: "COMBINE",
+      op: "DIV",
+      left: { kind: "BASE_SALARY" },
+      right: { kind: "COMPONENTS", componentIds: [systemStatDefId(OU_A.ou, "HOURS")] },
+    });
+    // The referenced stat head has to exist or compile() would report MISSING_DEF.
+    expect(defs.some((def) => def.id === systemStatDefId(OU_A.ou, "HOURS"))).toBe(true);
+  });
+
+  it("defaults a division to count-exempt and round-trips both flags", () => {
+    saveBlock(db, OU_A, compound(), NOW);
+
+    const block = listBlocks(db, OU_A)[0];
+    expect(block.ratioNoHeadcount).toBe(true); // DIV → a ratio by default
+    expect(block.useRowRate).toBe(true);
+    expect(
+      getComponentDefinitions(db, OU_A).find((def) => def.label === "Cost Per Hour")!
+        .countExempt
+    ).toBe(true);
+  });
+
+  it("pins the rate to 1 when the block carries no per-row column", () => {
+    // Without this the absent ComponentValue would read as rate 0 and the line
+    // would silently compute nothing at all.
+    saveBlock(db, OU_A, compound({ useRowRate: false }), NOW);
+
+    const selector = getComponentDefinitions(db, OU_A).find(
+      (def) => def.label === "Cost Per Hour"
+    )!.baseSelector;
+    expect(selector?.kind).toBe("COMBINE");
+    expect(selector?.kind === "COMBINE" && selector.rate).toBe(1);
+    expect(listBlocks(db, OU_A)[0].useRowRate).toBe(false);
+  });
+
+  it("lets a non-division compound keep the headcount multiplier", () => {
+    saveBlock(db, OU_A, compound({ label: "Days × Hours", base: {
+      kind: "COMBINE",
+      op: "MUL",
+      left: { kind: "CALENDAR", series: "PAY_DAYS" },
+      right: { kind: "STAT", stat: "HOURS" },
+    } }), NOW);
+
+    expect(listBlocks(db, OU_A)[0].ratioNoHeadcount).toBe(false);
+  });
+
+  it("refuses a side that loops back to the block being saved", () => {
+    const id = saveBlock(db, OU_A, flatMonthly({ label: "Housing" }), NOW);
+    const levyId = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Levy",
+        accountCode: "",
+        accountLocked: true,
+        base: { kind: "BLOCK", blockId: id },
+      },
+      NOW
+    );
+
+    // Editing Housing to divide by the Levy that already depends on it would
+    // close the loop — caught here rather than as a CYCLE at recalc time.
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        {
+          id: levyId,
+          blockType: "MULTIPLIER",
+          label: "Levy",
+          accountCode: "",
+          accountLocked: true,
+          base: {
+            kind: "COMBINE",
+            op: "DIV",
+            left: { kind: "BASE_SALARY" },
+            right: { kind: "BLOCK", blockId: levyId },
+          },
+        },
+        NOW
+      )
+    ).toThrow(/itself as its base/);
+  });
+
+  it("rejects a nested compound and a KPI side", () => {
+    expect(() =>
+      saveBlock(db, OU_A, compound({ base: {
+        kind: "COMBINE",
+        op: "MUL",
+        left: { kind: "BASE_SALARY" },
+        right: {
+          kind: "COMBINE",
+          op: "ADD",
+          left: { kind: "VACATION" },
+          right: { kind: "BASE_SALARY" },
+        },
+      } }), NOW)
+    ).toThrow(/cannot use another combined block/);
+
+    expect(() =>
+      saveBlock(db, OU_A, compound({ base: {
+        kind: "COMBINE",
+        op: "MUL",
+        left: { kind: "BASE_SALARY" },
+        right: { kind: "KPI", kpiDriverId: "kpi-1" },
+      } }), NOW)
+    ).toThrow(/KPI cannot be one side/);
+  });
+});
+
 describe("saveBlock — update semantics", () => {
   it("recompiles the projection on edit and preserves sort order", () => {
     const id = saveBlock(db, OU_A, flatMonthly(), NOW);
@@ -573,6 +707,33 @@ describe("deleteBlock / restoreBlock", () => {
     deleteBlock(db, OU_A, baseId, NOW);
     expect(listBlocks(db, OU_A)).toHaveLength(0);
     expect(getComponentDefinitions(db, OU_A)).toHaveLength(0);
+  });
+
+  it("refuses deletion while a COMPOUND block divides by it", () => {
+    // The guard reads component_base_refs, so a compound only stays protected
+    // because its nested sides are written into that projection too.
+    const baseId = saveBlock(db, OU_A, flatMonthly({ label: "Overtime" }), NOW);
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Overtime Per Hour",
+        accountCode: "",
+        accountLocked: true,
+        base: {
+          kind: "COMBINE",
+          op: "DIV",
+          left: { kind: "BLOCK", blockId: baseId },
+          right: { kind: "STAT", stat: "HOURS" },
+        },
+      },
+      NOW
+    );
+
+    expect(() => deleteBlock(db, OU_A, baseId, NOW)).toThrow(
+      /used as a base by: Overtime Per Hour/
+    );
   });
 
   it("restore brings back the config and its defs", () => {

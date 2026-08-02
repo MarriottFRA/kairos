@@ -678,11 +678,17 @@ function describeAccounts(tally: Array<{ code: string; count: number }>): string
     .join(", ")}`;
 }
 
+// Exhaustive on purpose: the importer only ever builds the first four, but
+// keeping the map total means a new BlockSpread trips the compiler here rather
+// than silently printing "undefined" in a preview report.
 const SPREAD_SUMMARY: Record<BlockSpread, string> = {
   ACTIVE_MONTHS: "split evenly across working months",
   DAYS: "spread by days in each month",
   VACATION_PATTERN: "spread on the vacation pattern",
   WEIGHTED_BASE: "weighted by the monthly salary curve",
+  WEIGHTED_HOURS_WORKED: "weighted by the hours-worked curve",
+  WEIGHTED_HOURS_PAID: "weighted by the hours-paid curve",
+  WEIGHTED_FTE: "weighted by the FTE curve",
 };
 
 /**

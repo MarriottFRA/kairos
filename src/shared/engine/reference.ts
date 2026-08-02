@@ -18,6 +18,7 @@
  */
 
 import {
+  bankHolidayCoefficient,
   BaseSelector,
   CalendarContext,
   ComponentValue,
@@ -119,52 +120,93 @@ function grossBaseSalary(
   return out;
 }
 
-function vacationCost(position: Position, d: DerivedTotals): number[] {
+/**
+ * Days of leave TAKEN each month — the vacation weights as relative proportions,
+ * normalized by their own total so the year's leave always sums to
+ * `vacationDays`, whatever the raw weights add up to (the grid reddens a total
+ * ≠ 1 but the math self-corrects). Total 1 divides exactly, so a tidy sum-to-1
+ * set is unchanged. Total 0 means no weighted month, so no vacation is placed.
+ *
+ * Split out from `vacationCost` because the accrual provisions for the same
+ * days it prices — deriving both legs from ONE day series is what makes the
+ * accrual line net to zero (see `holidayAccrual`).
+ */
+function vacationDaysTaken(position: Position): number[] {
   const seas = position.seasonality;
   const weights = position.vacationMonthlyWeights;
-  // The weights are treated as relative proportions: they are normalized by their
-  // own total so the year's leave always sums to `vacationDays`, whatever the raw
-  // weights add up to (the grid reddens a total ≠ 1 but the math self-corrects).
-  // Total 1 divides exactly, so a tidy sum-to-1 set is unchanged. Total 0 means no
-  // weighted month, so no vacation is placed.
   let weightTotal = 0;
   for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
-  // A vacation day costs one working day of base pay (d.dayRate), weighted into
-  // months by the vacation weights and priced with the merit factor of the month
-  // it falls in — so leave weighted after the increase is dearer than before it.
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
-    if (seas[m] === 0 || weightTotal === 0) {
-      out.push(0);
-      continue;
-    }
     out.push(
-      position.vacationDays *
-        weights[m] /
-        weightTotal *
-        seas[m] *
-        d.dayRate *
-        d.incMul[m]
+      seas[m] === 0 || weightTotal === 0
+        ? 0
+        : position.vacationDays * weights[m] / weightTotal * seas[m]
     );
   }
   return out;
 }
 
-function holidayAccrual(position: Position, d: DerivedTotals, vacation: number[]): number[] {
+function vacationCost(position: Position, d: DerivedTotals, takenDays: number[]): number[] {
+  // A vacation day costs one working day of base pay (d.dayRate), priced with the
+  // merit factor of the month it falls in — so leave weighted after the increase
+  // is dearer than before it.
+  const out: number[] = [];
+  for (let m = 0; m < MONTHS; m++) out.push(takenDays[m] * d.dayRate * d.incMul[m]);
+  return out;
+}
+
+/**
+ * Holiday accrual as a liability ROLL-FORWARD, carried in days.
+ *
+ * The provision is earned evenly across the months the position actually works
+ * (`seas[m]/twm`, not a flat 1/12 — a 9-month post earns its entitlement in 9
+ * months, and provisioning in a month with no salary would have nothing to
+ * provision against), and released in the months leave is taken. Both legs come
+ * from the SAME `takenDays` series, so the year always accrues exactly what it
+ * releases.
+ *
+ * Each month's charge is the movement in the liability:
+ *
+ *   accrual[m] = earned[m]·r[m]            — this month's days at this month's price
+ *              + balance[m−1]·(r[m]−r[m−1]) — remeasure the standing balance
+ *              − taken[m]·r[m]              — release at this month's price
+ *
+ * which is exactly `balance[m]·r[m] − balance[m−1]·r[m−1]` (the form coded
+ * below). The year therefore TELESCOPES to zero: the closing balance is zero, so
+ * Σ accrual = 0 for any weights, any seasonality and any number of merit steps,
+ * and it is immune to rounding in the entered weights. The old formula compared
+ * a hardcoded 1/12 against the normalized weights, so it drifted on all three.
+ *
+ * The release leg is priced at the taking month's rate, so it still cancels the
+ * BASE_DEDUCT exactly; the merit revaluation surfaces in the month the rate
+ * steps, not the month the holiday happens to be taken.
+ *
+ * Inactive months are skipped WITHOUT advancing the previous rate, so a merit
+ * step landing in an off-season month revalues at the next worked month rather
+ * than posting a line where the position is dormant.
+ *
+ * `accrualDaysPerMonth` survives only as an on/off guard — the app derives it as
+ * vacationDays/12, and the roll-forward computes the earning leg itself.
+ */
+function holidayAccrual(position: Position, d: DerivedTotals, takenDays: number[]): number[] {
   const seas = position.seasonality;
   const out: number[] = [];
+  let totalTaken = 0;
+  for (let m = 0; m < MONTHS; m++) totalTaken += takenDays[m];
+
+  let balance = 0;
+  let prevRate = 0;
   for (let m = 0; m < MONTHS; m++) {
-    if (position.accrualDaysPerMonth === 0 || seas[m] === 0) {
+    if (position.accrualDaysPerMonth === 0 || seas[m] === 0 || d.twm === 0) {
       out.push(0);
       continue;
     }
-    out.push(
-      position.accrualDaysPerMonth *
-        d.dayRate *
-        seas[m] *
-        d.incMul[m] -
-        vacation[m]
-    );
+    const rate = d.dayRate * d.incMul[m];
+    const opening = balance;
+    balance += totalTaken * seas[m] / d.twm - takenDays[m];
+    out.push(balance * rate - opening * prevRate);
+    prevRate = rate;
   }
   return out;
 }
@@ -177,11 +219,12 @@ function bankHoliday(
   increaseAware: boolean
 ): number[] {
   const seas = position.seasonality;
-  // A worked public holiday costs one working day of base pay (d.dayRate), scaled
-  // by how many staff work it × the premium rate (combinedMult), for each holiday
-  // in the month. Hourly-wage staff only — for everyone else combinedMult is 0
-  // (their base already pays the day), so the line is zero. Priced with the merit
-  // factor of the month it falls in when the component is increase-aware.
+  // A public holiday costs one working day of base pay (d.dayRate) × the
+  // position's coefficient (see bankHolidayCoefficient — coverage, pay rate,
+  // eligibility and holiday-pay treatment all folded into one number), for each
+  // holiday in the month. An ineligible position has a coefficient of 0, so the
+  // line is zero. Priced with the merit factor of the month it falls in when the
+  // component is increase-aware.
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
     if (combinedMult === 0 || seas[m] === 0) {
@@ -271,6 +314,36 @@ function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTo
 }
 
 /**
+ * Hours PAID — the same day-spread total as hoursWorked, but WITHOUT taking the
+ * vacation hours back out again. So it answers "hours the position is paid for",
+ * where hoursWorked answers "hours actually at work".
+ *
+ * Deliberately worked + vacation and nothing else: both terms are already on the
+ * engine Position, so this needs no new inputs. It therefore excludes public
+ * holidays and reads slightly lower than the grid's "Manhours Paid" column,
+ * which is (contractYearlyDays − contractDaysOff) × dailyHours — those contract
+ * fields are POSITION_EXTRA and never reach the engine.
+ */
+function hoursPaid(
+  position: Position,
+  calendar: CalendarContext,
+  d: DerivedTotals
+): number[] {
+  const seas = position.seasonality;
+  const totalHours =
+    position.yearlyHoursWorked + position.vacationDays * position.dailyContractHours;
+  const out: number[] = [];
+  for (let m = 0; m < MONTHS; m++) {
+    if (totalHours === 0 || seas[m] === 0) {
+      out.push(0);
+      continue;
+    }
+    out.push((totalHours / d.twd2) * calendar.realDays[m] * seas[m]);
+  }
+  return out;
+}
+
+/**
  * Per-position vacation cost, month by month — the grid's simulated Vacation
  * Cost column. Needs only the position and the calendar (day basis + net days),
  * not the component graph, so it is far cheaper than a full referencePosition().
@@ -283,7 +356,7 @@ export function referenceVacation(
   const days = Array.from(
     position.payType === "HOURLY" ? calendar.realDays : calendar.flatDays
   );
-  return vacationCost(position, derive(position, calendar, days));
+  return vacationCost(position, derive(position, calendar, days), vacationDaysTaken(position));
 }
 
 /**
@@ -305,7 +378,8 @@ export function referencePosition(
   const d = derive(position, calendar, days);
 
   const gross = grossBaseSalary(position, calendar, days, d);
-  const vacation = vacationCost(position, d);
+  const takenDays = vacationDaysTaken(position);
+  const vacation = vacationCost(position, d, takenDays);
 
   const valueByDef = new Map<string, ComponentValue>();
   for (const value of componentValues) {
@@ -324,9 +398,15 @@ export function referencePosition(
     }
     if (selector.kind === "CALENDAR") {
       // Day-count base: PAY_DAYS is the position's own pay-type basis (the
-      // `days` array), REAL_DAYS always the productive-days calendar. Both ×
-      // seasonality, so inactive months contribute nothing.
-      const series = selector.series === "REAL_DAYS" ? calendar.realDays : days;
+      // `days` array), REAL_DAYS always the productive-days calendar,
+      // HOLIDAY_DAYS the public-holiday count. All × seasonality, so inactive
+      // months contribute nothing.
+      const series =
+        selector.series === "REAL_DAYS"
+          ? calendar.realDays
+          : selector.series === "HOLIDAY_DAYS"
+            ? calendar.holidayDays
+            : days;
       for (let m = 0; m < MONTHS; m++) base[m] = series[m] * seas[m];
       return base;
     }
@@ -352,6 +432,30 @@ export function referencePosition(
       }
       return base;
     }
+    if (selector.kind === "COMBINE") {
+      // The compound base: two selectors and an arithmetic operation between
+      // them. Division by a zero month yields 0 (see BaseSelector.COMBINE) —
+      // the same guard WEIGHTED_BY_BASE uses for a zero base total.
+      const left = resolveBase(selector.left);
+      const right = resolveBase(selector.right);
+      for (let m = 0; m < MONTHS; m++) {
+        switch (selector.op) {
+          case "ADD":
+            base[m] = left[m] + right[m];
+            break;
+          case "SUB":
+            base[m] = left[m] - right[m];
+            break;
+          case "MUL":
+            base[m] = left[m] * right[m];
+            break;
+          case "DIV":
+            base[m] = right[m] === 0 ? 0 : left[m] / right[m];
+            break;
+        }
+      }
+      return base;
+    }
     for (const id of selector.componentIds) {
       const def = defById.get(id);
       if (!def) continue;
@@ -372,17 +476,13 @@ export function referencePosition(
         break;
       }
       case "HOLIDAY_ACCRUAL": {
-        out = holidayAccrual(position, d, vacation);
+        out = holidayAccrual(position, d, takenDays);
         break;
       }
       case "BANK_HOLIDAY": {
-        // Hourly-wage staff only (hourlyRate > 0): their base literally excludes
-        // the holiday day, so working it is fully additional. For everyone else
-        // the multiplier collapses to 0 and the line is zero.
-        const combinedMult =
-          position.hourlyRate > 0
-            ? (def.bankHolidayStaffFraction ?? 0) * (def.bankHolidayPremiumMultiplier ?? 0)
-            : 0;
+        // Same helper the compiler uses — the whole point of the parity test is
+        // that these two agree, which they cannot if the rule lives twice.
+        const combinedMult = bankHolidayCoefficient(def, position);
         out = bankHoliday(position, calendar, d, combinedMult, def.increaseAware);
         break;
       }
@@ -403,6 +503,7 @@ export function referencePosition(
           else if (def.statKind === "FTE") out[m] = position.fte * seas[m];
         }
         if (def.statKind === "HOURS") out = hoursWorked(position, calendar, d);
+        else if (def.statKind === "HOURS_PAID") out = hoursPaid(position, calendar, d);
         break;
       }
       case "SPREAD": {
@@ -412,7 +513,12 @@ export function referencePosition(
 
         switch (def.spreadMethod) {
           case "PERCENT_OF": {
-            const rate = value?.rate ?? 0;
+            // A compound base may pin its own rate — see BaseSelector.COMBINE.
+            const rate =
+              def.baseSelector?.kind === "COMBINE" &&
+              def.baseSelector.rate !== undefined
+                ? def.baseSelector.rate
+                : value?.rate ?? 0;
             const base = resolveBase(def.baseSelector);
             for (let m = 0; m < MONTHS; m++) out[m] = rate * base[m];
             break;
@@ -522,6 +628,9 @@ export function referencePosition(
     for (const def of definitions) {
       if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
       if (def.spreadMethod === "DIRECT_ABS") continue;
+      // Ratios opt out: already a per-person figure, and the same figure however
+      // many identical people the row stands for. See countExempt.
+      if (def.countExempt) continue;
       const series = lines.get(def.id);
       if (series) for (let m = 0; m < MONTHS; m++) series[m] *= coeff;
     }

@@ -8,6 +8,7 @@
 
 import {
   BUDGET_IMPORT_CHANNELS,
+  BudgetDepartmentOption,
   ImportRowsResult,
   PullResult,
 } from "../shared/budgetImport/ipc";
@@ -45,4 +46,20 @@ export async function getCurrentBudgetImport(
     { ou }
   );
   return (response.data as ImportRowsResult | null) ?? null;
+}
+
+/**
+ * The departments this hotel's budget file carries, named and sorted for a
+ * picker. Empty when the hotel has never pulled — deliberately NOT falling back
+ * to the mapping tables, whose company-wide list runs to 200-plus departments
+ * and says nothing about which ones this hotel operates.
+ */
+export async function loadBudgetDepartments(
+  ou: string
+): Promise<BudgetDepartmentOption[]> {
+  const response = await ipc().sendIpcRequest(
+    BUDGET_IMPORT_CHANNELS.listDepartments,
+    { ou }
+  );
+  return (response.data as BudgetDepartmentOption[]) ?? [];
 }

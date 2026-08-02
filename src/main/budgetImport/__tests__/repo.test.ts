@@ -7,7 +7,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { BUDGET_IMPORT_SQL } from "../schema";
-import { commitImport, getCurrentImport, getImportRows } from "../repo";
+import {
+  commitImport,
+  getCurrentImport,
+  getImportRows,
+  listImportDepartments,
+} from "../repo";
 import type { ParsedDataset } from "../parseWorkbook";
 import { WIDE_CELL_COUNT } from "../../../shared/budgetImport/ipc";
 
@@ -120,5 +125,47 @@ describe("budgetImport repo", () => {
     commitSample();
     expect(getCurrentImport(db, "OU9ZZZZ")).toBeNull();
     expect(getImportRows(db, "OU9ZZZZ")).toHaveLength(0);
+  });
+});
+
+describe("listImportDepartments", () => {
+  /** A dataset spanning three departments, in the "D"+4-digit form parseWorkbook
+   *  emits — the same namespace a position's departmentCode uses. */
+  function multiDeptDataset(): ParsedDataset {
+    const base = sampleDataset();
+    return {
+      ...base,
+      rows: [
+        { dept: "D1010", account: "414001", combo: "1010-414001", description: null, cells: cells() },
+        { dept: "D1010", account: "961010", combo: "1010-961010", description: null, cells: cells() },
+        { dept: "D0510", account: "414001", combo: "0510-414001", description: null, cells: cells() },
+        { dept: "D6010", account: "414001", combo: "6010-414001", description: null, cells: cells() },
+      ],
+    };
+  }
+
+  it("returns each department once, in GL order", () => {
+    commitImport(db, {
+      id: "imp-1",
+      ou: OU,
+      importedBy: null,
+      dataset: multiDeptDataset(),
+      importedAt: NOW,
+    });
+    // This is the whole point of the query: the hotel's own short list, not the
+    // company-wide mapping table's 200-plus departments.
+    expect(listImportDepartments(db, OU)).toEqual(["D0510", "D1010", "D6010"]);
+  });
+
+  it("is empty for a hotel that has never pulled, and is OU-scoped", () => {
+    expect(listImportDepartments(db, OU)).toEqual([]);
+    commitImport(db, {
+      id: "imp-1",
+      ou: OU,
+      importedBy: null,
+      dataset: multiDeptDataset(),
+      importedAt: NOW,
+    });
+    expect(listImportDepartments(db, "OU9ZZZZ")).toEqual([]);
   });
 });

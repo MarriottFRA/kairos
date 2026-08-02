@@ -223,6 +223,14 @@ export function standardDefinitions(): CostComponentDefinition[] {
       baseSelector: { kind: "CALENDAR", series: "REAL_DAYS" },
     }),
     makeDef({
+      id: "def-multholdays",
+      spreadMethod: "PERCENT_OF",
+      label: "Per Public-Holiday Levy",
+      accountCode: "628150",
+      sortOrder: 16.5,
+      baseSelector: { kind: "CALENDAR", series: "HOLIDAY_DAYS" },
+    }),
+    makeDef({
       id: "def-multvac",
       spreadMethod: "PERCENT_OF",
       label: "Vacation Levy",
@@ -237,6 +245,72 @@ export function standardDefinitions(): CostComponentDefinition[] {
       accountCode: "628300",
       sortOrder: 18,
       baseSelector: { kind: "COMPONENTS", componentIds: [defId("def-hours")] },
+    }),
+    makeDef({
+      id: "def-hourspaid",
+      kind: "STAT",
+      statKind: "HOURS_PAID",
+      label: "Hours Paid",
+      accountCode: "971100",
+      sortOrder: 19,
+    }),
+    // Compound (COMBINE) bases — one per operation, so the parity fuzzer covers
+    // every branch of COMBINE_ACC against reference.resolveBase.
+    makeDef({
+      id: "def-combadd",
+      spreadMethod: "PERCENT_OF",
+      label: "Salary Plus Housing Levy",
+      accountCode: "629000",
+      sortOrder: 20,
+      baseSelector: {
+        kind: "COMBINE",
+        op: "ADD",
+        left: { kind: "BASE_SALARY" },
+        right: { kind: "COMPONENTS", componentIds: [defId("def-housing")] },
+      },
+    }),
+    makeDef({
+      id: "def-combsub",
+      spreadMethod: "PERCENT_OF",
+      label: "Salary Less Vacation Levy",
+      accountCode: "629100",
+      sortOrder: 21,
+      baseSelector: {
+        kind: "COMBINE",
+        op: "SUB",
+        left: { kind: "BASE_SALARY" },
+        right: { kind: "VACATION" },
+      },
+    }),
+    makeDef({
+      id: "def-combmul",
+      spreadMethod: "PERCENT_OF",
+      label: "Days By Hours Levy",
+      accountCode: "629200",
+      sortOrder: 22,
+      baseSelector: {
+        kind: "COMBINE",
+        op: "MUL",
+        left: { kind: "CALENDAR", series: "PAY_DAYS" },
+        right: { kind: "COMPONENTS", componentIds: [defId("def-hours")] },
+      },
+    }),
+    // The ratio case: cost ÷ hours, and therefore countExempt — a per-person
+    // figure that must NOT be multiplied by headcount. Exercises both the DIV
+    // branch and the post-pass exemption in the parity suite.
+    makeDef({
+      id: "def-costperhour",
+      spreadMethod: "PERCENT_OF",
+      label: "Cost Per Hour",
+      accountCode: "629300",
+      sortOrder: 23,
+      countExempt: true,
+      baseSelector: {
+        kind: "COMBINE",
+        op: "DIV",
+        left: { kind: "BASE_SALARY" },
+        right: { kind: "COMPONENTS", componentIds: [defId("def-hours")] },
+      },
     }),
   ];
 }
@@ -261,6 +335,18 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
   const rand = rng(seed);
   const pick = <T,>(items: T[]): T => items[Math.floor(rand() * items.length)];
   const definitions = standardDefinitions();
+
+  // Vary the bank-holiday knobs per seed so parity covers every branch of
+  // bankHolidayCoefficient — hourly vs salaried eligibility, the paid-when-off
+  // leg, and a department override sitting alongside the hotel-wide fraction.
+  const bankHoliday = definitions.find((def) => def.kind === "BANK_HOLIDAY");
+  if (bankHoliday) {
+    bankHoliday.bankHolidayAppliesTo = rand() < 0.5 ? "ALL" : "HOURLY";
+    bankHoliday.bankHolidayPaidWhenNotWorked = rand() < 0.5;
+    bankHoliday.bankHolidayCoverageByDepartment = {
+      "1310": Math.round(rand() * 100) / 100,
+    };
+  }
   const positions: Position[] = [];
   const componentValues: ComponentValue[] = [];
 
@@ -323,8 +409,13 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
       makeValue(id, "def-vacweighted", { yearlyValue: Math.round(rand() * 2000 * 100) / 100 }),
       makeValue(id, "def-multdays", { rate: Math.round(rand() * 30 * 100) / 100 }),
       makeValue(id, "def-multrealdays", { rate: Math.round(rand() * 30 * 100) / 100 }),
+      makeValue(id, "def-multholdays", { rate: Math.round(rand() * 30 * 100) / 100 }),
       makeValue(id, "def-multvac", { rate: Math.round(rand() * 100) / 100 }),
-      makeValue(id, "def-multhours", { rate: Math.round(rand() * 5 * 100) / 100 })
+      makeValue(id, "def-multhours", { rate: Math.round(rand() * 5 * 100) / 100 }),
+      makeValue(id, "def-combadd", { rate: Math.round(rand() * 10 * 100) / 10000 }),
+      makeValue(id, "def-combsub", { rate: Math.round(rand() * 10 * 100) / 10000 }),
+      makeValue(id, "def-combmul", { rate: Math.round(rand() * 100) / 10000 }),
+      makeValue(id, "def-costperhour", { rate: 1 })
     );
   }
 

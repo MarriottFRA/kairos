@@ -45,7 +45,17 @@ export function buildBankHolidayDefinition(
   const account = (calendar.bankHolidayAccount ?? "").trim();
   const staffFraction = calendar.bankHolidayStaffFraction ?? 0;
   const premiumMultiplier = calendar.bankHolidayPremiumMultiplier ?? 0;
-  if (!account || staffFraction <= 0 || premiumMultiplier <= 0) return null;
+  const coverageByDepartment = calendar.bankHolidayCoverageByDepartment ?? {};
+  const paidWhenNotWorked = !!calendar.bankHolidayPaidWhenNotWorked;
+
+  // An inert configuration produces no line at all rather than a row of zeroes.
+  // "Inert" is no longer just a zero staff fraction: a department override can
+  // be non-zero where the hotel-wide number is zero, and with the holiday paid
+  // regardless, the staff who are OFF still cost a normal day.
+  const coverages = [staffFraction, ...Object.values(coverageByDepartment)];
+  const pricesWorkedDay = premiumMultiplier > 0 && coverages.some((value) => value > 0);
+  const pricesUnworkedDay = paidWhenNotWorked && coverages.some((value) => value < 1);
+  if (!account || (!pricesWorkedDay && !pricesUnworkedDay)) return null;
 
   return {
     id: `bank-holiday:${ou}` as ComponentDefId,
@@ -62,6 +72,9 @@ export function buildBankHolidayDefinition(
     sortOrder: Number.MAX_SAFE_INTEGER,
     bankHolidayStaffFraction: staffFraction,
     bankHolidayPremiumMultiplier: premiumMultiplier,
+    bankHolidayAppliesTo: calendar.bankHolidayAppliesTo ?? "HOURLY",
+    bankHolidayPaidWhenNotWorked: paidWhenNotWorked,
+    bankHolidayCoverageByDepartment: coverageByDepartment,
     updatedAt: calendar.updatedAt ?? "",
     deletedAt: null,
   };

@@ -43,15 +43,27 @@
  *                of BASE_SALARY when a position has hourlyRate>0. Writes gross[]
  *                identically, so VACATION/BASE_DEDUCT are unchanged.
  *  VACATION      params: vacationDays, weights[12]
- *                vac[m] = vacDays·weight[m]·seas[m]·dayRate·inc[m]
+ *                vacDays[m] = vacDays·weight[m]/Σweight·seas[m]   (days taken)
+ *                vac[m]     = vacDays[m]·dayRate·inc[m]           (priced)
  *                dayRate is the per-working-day base pay set by the base op, so a
  *                vacation day costs exactly what a worked day costs on the base
  *                line — and inc[m] makes it pricier when weighted post-increase.
- *                Scratch only — no line.
+ *                Writes BOTH scratch vectors — no line. ACCRUAL provisions for
+ *                the same days this prices, so both read one series.
  *  BASE_DEDUCT   line[m] -= vac[m]  (nets vacation out of the base line;
  *                gross scratch stays intact for downstream bases)
- *  ACCRUAL       params: accrualDaysPerMonth
- *                line[m] = days·dayRate·seas[m]·inc[m] − vac[m]   (0 if days = 0)
+ *  ACCRUAL       params: accrualDaysPerMonth (on/off guard only — the earning
+ *                leg is derived, see below)
+ *                Liability roll-forward carried in DAYS. Earns Σ vacDays[] evenly
+ *                across worked months (seas[m]/twm) and releases vacDays[m]:
+ *                  bal[m]  = bal[m−1] + ΣvacDays·seas[m]/twm − vacDays[m]
+ *                  line[m] = bal[m]·r[m] − bal[m−1]·r[m−1],  r[m] = dayRate·inc[m]
+ *                which expands to earn·r[m] + bal[m−1]·(r[m]−r[m−1]) − taken·r[m]
+ *                — the middle term remeasures the standing balance when merit
+ *                steps. Closing balance is 0 by construction, so the year
+ *                TELESCOPES to exactly 0 for any weights/seasonality/merit.
+ *                Inactive months emit 0 WITHOUT advancing r[m−1], so an
+ *                off-season merit step revalues at the next worked month.
  *  BANK_HOLIDAY  params: combinedMult (= staffFraction·premiumMultiplier, or 0
  *                for staff whose base already pays the holiday — non-hourly)
  *                line[m] = combinedMult·dayRate·holidayDays[m]·seas[m]·inc[m]
@@ -64,8 +76,9 @@
  *  ACC_ADD_LINE  arg0 = source line index; acc[m] += values[line][m]
  *  ACC_ADD_DAYS  arg0 = 0: acc[m] += daysPerMonth[p][m]·seas[m] (the position's
  *                pay-type day basis); arg0 = 1: acc[m] += realDays[m]·seas[m]
- *                (productive-days calendar). The CALENDAR base selector —
- *                "multiplier of days in month" blocks.
+ *                (productive-days calendar); arg0 = 2: acc[m] +=
+ *                holidayDays[m]·seas[m] (public-holiday count). The CALENDAR
+ *                base selector — "multiplier of days in month" blocks.
  *  ACC_ADD_VAC   acc[m] += vac[m] (the vacation-cost scratch set by VACATION).
  *                The VACATION base selector; topo-depends on BASE_SALARY.
  *  PCT_OF_ACC    params: rate; line[m] = rate·acc[m]
@@ -92,6 +105,17 @@
  *                vacationHours, weights[12]
  *                line[m] = totalHours/twd2·realDays[m]·seas[m]
  *                          − vacationHours·weight[m]·seas[m]   (0 if seas 0)
+ *  STAT_HOURS_PAID  params: totalHours (yearly worked + vacation hours)
+ *                line[m] = totalHours/twd2·realDays[m]·seas[m]  (0 if seas 0)
+ *                STAT_HOURS without the vacation take-out — hours PAID rather
+ *                than hours at work, so it needs no weights.
+ *  ACC_PUSH      acc2[m] = acc[m]   (saves the accumulator as a COMBINE's LEFT
+ *                operand; the next ACC_CLEAR then builds the right operand in
+ *                acc, so every existing ACC_ADD_* op is reused unchanged)
+ *  COMBINE_ACC   params: rate, opIndex (index into COMBINE_OPS: 0 ADD, 1 SUB,
+ *                2 MUL, 3 DIV)
+ *                line[m] = rate · f(acc2[m], acc[m]), left operand FIRST.
+ *                DIV yields 0 where acc[m] = 0 (see BaseSelector.COMBINE).
  */
 
 export const Op = {
@@ -117,6 +141,9 @@ export const Op = {
   DIRECT_ABS: 19,
   ACC_ADD_DAYS: 20,
   ACC_ADD_VAC: 21,
+  STAT_HOURS_PAID: 22,
+  ACC_PUSH: 23,
+  COMBINE_ACC: 24,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];
@@ -145,4 +172,6 @@ export const SCRATCH_TWD2 = 50; //   total working days (real-days basis)
 export const SCRATCH_MANUAL = 51; // manualMonthly (manual increase per active month)
 export const SCRATCH_INCMONTH = 52; // increaseMonth, 0-based (12 = none)
 export const SCRATCH_DAYRATE = 53; // per-working-day base pay, pre-increase (set by a base op)
-export const SCRATCH_SIZE = 54;
+export const SCRATCH_VACDAYS = 54; // days of leave taken[12] — the unpriced VACATION series
+export const SCRATCH_ACC2 = 66; //   saved accumulator[12] — a COMBINE's LEFT operand
+export const SCRATCH_SIZE = 78;

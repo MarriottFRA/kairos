@@ -166,6 +166,28 @@ export function getCurrentImport(db: LocalDb, ou: string): ImportSummary | null 
   return row ? toSummary(row) : null;
 }
 
+/**
+ * The department codes this hotel's budget file actually carries, in GL order.
+ *
+ * The mapping tables hold every department in the chain — 200-plus — which is
+ * useless as a picker for one hotel. The BST pull is the hotel's own chart: a
+ * sheet per department it really operates. Codes come out in the app's standard
+ * "D"+4-digit form (parseWorkbook normalizes them), so they line up with a
+ * position's departmentCode without translation.
+ */
+export function listImportDepartments(db: LocalDb, ou: string): string[] {
+  const scoped = normalizeOu(ou) ?? ou;
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT dept
+         FROM budget_values
+        WHERE ou = ? AND dept <> ''
+        ORDER BY dept`
+    )
+    .all(scoped) as Array<{ dept: string }>;
+  return rows.map((row) => row.dept);
+}
+
 /** Build the 36 pivot columns `c_<bucket>_<period>` once. */
 const PIVOT_COLUMNS: string = (() => {
   const parts: string[] = [];

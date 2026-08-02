@@ -4,6 +4,7 @@
  */
 
 export * from "./auth";
+export * from "./authDebug"; // [AUTH-DEBUG] temporary sign-in tracing
 export * from "./calendar";
 export * from "./positionDefaults";
 export * from "./data";

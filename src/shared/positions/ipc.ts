@@ -271,7 +271,9 @@ export type OutputSource = "ENGINE" | "MANUAL" | "ALLOCATION" | "BUYOUT";
  *  - count:    statistics — heads, hours, covers
  *  - percent:  an allocation split, a share out of 100 (15.23 = 15.23%). Held
  *              in January with zeroes after it, like every other level-valued
- *              statistic, so the Year column is the share itself.
+ *              statistic, so the Year column is the share itself. Results
+ *              prints it bare, without a % sign, because that is the figure
+ *              the push loads.
  */
 export type OutputValueKind = "currency" | "count" | "percent";
 

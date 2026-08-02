@@ -54,6 +54,12 @@ export const SETTINGS_KEYS = {
   // Home page and consumed everywhere else (positions grid, future reports)
   BUDGET_YEAR: 'budgetYear',
   PLANNING_SCENARIO_ID: 'planningScenarioId',
+  // Terms of use acceptance record. Version + who + when, so a re-worded set of
+  // terms (TERMS_VERSION bump) re-prompts, and Settings can show what was
+  // accepted. "" means never accepted.
+  TERMS_ACCEPTED_VERSION: 'termsAcceptedVersion',
+  TERMS_ACCEPTED_BY: 'termsAcceptedBy',
+  TERMS_ACCEPTED_AT: 'termsAcceptedAt',
 } as const;
 
 export type SettingsKey = typeof SETTINGS_KEYS[keyof typeof SETTINGS_KEYS];
@@ -100,6 +106,9 @@ export interface AppSettings {
   [SETTINGS_KEYS.POSITIONS_GRID_STATE]: string;
   [SETTINGS_KEYS.BUDGET_YEAR]: number;
   [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: string;
+  [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: string;
+  [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: string;
+  [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: string;
 }
 
 // Default values for all settings
@@ -149,6 +158,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   [SETTINGS_KEYS.POSITIONS_GRID_STATE]: "",
   [SETTINGS_KEYS.BUDGET_YEAR]: currentYear,
   [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: "",
+  [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: "",
+  [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: "",
+  [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: "",
 };
 
 // Type-safe partial settings for updates

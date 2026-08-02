@@ -35,23 +35,53 @@ export interface CalendarYear {
   /** Always 12 entries, ordered Jan → Dec. */
   months: CalendarMonth[];
   /** Bank-holiday premium: when on, the engine books the extra cost of the staff
-   *  who work each public holiday. Hourly-wage staff only — their pay already
-   *  excludes the holiday day, so working it is entirely additional. Scoped to
-   *  this hotel-year, since holidays and staffing patterns differ by both. */
+   *  who work each public holiday. Scoped to this hotel-year, since holidays,
+   *  staffing patterns and holiday-pay law all differ by both. */
   bankHolidayEnabled?: boolean;
-  /** Fraction of a position's staff who actually work a holiday (0..1). */
+  /** Fraction of a position's staff rostered to work a holiday (0..1). The rest
+   *  have the day off. Hotel-wide; `bankHolidayCoverageByDepartment` overrides
+   *  it where a department's pattern differs. */
   bankHolidayStaffFraction?: number;
   /** Pay-rate multiplier for a worked holiday (e.g. 1.5, 2). */
   bankHolidayPremiumMultiplier?: number;
+  /** Who the premium applies to. HOURLY is the common case and what the feature
+   *  shipped with; ALL also books the uplift for salaried staff, whose base pay
+   *  already covers the day (see bankHolidayCoefficient in the engine). */
+  bankHolidayAppliesTo?: BankHolidayAppliesTo;
+  /** Whether hourly staff are paid a normal day for a public holiday even when
+   *  they do not work it. False (the default) matches the day-rate model the
+   *  rest of the app assumes — hourly base pay is built on net productive days,
+   *  which already subtract public holidays. Where the day IS paid regardless,
+   *  that pay is otherwise missing from the budget entirely, so this switch adds
+   *  a normal day's pay for the staff who are off. */
+  bankHolidayPaidWhenNotWorked?: boolean;
+  /** Per-department overrides of the hotel-wide staff fraction, keyed by
+   *  department code. Sparse: an absent key means "use the hotel-wide number",
+   *  so a hotel that needs no refinement stores `{}`. */
+  bankHolidayCoverageByDepartment?: Record<string, number>;
   /** GL account the premium posts to (empty = feature effectively off). */
   bankHolidayAccount?: string;
   updatedAt?: string | null;
 }
 
+/** Who the bank-holiday premium is booked for. */
+export type BankHolidayAppliesTo = "HOURLY" | "ALL";
+
+export const BANK_HOLIDAY_APPLIES_TO: readonly BankHolidayAppliesTo[] = [
+  "HOURLY",
+  "ALL",
+] as const;
+
 /** Defaults for a hotel-year that has never configured the bank-holiday premium:
- *  off, with sensible starting knobs the home page shows once it is switched on. */
-export const DEFAULT_BANK_HOLIDAY_STAFF_FRACTION = 0.5;
+ *  off, with sensible starting knobs the home page shows once it is switched on.
+ *
+ *  The staff fraction is 0.7 because that is roughly what the rota arithmetic
+ *  gives: a 7-day operation staffed on a 5-day week has ~5/7 of any team on duty
+ *  on any given day. It is a starting point, not a truth — departments that shut
+ *  on a holiday are far lower, which is what the per-department overrides fix. */
+export const DEFAULT_BANK_HOLIDAY_STAFF_FRACTION = 0.7;
 export const DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER = 2;
+export const DEFAULT_BANK_HOLIDAY_APPLIES_TO: BankHolidayAppliesTo = "HOURLY";
 
 export const MONTH_LABELS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -141,25 +171,47 @@ export function netProductiveDays(row: CalendarMonth): number {
   return Math.max(0, row.calendarDays - row.publicHolidays - row.weekendDays);
 }
 
-/** The four bank-holiday-premium fields, coerced into well-formed values:
- *  a real boolean, fraction clamped to 0..1, non-negative multiplier, a trimmed
- *  account string. Shared by buildDefaultCalendar and normalizeCalendar so every
- *  path (fresh, reseeded, read-from-storage) produces the same canonical shape. */
-export function normalizeBankHoliday(
-  source: Partial<Pick<
-    CalendarYear,
-    | "bankHolidayEnabled"
-    | "bankHolidayStaffFraction"
-    | "bankHolidayPremiumMultiplier"
-    | "bankHolidayAccount"
-  >>
-): Required<Pick<
+/** The bank-holiday-premium fields of a CalendarYear, as their own bag — the
+ *  shape normalizeBankHoliday takes and returns, and what callers that carry the
+ *  config around without the month rows pass. */
+export type BankHolidayConfig = Required<Pick<
   CalendarYear,
   | "bankHolidayEnabled"
   | "bankHolidayStaffFraction"
   | "bankHolidayPremiumMultiplier"
+  | "bankHolidayAppliesTo"
+  | "bankHolidayPaidWhenNotWorked"
+  | "bankHolidayCoverageByDepartment"
   | "bankHolidayAccount"
->> {
+>>;
+
+/** Per-department coverage, coerced: finite values only, clamped to 0..1, keyed
+ *  by a trimmed non-empty department code. Sparsity comes from the UI — a blank
+ *  field stores no key — not from dropping values that happen to equal the
+ *  hotel-wide fraction today. Those are a deliberate statement about a
+ *  department, and pruning them would silently change their meaning the moment
+ *  the hotel-wide number moves. */
+function normalizeCoverage(source: unknown): Record<string, number> {
+  if (!source || typeof source !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [rawCode, rawValue] of Object.entries(source as Record<string, unknown>)) {
+    const code = rawCode.trim();
+    if (!code) continue;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+    out[code] = Math.min(1, Math.max(0, value));
+  }
+  return out;
+}
+
+/** The bank-holiday-premium fields, coerced into well-formed values: real
+ *  booleans, fraction clamped to 0..1, non-negative multiplier, a known
+ *  applies-to, a sparse coverage map, a trimmed account string. Shared by
+ *  buildDefaultCalendar and normalizeCalendar so every path (fresh, reseeded,
+ *  read-from-storage) produces the same canonical shape. */
+export function normalizeBankHoliday(
+  source: Partial<BankHolidayConfig>
+): BankHolidayConfig {
   const fraction = Number(source.bankHolidayStaffFraction);
   const multiplier = Number(source.bankHolidayPremiumMultiplier);
   return {
@@ -170,6 +222,15 @@ export function normalizeBankHoliday(
     bankHolidayPremiumMultiplier: Number.isFinite(multiplier)
       ? Math.max(0, multiplier)
       : DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
+    bankHolidayAppliesTo: BANK_HOLIDAY_APPLIES_TO.includes(
+      source.bankHolidayAppliesTo as BankHolidayAppliesTo
+    )
+      ? (source.bankHolidayAppliesTo as BankHolidayAppliesTo)
+      : DEFAULT_BANK_HOLIDAY_APPLIES_TO,
+    bankHolidayPaidWhenNotWorked: !!source.bankHolidayPaidWhenNotWorked,
+    bankHolidayCoverageByDepartment: normalizeCoverage(
+      source.bankHolidayCoverageByDepartment
+    ),
     bankHolidayAccount:
       typeof source.bankHolidayAccount === "string" ? source.bankHolidayAccount.trim() : "",
   };
@@ -227,13 +288,7 @@ export function normalizeCalendar(
   year: number,
   weekendMask: number,
   months: Array<Partial<CalendarMonth>>,
-  bankHoliday: Partial<Pick<
-    CalendarYear,
-    | "bankHolidayEnabled"
-    | "bankHolidayStaffFraction"
-    | "bankHolidayPremiumMultiplier"
-    | "bankHolidayAccount"
-  >> = {}
+  bankHoliday: Partial<BankHolidayConfig> = {}
 ): CalendarYear {
   const byMonth = new Map(months.map((row) => [Number(row.month), row]));
   const mask = Number.isFinite(weekendMask) ? weekendMask : DEFAULT_WEEKEND_MASK;

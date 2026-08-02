@@ -5,6 +5,7 @@
 
 import { ipcRegistry } from "./registry";
 import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers } from "./handlers";
+import { createAuthDebugHandlers } from "./handlers/authDebug"; // [AUTH-DEBUG]
 import { KAIROS_SYNC_CHANNELS } from "../shared/kairosSync/ipc";
 import {
   loggingMiddleware,
@@ -33,7 +34,7 @@ export function initializeIpc(deps: {
   /** Vite dev-server origin (dev only); trusted alongside file:// senders. */
   devServerUrl?: string | null;
 }) {
-  const { authController, apiClient, logger, devServerUrl } = deps;
+  const { authController, apiClient, sendToRenderer, logger, devServerUrl } = deps;
 
   // Set up global middleware. Sender validation runs first so untrusted frames
   // are rejected before any handler logic executes.
@@ -46,6 +47,13 @@ export function initializeIpc(deps: {
   // Register auth handlers (backed by the main-process AuthController)
   const authHandlers = createAuthHandlers(authController);
   Object.entries(authHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler);
+  });
+
+  // [AUTH-DEBUG] Register temporary sign-in tracing handlers (arm/disarm only —
+  // the tracing itself lives in main/auth/authDebug.ts and is off by default).
+  const authDebugHandlers = createAuthDebugHandlers(sendToRenderer);
+  Object.entries(authDebugHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler);
   });
 

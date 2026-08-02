@@ -56,7 +56,11 @@ import {
   buildColumns,
   cellEditable,
 } from "./columnFactory";
-import { buildBlockColumns, buildBlockGroupingEntries } from "./blockColumns";
+import {
+  buildBlockColumns,
+  buildBlockGroupingEntries,
+  poolWeightGate,
+} from "./blockColumns";
 import { healCollapsedFamilies, healNewColumn } from "./gridLayout";
 
 export const ROW_HEIGHT = 36;
@@ -556,8 +560,11 @@ export default function PositionsGrid({
       // than at the next remount.
       writableDepartments,
       planLocked,
+      // Pooled blocks whose rule decides membership: the weight cell of a row
+      // the rule leaves out has nothing to set.
+      poolWeightEditable: poolWeightGate(blocks),
     }),
-    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked]
+    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked, blocks]
   );
 
   // Memo for the answer above, keyed row -> field.

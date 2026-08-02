@@ -97,14 +97,13 @@ export type SpreadMethod =
  *  HOLIDAY_ACCRUAL  optional vacation-accrual line: accrualDays × costPerDay
  *                   × seasonality (increase-aware) − vacation cost.
  *  BANK_HOLIDAY     optional public-holiday premium line: the extra cost of the
- *                   staff who actually work each bank holiday, valued at the
- *                   per-working-day base pay. Hourly-wage staff only (their base
- *                   already excludes the holiday day), so a worked holiday is
- *                   pure additional cost. Global toggle, at most one per scenario
- *                   (see bankHolidayStaffFraction / bankHolidayPremiumMultiplier).
+ *                   staff who work each bank holiday, valued at the
+ *                   per-working-day base pay. Global toggle, at most one per
+ *                   scenario. All of its knobs fold into a single per-position
+ *                   coefficient before the VM runs — see bankHolidayCoefficient.
  *  SPREAD           a configurable lego (see SpreadMethod).
  *  SOCIAL_SECURITY  progressive bracket contribution over a configurable base.
- *  STAT             non-currency line: headcount / FTE / hours worked.
+ *  STAT             non-currency line: headcount / FTE / hours worked / hours paid.
  */
 export type ComponentKind =
   | "BASE_SALARY"
@@ -114,7 +113,20 @@ export type ComponentKind =
   | "SOCIAL_SECURITY"
   | "STAT";
 
-export type StatKind = "HEADCOUNT" | "FTE" | "HOURS";
+/** HOURS = hours actually at work; HOURS_PAID = the same total with the vacation
+ *  hours left in (worked + vacation). See hoursWorked/hoursPaid in reference.ts. */
+export type StatKind = "HEADCOUNT" | "FTE" | "HOURS" | "HOURS_PAID";
+
+/** The day-count series a CALENDAR base can resolve to. See BaseSelector. */
+export type CalendarSeries = "PAY_DAYS" | "REAL_DAYS" | "HOLIDAY_DAYS";
+
+/** ACC_ADD_DAYS' arg0 encoding — the wire form of CalendarSeries. Shared by the
+ *  compiler and the disassembler so the numbering has exactly one home. */
+export const CALENDAR_SERIES_ARG: Record<CalendarSeries, number> = {
+  PAY_DAYS: 0,
+  REAL_DAYS: 1,
+  HOLIDAY_DAYS: 2,
+};
 
 /**
  * Which monthly series feeds a PERCENT_OF / WEIGHTED_BY_BASE spread or a
@@ -127,17 +139,19 @@ export type StatKind = "HEADCOUNT" | "FTE" | "HOURS";
  * series.
  *
  * CALENDAR resolves to a day-count series: PAY_DAYS is the position's own
- * pay-type day basis (realDays for hourly, flat 30s for salaried) and
- * REAL_DAYS is the productive-days calendar regardless of pay type — both ×
- * seasonality, so inactive months contribute nothing. VACATION resolves to
- * the position's vacation-cost series (the same values BASE_DEDUCT nets out
- * of the salary line). These two power "multiplier of days / vacation cost"
- * blocks.
+ * pay-type day basis (realDays for hourly, flat 30s for salaried), REAL_DAYS
+ * is the productive-days calendar regardless of pay type, and HOLIDAY_DAYS is
+ * the public-holiday count per month — all × seasonality, so inactive months
+ * contribute nothing. VACATION resolves to the position's vacation-cost series
+ * (the same values BASE_DEDUCT nets out of the salary line). These two power
+ * "multiplier of days / vacation cost" blocks; HOLIDAY_DAYS in particular is
+ * the escape hatch for holiday-driven costs the built-in BANK_HOLIDAY premium
+ * does not model.
  */
 export type BaseSelector =
   | { kind: "BASE_SALARY" }
   | { kind: "COMPONENTS"; componentIds: ComponentDefId[] }
-  | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" }
+  | { kind: "CALENDAR"; series: CalendarSeries }
   | { kind: "VACATION" }
   /**
    * The Social-Security contributory base, decomposed. `includeBaseSalary` adds
@@ -152,7 +166,41 @@ export type BaseSelector =
       includeBaseSalary: boolean;
       includeVacation: boolean;
       componentIds: ComponentDefId[];
+    }
+  /**
+   * Two selectors combined by an arithmetic operation — the "compound block".
+   * COMPONENTS can only ever SUM its refs, so this is what expresses a
+   * difference, a product or a ratio between two series (e.g. cost ÷ hours).
+   *
+   * DIV yields 0 in any month the divisor is 0, matching WEIGHTED_BY_BASE's
+   * zero-total guard: a block silently contributing nothing beats an Infinity
+   * poisoning every downstream aggregate.
+   *
+   * Recursive by type, but the compiler VALIDATES TO DEPTH 1 — neither side may
+   * itself be a COMBINE, because the VM holds exactly one saved operand vector
+   * (see Op.ACC_PUSH). The type stays recursive so lifting that cap later is a
+   * compiler change, not a stored-data migration.
+   */
+  | {
+      kind: "COMBINE";
+      op: CombineOp;
+      left: BaseSelector;
+      right: BaseSelector;
+      /**
+       * Fixed multiplier, replacing the per-position ComponentValue.rate. Set
+       * when a compound block carries NO per-row input column: without it the
+       * absent value would read as rate 0 and zero the line, where the block
+       * plainly means "just the combination" (rate 1). Leave undefined to take
+       * the rate from each position's stored value as usual.
+       */
+      rate?: number;
     };
+
+/** Arithmetic a COMBINE selector applies between its two sides. */
+export type CombineOp = "ADD" | "SUB" | "MUL" | "DIV";
+
+/** Wire order — the VM carries the op as an index in its param pool. */
+export const COMBINE_OPS: readonly CombineOp[] = ["ADD", "SUB", "MUL", "DIV"] as const;
 
 export interface CostComponentDefinition extends SyncMeta {
   id: ComponentDefId;
@@ -181,6 +229,16 @@ export interface CostComponentDefinition extends SyncMeta {
   /** For PERCENT_OF / WEIGHTED_BY_BASE / SOCIAL_SECURITY. Defaults to base salary. */
   baseSelector?: BaseSelector;
   /**
+   * Exempt this line from the count × cluster-weight post-pass, which normally
+   * books every line `headcount` times over. Set for RATIOS — a line like
+   * cost ÷ hours is already the per-person figure and is the SAME figure for a
+   * row standing for three identical people, so scaling it would treble a
+   * number that should not move. Off by default; every existing line keeps its
+   * behaviour. (The HEADCOUNT stat and DIRECT_ABS are exempt on their own
+   * account and do not need this.)
+   */
+  countExempt?: boolean;
+  /**
    * When set, this SPREAD def is KPI-driven: at engine load the KPI's
    * precalculated series (× the per-position multiplier in ComponentValue.rate)
    * is resolved into monthlyValues and the def is rewritten to spreadMethod
@@ -190,13 +248,64 @@ export interface CostComponentDefinition extends SyncMeta {
   kpiDriverId?: string;
   /** Required when kind === "SOCIAL_SECURITY". */
   ssSchemeId?: SsSchemeId;
-  /** Fraction of a position's headcount that actually works each bank holiday
+  /** Fraction of a position's headcount rostered to work each bank holiday
    *  (0..1). Required when kind === "BANK_HOLIDAY". */
   bankHolidayStaffFraction?: number;
-  /** Pay-rate multiplier for a worked bank holiday (e.g. 1.5, 2). The premium is
-   *  the full multiplier — hourly base excludes the holiday day, so the whole
-   *  amount is additional. Required when kind === "BANK_HOLIDAY". */
+  /** Pay-rate multiplier for a worked bank holiday (e.g. 1.5, 2). Required when
+   *  kind === "BANK_HOLIDAY". Whether the whole multiplier or only the uplift is
+   *  charged depends on the position's pay type — see bankHolidayCoefficient. */
   bankHolidayPremiumMultiplier?: number;
+  /** Who the premium is booked for. Absent = "HOURLY". */
+  bankHolidayAppliesTo?: "HOURLY" | "ALL";
+  /** Hourly staff are paid a normal day for the holiday even when off. */
+  bankHolidayPaidWhenNotWorked?: boolean;
+  /** Sparse per-department overrides of bankHolidayStaffFraction, keyed by
+   *  department code. An absent key means the hotel-wide fraction. */
+  bankHolidayCoverageByDepartment?: Record<string, number>;
+}
+
+/**
+ * The BANK_HOLIDAY premium, folded into one per-position coefficient: the number
+ * of days' base pay a single public holiday costs for one head of this position.
+ * The VM then only does `coefficient · dayRate · holidayDays[m] · seas[m] · inc[m]`.
+ *
+ * The hourly/salaried split is not a policy choice — it falls out of which day
+ * basis each pay type is paid on (see the `days` selection in compile.ts):
+ *
+ *   HOURLY   paid on realDays = calendar − public holidays − weekends, so the
+ *            holiday is not in base pay at all. Working it is fully additional
+ *            at the holiday rate. Where the day is paid regardless
+ *            (paidWhenNotWorked), the staff who are OFF are also owed a normal
+ *            day — pay the app's base has likewise left out.
+ *   SALARIED paid on flat 30-day months, so the holiday is already covered by
+ *            base pay. Only the uplift over a normal day is incremental.
+ *
+ * Shared by the compiler and the reference implementation: the parity test
+ * between them is only meaningful if they compute this the same way, once.
+ */
+export function bankHolidayCoefficient(
+  def: Pick<
+    CostComponentDefinition,
+    | "bankHolidayStaffFraction"
+    | "bankHolidayPremiumMultiplier"
+    | "bankHolidayAppliesTo"
+    | "bankHolidayPaidWhenNotWorked"
+    | "bankHolidayCoverageByDepartment"
+  >,
+  position: Pick<Position, "hourlyRate" | "departmentCode">
+): number {
+  const hourly = position.hourlyRate > 0;
+  if (!hourly && (def.bankHolidayAppliesTo ?? "HOURLY") !== "ALL") return 0;
+
+  const hotelWide = def.bankHolidayStaffFraction ?? 0;
+  const override = def.bankHolidayCoverageByDepartment?.[position.departmentCode];
+  const coverage = override === undefined ? hotelWide : override;
+  const payRate = def.bankHolidayPremiumMultiplier ?? 0;
+
+  if (!hourly) return coverage * Math.max(0, payRate - 1);
+  return def.bankHolidayPaidWhenNotWorked
+    ? coverage * payRate + (1 - coverage)
+    : coverage * payRate;
 }
 
 export interface SsBracket {

@@ -17,7 +17,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { saveAllocation } from "../../allocations/repo";
@@ -52,7 +52,7 @@ let scenarioId: string;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   structureDb.exec(ALLOCATIONS_SQL);
 

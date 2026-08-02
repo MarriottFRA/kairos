@@ -25,7 +25,7 @@ import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../schema";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { saveCluster as saveHotelCluster } from "../../hotelClusters/repo";
 import { OuScope, resolveOuScope } from "../ouScope";
@@ -67,7 +67,7 @@ let valuesDb: Db;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);

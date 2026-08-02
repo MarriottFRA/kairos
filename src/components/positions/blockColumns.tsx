@@ -13,8 +13,6 @@ import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
-import CheckIcon from "@mui/icons-material/Check";
-import CloseIcon from "@mui/icons-material/Close";
 import {
   GridColDef,
   GridColumnGroupingModel,
@@ -28,11 +26,16 @@ import {
   blockFieldKey,
   blockInputSlots,
   blockTotalKey,
-  BOOLEAN_BLOCK_SLOTS,
+  POOL_WEIGHT_SLOT,
   BlockSlot,
   blockStatsAccountKey,
 } from "../../shared/positions/blockRows";
-import { isPoolEligible } from "../../shared/positions/poolSpread";
+import {
+  clampPoolWeight,
+  isPoolEligible,
+  poolShareWeight,
+  PoolMembershipSpec,
+} from "../../shared/positions/poolSpread";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
@@ -84,6 +87,65 @@ const MONTH_SHORT = Array.from({ length: 12 }, (_, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "short" })
 );
 
+// ── Pooled-block share weights ──────────────────────────────────────────────
+
+/** The block's membership + weighting rules, in the shape poolSpread reads. */
+export function poolMembership(block: BlockDto): PoolMembershipSpec {
+  return {
+    eligibilityMode: block.poolEligibilityMode ?? "MANUAL",
+    departments: block.poolDepartments ?? [],
+    jobTypes: block.poolJobTypes ?? [],
+    jobTypeWeights: block.poolJobTypeWeights ?? {},
+  };
+}
+
+/** The two row fields the rules look at, read off the flat grid row. */
+function poolRowSubject(row: PositionRow) {
+  return {
+    departmentCode: String(row.departmentCode ?? ""),
+    jobTypeCode: String(row.jobTypeCode ?? ""),
+  };
+}
+
+/** "1", "1.5", "1.25" — never "1.00", so a column of plain shares stays quiet. */
+const WEIGHT_FORMAT = new Intl.NumberFormat(undefined, {
+  maximumFractionDigits: 3,
+});
+
+/**
+ * Weight cells the user must not type into: under a RULE the block config owns
+ * who is in the pool, so a weight against somebody it excludes would sit there
+ * looking like it did something.
+ *
+ * Built once per block set and handed to `cellEditable` through the editability
+ * context, so the grid and the position form lock the same cell — this is the
+ * blocks counterpart of the basic-salary and cluster-multiplier gates already
+ * in columnFactory.
+ */
+export function poolWeightGate(
+  blocks: BlockDto[]
+): ((row: PositionRow | undefined, field: string) => boolean) | undefined {
+  const ruled = blocks.filter(
+    (block) =>
+      block.blockType === "POOL_SPREAD" && block.poolEligibilityMode === "RULE"
+  );
+  // Nothing to gate: hand back undefined so cellEditable's hot path skips the
+  // call entirely rather than running a Map miss for every rendered cell.
+  if (ruled.length === 0) return undefined;
+
+  const specByField = new Map<string, PoolMembershipSpec>(
+    ruled.map((block) => [
+      blockFieldKey(block.costDefId, POOL_WEIGHT_SLOT),
+      poolMembership(block),
+    ])
+  );
+  return (row, field) => {
+    const spec = specByField.get(field);
+    if (!spec || !row) return true;
+    return isPoolEligible(spec, poolRowSubject(row), false);
+  };
+}
+
 /** Header text per input slot: the big line + the muted unit tag. Exported so
  *  the position form labels the same cell the same way (it is the blocks
  *  counterpart of headerMeta.headerPresentation). */
@@ -98,12 +160,15 @@ export function slotPresentation(
   if (slot === "qty") return { short: "Count", unit: "per year" };
   if (slot === "unitRate") return { short: "Rate", unit: "per unit" };
   if (slot === "openingBase") return { short: "Opening base", unit: "prior year" };
-  if (slot === "eligible") {
+  if (slot === POOL_WEIGHT_SLOT) {
     return {
-      short: "In pool",
-      // "= config" is the same vocabulary a derived catalog column uses, so a
-      // locked cell reads as computed rather than broken.
-      unit: block.poolEligibilityMode === "RULE" ? "= config" : "shares pot",
+      short: "Share weight",
+      // The unit has to carry what blank means, because that is the one thing
+      // the two modes disagree on: out of the pool, or in on the default share.
+      unit:
+        block.poolEligibilityMode === "RULE"
+          ? "× share · blank = default"
+          : "shares · blank = out",
     };
   }
   const month = Number(slot.slice(1));
@@ -111,7 +176,7 @@ export function slotPresentation(
 }
 
 /** Plain-English summary of a pooled block's eligibility rule, for the cell
- *  tooltip that explains why the tick is not editable. */
+ *  tooltip that explains who the pot goes to. */
 function poolRuleSummary(block: BlockDto): string {
   const parts: string[] = [];
   const departments = block.poolDepartments ?? [];
@@ -183,74 +248,69 @@ export function buildBlockColumns(
       const headerClasses = ["pos-col--blocks"];
       if (index === 0) headerClasses.push("pos-col--sectionStart");
 
-      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
-        // The pool tick box. Under a RULE the block config owns eligibility, so
-        // the cell is read-only, derived from the rule, and muted like any other
-        // config-driven value (the Cluster Multiplier cell sets the precedent).
+      if (slot === POOL_WEIGHT_SLOT) {
+        // The share weight. One typed number carries two ideas, and which ones
+        // depends on the block's eligibility mode:
+        //
+        //   MANUAL  membership AND size of share. Blank is out of the pool.
+        //   RULE    size of share only — the rule owns membership, so a row it
+        //           excludes is locked (poolWeightGate) and a member left blank
+        //           shows the default it will actually be spread on, muted like
+        //           every other derived cell in the grid.
         const ruled = block.poolEligibilityMode === "RULE";
+        const spec = poolMembership(block);
         const summary = poolRuleSummary(block);
         columns.push({
           field: key,
           headerName: `${block.label} — ${short}`,
           description: ruled
-            ? `${block.label}: set by the block configuration — ${summary}. Edit the block to change who shares the pot.`
-            : `${block.label}: tick each position that shares this pot.`,
-          width: 92,
-          type: "boolean",
-          align: "center",
-          headerAlign: "center",
-          editable: !ruled,
+            ? `${block.label}: how many shares of the pot this position takes. Who is in the pool is set by the block — ${summary} — and blank takes the block's default weight for the classification.`
+            : `${block.label}: how many shares of the pot this position takes. 1 is a normal share, 2 a double share; blank or 0 leaves the position out of the pool.`,
+          width: 104,
+          type: "number",
+          align: "right",
+          headerAlign: "right",
+          editable: true,
           sortable: true,
           headerClassName: headerClasses.join(" "),
-          cellClassName: [
-            index === 0 ? "pos-cell--sectionStart" : "",
-            ruled ? "pos-cell--derived" : "",
-          ]
-            .filter(Boolean)
-            .join(" "),
+          cellClassName: (params) =>
+            [
+              "pos-cell--num",
+              index === 0 ? "pos-cell--sectionStart" : "",
+              // Muted whenever the number shown was not typed on this row —
+              // the rule's default, or no share at all.
+              clampPoolWeight(params.value) > 0 ? "" : "pos-cell--derived",
+            ]
+              .filter(Boolean)
+              .join(" "),
           renderHeader: renderBlockHeader(short, unit),
-          // Only the LOCKED cell gets a custom renderer. Left editable it uses
-          // the grid's own boolean cell, so it looks and behaves exactly like
-          // the Active column the user already knows.
-          ...(ruled
-            ? {
-                renderCell: (params) => {
-                  const on = params.value === true;
-                  return (
-                    <Tooltip
-                      title={`Set by the block configuration — ${summary}. This position ${
-                        on ? "shares" : "does not share"
-                      } the pot. Edit the block to change it.`}
-                    >
-                      <Box component="span" sx={{ display: "inline-flex" }}>
-                        {on ? (
-                          <CheckIcon fontSize="small" />
-                        ) : (
-                          <CloseIcon
-                            fontSize="small"
-                            sx={{ color: "text.disabled" }}
-                          />
-                        )}
-                      </Box>
-                    </Tooltip>
-                  );
-                },
-                valueGetter: (_value: unknown, row: PositionRow) =>
-                  !!row &&
-                  isPoolEligible(
-                    {
-                      eligibilityMode: "RULE",
-                      departments: block.poolDepartments ?? [],
-                      jobTypes: block.poolJobTypes ?? [],
-                    },
-                    {
-                      departmentCode: String(row.departmentCode ?? ""),
-                      jobTypeCode: String(row.jobTypeCode ?? ""),
-                    },
-                    false
-                  ),
-              }
-            : {}),
+          renderCell: (params) => {
+            const row = params.row as PositionRow | undefined;
+            const own = clampPoolWeight(params.value);
+            // What the spread will actually use — the row's own weight, the
+            // classification default, or nothing because this row is not in.
+            const effective = row
+              ? poolShareWeight(spec, poolRowSubject(row), own)
+              : own;
+            if (own > 0) {
+              return <span>{WEIGHT_FORMAT.format(own)}</span>;
+            }
+            const title =
+              effective > 0
+                ? `Takes ${WEIGHT_FORMAT.format(
+                    effective
+                  )} share${effective === 1 ? "" : "s"} of the pot — the block's default. Type a number here to give this position more or less.`
+                : ruled
+                  ? `Not in this pool. The block shares its pot with ${summary}.`
+                  : "Not in this pool. Type how many shares this position should take — 1 is a normal share.";
+            return (
+              <Tooltip title={title}>
+                <Box component="span" sx={{ color: "text.disabled" }}>
+                  {effective > 0 ? WEIGHT_FORMAT.format(effective) : "—"}
+                </Box>
+              </Tooltip>
+            );
+          },
         });
         return;
       }

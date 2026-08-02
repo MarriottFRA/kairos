@@ -69,3 +69,51 @@ export function applyBlocksStructureV12(
     );
   }
 }
+
+/**
+ * Local migration v3: cost_component_definitions.count_exempt — the ratio flag.
+ *
+ * A line is normally booked `headcount × clusterWeight` times over by the
+ * engine's post-pass. A ratio block (cost ÷ hours) is already the per-person
+ * figure and is the SAME figure however many identical people the row stands
+ * for, so it opts out. Default 0 → every existing definition keeps its exact
+ * behaviour, which is why this upgrades in place rather than needing a rebuild.
+ *
+ * Additive ALTER only: SQLite applies ADD COLUMN with a DEFAULT without copying
+ * the table, so no data is touched. Column-guarded because ADD COLUMN has no
+ * IF NOT EXISTS (the applyBlocksStructureV12 pattern above). Must stay in step
+ * with the baseline DDL in main/positions/schema.ts — the schema-drift test
+ * asserts a migrated store and a fresh one end up identical.
+ */
+export function applyCountExemptV3(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(cost_component_definitions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // structure tables not created yet
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("count_exempt")) {
+    handle.exec(
+      `ALTER TABLE cost_component_definitions ADD COLUMN count_exempt INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+}
+
+/**
+ * Every guarded column cost_component_definitions needs beyond its CREATE
+ * TABLE, in the order applyBaselineSchema applies them.
+ *
+ * Use THIS rather than the individual helpers when standing up the structure
+ * schema (including in tests) — the columns are added by ALTER, so the order
+ * they are applied in is the column order a store ends up with, and a caller
+ * that runs only some of them produces a database subtly unlike a real one.
+ * Idempotent, like each helper it calls.
+ */
+export function applyStructureColumns(
+  handle: InstanceType<typeof Database>
+): void {
+  applyBlocksStructureV12(handle);
+  applyCountExemptV3(handle);
+}

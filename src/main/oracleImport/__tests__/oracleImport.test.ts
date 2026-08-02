@@ -21,7 +21,7 @@ import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../../positions/schema";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { resolveOuScope } from "../../positions/ouScope";
 import {
   ensureFieldCatalogSeed,
@@ -671,7 +671,7 @@ describe("commitOraclePlan", () => {
   beforeEach(() => {
     localDb = new Database(":memory:");
     localDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-    applyBlocksStructureV12(localDb);
+    applyStructureColumns(localDb);
     secureDb = new Database(":memory:");
     secureDb.exec(POSITIONS_VALUE_TABLES_SQL);
 

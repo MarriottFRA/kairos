@@ -19,7 +19,7 @@ import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
 import { compile, simulate } from "../../../shared/engine/simulate";
 import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { ensureSystemDefs } from "../../blocks/repo";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { loadScenarioInput } from "../loadScenarioInput";
@@ -64,7 +64,7 @@ let scenarioId: string;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
@@ -302,7 +302,7 @@ describe("Recalculate → Results rows", () => {
     // engine mandates exists even if the structure read model was never built.
     const fresh = new Database(":memory:") as Db;
     fresh.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-    applyBlocksStructureV12(fresh);
+    applyStructureColumns(fresh);
     applyHotelClustersV13(fresh);
     const freshScenario = saveScenario(fresh, SCOPE, { year: YEAR, label: "P" }).id;
 

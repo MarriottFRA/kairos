@@ -17,6 +17,8 @@ import DarkModeIcon from "@mui/icons-material/DarkMode";
 import KairosMark from "../components/KairosMark";
 import { brokerErrorCode, describeBrokerError } from "../services/auth";
 import { useSettingsStore } from "../store/settings";
+// [AUTH-DEBUG] temporary sign-in tracing — delete with main/auth/authDebug.ts
+import AuthDebugToggle from "../components/AuthDebugToggle";
 
 // ────────────────────────────────────────────────────────────
 // 0) ROUTING + CONSTANTS
@@ -971,6 +973,8 @@ export default function Landing() {
           </Stack>
         </Box>
       )}
+      {/* [AUTH-DEBUG] temporary sign-in tracing toggle (discreet corner dot) */}
+      <AuthDebugToggle />
     </Box>
   );
 }

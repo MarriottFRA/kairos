@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, CalendarYear, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { ensureBaseSalaryDef, saveBlock } from "../../blocks/repo";
 import {
@@ -43,7 +43,7 @@ const getCalendar = async (ou: string, year: number): Promise<CalendarYear | nul
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);

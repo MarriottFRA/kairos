@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import {
   STRUCTURE_DOC_VERSION,
   StructureDoc,
+  calendarFromDoc,
+  calendarToDoc,
   emptyStructureDoc,
   fieldCatalogFromDoc,
   fieldCatalogToDoc,
@@ -21,6 +23,7 @@ import {
   mergeStructureDoc,
   ssSchemeToDoc,
   componentDefToDoc,
+  componentDefFromDoc,
   structureRowKey,
 } from "../structureDoc";
 
@@ -187,6 +190,99 @@ describe("child ordering", () => {
       { referenced_def_id: "b", sort_order: 1 },
     ]);
     expect(JSON.stringify(forward)).toBe(JSON.stringify(reversed));
+  });
+
+  it("round-trips a compound block's base and its ratio flag", () => {
+    // Everything a compound block needs has to survive a sync hop: the COMBINE
+    // selector rides base_ref as JSON, but count_exempt is a column of its own
+    // and would be silently dropped if the document forgot it — the ratio would
+    // then come back multiplied by headcount on the other device.
+    const baseRef = JSON.stringify({
+      kind: "COMBINE",
+      op: "DIV",
+      left: { kind: "BASE_SALARY" },
+      right: { kind: "COMPONENTS", componentIds: ["sys-stat-hours:OU1"] },
+    });
+    const doc = componentDefToDoc(
+      {
+        id: "d1",
+        ou: OU,
+        kind: "SPREAD",
+        spread_method: "PERCENT_OF",
+        label: "Cost Per Hour",
+        base_ref: baseRef,
+        count_exempt: 1,
+      },
+      []
+    );
+    expect(doc.countExempt).toBe(true);
+
+    const { def } = componentDefFromDoc(doc);
+    expect(def.count_exempt).toBe(1);
+    expect(JSON.parse(def.base_ref as string)).toEqual(JSON.parse(baseRef));
+  });
+
+  it("reads a document without countExempt as not exempt", () => {
+    // A client that predates the field omits the key entirely; the flag must
+    // fall back to today's behaviour rather than becoming undefined.
+    const { def } = componentDefFromDoc({ id: "d1", ou: OU, kind: "SPREAD" });
+    expect(def.count_exempt).toBe(0);
+  });
+
+  it("round-trips the whole bank-holiday premium config", () => {
+    // Every knob has to survive a sync hop. The coverage map is the easy one to
+    // lose: it is a JSON column locally, so forgetting it in either mapper would
+    // silently re-price every department at the hotel-wide fraction on the other
+    // device — a change nobody made, in a number nobody looks at twice.
+    const doc = calendarToDoc(
+      {
+        ou: OU,
+        year: 2026,
+        weekend_mask: 65,
+        bank_holiday_enabled: 1,
+        bank_holiday_staff_fraction: 0.7,
+        bank_holiday_premium_multiplier: 1.5,
+        bank_holiday_account: "A5120",
+        bank_holiday_applies_to: "ALL",
+        bank_holiday_paid_when_not_worked: 1,
+        bank_holiday_coverage_json: '{"1010":0.95,"1910":0}',
+        updated_at: "then",
+      },
+      []
+    );
+    // Parsed, not passed through as a string, so the document hashes on values.
+    expect(doc.bankHolidayCoverageByDepartment).toEqual({ "1010": 0.95, "1910": 0 });
+
+    const { year } = calendarFromDoc(doc);
+    expect(year.bank_holiday_applies_to).toBe("ALL");
+    expect(year.bank_holiday_paid_when_not_worked).toBe(1);
+    expect(JSON.parse(year.bank_holiday_coverage_json as string)).toEqual({
+      "1010": 0.95,
+      "1910": 0,
+    });
+    expect(year.bank_holiday_staff_fraction).toBe(0.7);
+    expect(year.bank_holiday_premium_multiplier).toBe(1.5);
+  });
+
+  it("reads a calendar from a client that predates the v4 knobs", () => {
+    // Absent keys must land on the pre-v4 behaviour — hourly staff only, the
+    // holiday unpaid unless worked, no overrides — not on undefined, which the
+    // NOT NULL columns would reject.
+    const { year } = calendarFromDoc({
+      ou: OU,
+      year: 2026,
+      weekendMask: 65,
+      bankHolidayEnabled: true,
+      bankHolidayStaffFraction: 0.5,
+      bankHolidayPremiumMultiplier: 2,
+      bankHolidayAccount: "A5120",
+      months: [],
+    });
+    expect(year.bank_holiday_applies_to).toBe("HOURLY");
+    expect(year.bank_holiday_paid_when_not_worked).toBe(0);
+    expect(year.bank_holiday_coverage_json).toBe("{}");
+    // And the hotel's own saved fraction is untouched by the new 0.7 default.
+    expect(year.bank_holiday_staff_fraction).toBe(0.5);
   });
 
   it("orders SS brackets by their ladder index", () => {

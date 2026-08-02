@@ -36,6 +36,11 @@
  * Pure and Electron-free: the repo hands it rows, it hands back rows.
  */
 
+import {
+  DEFAULT_BANK_HOLIDAY_APPLIES_TO,
+  DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
+  DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
+} from "../calendar";
 import { Row } from "./entityMap";
 
 /** The document's shape. Sections are optional so an older client can omit one. */
@@ -101,6 +106,28 @@ function nullableStr(value: unknown): string | null {
 function num(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/** The bank-holiday coverage map, from either side of the boundary: a JSON
+ *  string on the local row, an already-parsed object in the document. Finite
+ *  numeric entries only — normalizeBankHoliday clamps them properly once the
+ *  calendar is read back through it. */
+function parseCoverage(value: unknown): Record<string, number> {
+  let source = value;
+  if (typeof source === "string") {
+    try {
+      source = JSON.parse(source || "{}");
+    } catch {
+      return {};
+    }
+  }
+  if (!source || typeof source !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [code, raw] of Object.entries(source as Record<string, unknown>)) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) out[code] = parsed;
+  }
+  return out;
 }
 
 function nullableNum(value: unknown): number | null {
@@ -236,6 +263,10 @@ export function componentDefToDoc(row: Row, baseRefs: Row[]): Row {
     kpiDriverId: nullableStr(row.kpi_driver_id),
     blockId: nullableStr(row.block_id),
     baseRef: nullableStr(row.base_ref) === null ? null : json(row.base_ref, null),
+    // Ratio blocks opt out of the engine's headcount post-pass. Additive: a
+    // document from a client that predates it simply omits the key and reads
+    // back as false, which is the pre-existing behaviour.
+    countExempt: bool(row.count_exempt),
     baseRefs: baseRefs
       .map((ref) => ({
         referencedDefId: str(ref.referenced_def_id),
@@ -273,6 +304,7 @@ export function componentDefFromDoc(row: Row): { def: Row; baseRefs: Row[] } {
       kpi_driver_id: nullableStr(row.kpiDriverId),
       block_id: nullableStr(row.blockId),
       base_ref: row.baseRef == null ? null : text(row.baseRef),
+      count_exempt: bool(row.countExempt) ? 1 : 0,
       updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
       deleted_at: nullableStr(row.deletedAt),
     },
@@ -431,9 +463,20 @@ export function calendarToDoc(row: Row, monthRows: Row[]): Row {
     year: num(row.year),
     weekendMask: num(row.weekend_mask),
     bankHolidayEnabled: bool(row.bank_holiday_enabled),
-    bankHolidayStaffFraction: num(row.bank_holiday_staff_fraction, 0.5),
-    bankHolidayPremiumMultiplier: num(row.bank_holiday_premium_multiplier, 2),
+    bankHolidayStaffFraction: num(
+      row.bank_holiday_staff_fraction,
+      DEFAULT_BANK_HOLIDAY_STAFF_FRACTION
+    ),
+    bankHolidayPremiumMultiplier: num(
+      row.bank_holiday_premium_multiplier,
+      DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER
+    ),
     bankHolidayAccount: str(row.bank_holiday_account),
+    bankHolidayAppliesTo: str(row.bank_holiday_applies_to) || DEFAULT_BANK_HOLIDAY_APPLIES_TO,
+    bankHolidayPaidWhenNotWorked: bool(row.bank_holiday_paid_when_not_worked),
+    // Parsed rather than passed through as TEXT so the document hashes on the
+    // map's VALUES — the same reason blockConfigToDoc parses its config blob.
+    bankHolidayCoverageByDepartment: parseCoverage(row.bank_holiday_coverage_json),
     months: monthRows
       .map((month) => ({
         month: num(month.month),
@@ -456,9 +499,21 @@ export function calendarFromDoc(row: Row): { year: Row; months: Row[] } {
       year,
       weekend_mask: num(row.weekendMask),
       bank_holiday_enabled: bool(row.bankHolidayEnabled) ? 1 : 0,
-      bank_holiday_staff_fraction: num(row.bankHolidayStaffFraction, 0.5),
-      bank_holiday_premium_multiplier: num(row.bankHolidayPremiumMultiplier, 2),
+      bank_holiday_staff_fraction: num(
+        row.bankHolidayStaffFraction,
+        DEFAULT_BANK_HOLIDAY_STAFF_FRACTION
+      ),
+      bank_holiday_premium_multiplier: num(
+        row.bankHolidayPremiumMultiplier,
+        DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER
+      ),
       bank_holiday_account: str(row.bankHolidayAccount),
+      bank_holiday_applies_to:
+        str(row.bankHolidayAppliesTo) || DEFAULT_BANK_HOLIDAY_APPLIES_TO,
+      bank_holiday_paid_when_not_worked: bool(row.bankHolidayPaidWhenNotWorked) ? 1 : 0,
+      bank_holiday_coverage_json: JSON.stringify(
+        parseCoverage(row.bankHolidayCoverageByDepartment)
+      ),
       updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
     },
     months: monthRows.map((month) => ({

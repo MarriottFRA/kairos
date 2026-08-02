@@ -23,6 +23,7 @@ import {
   CircularProgress,
   Collapse,
   Divider,
+  FormControlLabel,
   IconButton,
   InputAdornment,
   MenuItem,
@@ -47,7 +48,9 @@ import {
   GridColDef,
 } from "@mui/x-data-grid-premium";
 import {
+  BankHolidayAppliesTo,
   CalendarYear,
+  DEFAULT_BANK_HOLIDAY_APPLIES_TO,
   DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
   DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
   DEFAULT_WEEKEND_MASK,
@@ -60,10 +63,14 @@ import {
   netProductiveDays,
   reseedWeekends,
 } from "../../shared/calendar";
+import { bankHolidayCoefficient } from "../../shared/engine/types";
 import { loadCalendar, listCalendarYears, saveCalendar } from "../../services/calendarService";
 import { loadAccounts } from "../../services/mappingTablesService";
+import { loadBudgetDepartments } from "../../services/budgetImportService";
 import { AccountOption } from "../../shared/mappingTables/types";
+import { BudgetDepartmentOption } from "../../shared/budgetImport/ipc";
 import AccountAutocomplete from "../../components/common/AccountAutocomplete";
+import BetaNotice from "../../components/home/BetaNotice";
 import {
   loadPositionDefaults,
   savePositionDefaults,
@@ -160,6 +167,12 @@ function calendarSignature(calendar: CalendarYear): string {
     bankHolidayStaffFraction: calendar.bankHolidayStaffFraction ?? null,
     bankHolidayPremiumMultiplier: calendar.bankHolidayPremiumMultiplier ?? null,
     bankHolidayAccount: (calendar.bankHolidayAccount ?? "").trim(),
+    bankHolidayAppliesTo: calendar.bankHolidayAppliesTo ?? null,
+    bankHolidayPaidWhenNotWorked: !!calendar.bankHolidayPaidWhenNotWorked,
+    // Key-sorted so re-typing an override in a different order is not a change.
+    bankHolidayCoverageByDepartment: Object.entries(
+      calendar.bankHolidayCoverageByDepartment ?? {}
+    ).sort(([a], [b]) => a.localeCompare(b)),
   });
 }
 
@@ -339,6 +352,12 @@ export default function Home() {
   // account picker; narrowed to A5… by the field's filter. Empty until synced,
   // which degrades the field to free text rather than blocking.
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  // Departments for the per-department coverage overrides. These come from the
+  // hotel's own BST pull, NOT the mapping tables: the company-wide chart runs to
+  // 200-plus departments, which is unusable as a picker and mostly irrelevant to
+  // any one hotel. Empty (never pulled) hides the overrides panel behind a note.
+  const [departments, setDepartments] = useState<BudgetDepartmentOption[]>([]);
+  const [coverageOpen, setCoverageOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -415,6 +434,29 @@ export default function Home() {
       cancelled = true;
     };
   }, []);
+
+  // The hotel's own departments for the coverage overrides, from its BST pull.
+  // OU-scoped, so it reloads with the hotel switcher. Best-effort: a hotel that
+  // has never pulled resolves to [] and the panel says so.
+  useEffect(() => {
+    if (!selectedHotelOu) {
+      setDepartments([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const options = await loadBudgetDepartments(selectedHotelOu);
+        if (!cancelled) setDepartments(options);
+      } catch (err) {
+        console.error("Failed to load budget departments:", err);
+        if (!cancelled) setDepartments([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHotelOu]);
 
   // Linked defaults resolved against the *live* calendar model, so previews
   // update as the user edits holidays/weekends before saving. Also what gets
@@ -565,6 +607,38 @@ export default function Home() {
     setCalendar((current) => (current ? { ...current, bankHolidayAccount: value } : current));
   }, []);
 
+  const handleBankHolidayAppliesTo = useCallback((value: BankHolidayAppliesTo) => {
+    setCalendar((current) => (current ? { ...current, bankHolidayAppliesTo: value } : current));
+  }, []);
+
+  const handleBankHolidayPaidWhenNotWorked = useCallback((paid: boolean) => {
+    setCalendar((current) =>
+      current ? { ...current, bankHolidayPaidWhenNotWorked: paid } : current
+    );
+  }, []);
+
+  /** Set or clear one department's coverage override. A blank field removes the
+   *  key entirely, which is what makes the map sparse — the department then
+   *  follows the hotel-wide number, including when that number later changes. */
+  const handleBankHolidayCoverage = useCallback((code: string, raw: string) => {
+    setCalendar((current) => {
+      if (!current) return current;
+      const next = { ...(current.bankHolidayCoverageByDepartment ?? {}) };
+      if (raw.trim() === "") {
+        delete next[code];
+      } else {
+        next[code] = Math.min(1, Math.max(0, (Number(raw) || 0) / 100));
+      }
+      return { ...current, bankHolidayCoverageByDepartment: next };
+    });
+  }, []);
+
+  const handleClearBankHolidayCoverage = useCallback(() => {
+    setCalendar((current) =>
+      current ? { ...current, bankHolidayCoverageByDepartment: {} } : current
+    );
+  }, []);
+
   // Discard unsaved edits by reloading the saved state from the store.
   const handleReset = useCallback(() => {
     void loadData();
@@ -654,8 +728,7 @@ export default function Home() {
   const totals = calendar ? calendarTotals(calendar) : null;
 
   // Bank-holiday premium display state. Percent is the friendly unit; the model
-  // stores a 0..1 fraction. `combined` (fraction × premium) is how many days of
-  // pay one holiday costs per hourly employee — the number the preview quotes.
+  // stores a 0..1 fraction.
   const bankHolidayEnabled = !!calendar?.bankHolidayEnabled;
   const bankHolidayStaffPct = Math.round(
     (calendar?.bankHolidayStaffFraction ?? DEFAULT_BANK_HOLIDAY_STAFF_FRACTION) * 100
@@ -663,9 +736,52 @@ export default function Home() {
   const bankHolidayMultiplier =
     calendar?.bankHolidayPremiumMultiplier ?? DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER;
   const bankHolidayAccount = calendar?.bankHolidayAccount ?? "";
-  const bankHolidayCombined =
-    (calendar?.bankHolidayStaffFraction ?? 0) * (calendar?.bankHolidayPremiumMultiplier ?? 0);
+  const bankHolidayAppliesTo =
+    calendar?.bankHolidayAppliesTo ?? DEFAULT_BANK_HOLIDAY_APPLIES_TO;
+  const bankHolidayPaidWhenNotWorked = !!calendar?.bankHolidayPaidWhenNotWorked;
+  const bankHolidayCoverage = calendar?.bankHolidayCoverageByDepartment ?? {};
+  const bankHolidayOverrideCount = Object.keys(bankHolidayCoverage).length;
+
+  // The rows the coverage panel shows: the hotel's budget departments, plus any
+  // override whose department has since dropped out of the file. Those would
+  // otherwise keep pricing a department with no way to see or clear them.
+  const coverageRows = useMemo(() => {
+    const known = new Set(departments.map((department) => department.code));
+    const orphans = Object.keys(bankHolidayCoverage)
+      .filter((code) => !known.has(code))
+      .sort()
+      .map((code) => ({ code, name: `${code} (not in the budget file)` }));
+    return [...departments, ...orphans];
+  }, [departments, bankHolidayCoverage]);
   const bankHolidayAccountMissing = bankHolidayEnabled && !bankHolidayAccount.trim();
+
+  // How many days of pay one public holiday costs per head, at the hotel-wide
+  // coverage. Computed by the engine's own coefficient function against two
+  // probe positions, so the preview can never drift from what actually gets
+  // booked — an empty override map makes both probes read the hotel-wide value.
+  const bankHolidayProbe = useMemo(
+    () => ({
+      bankHolidayStaffFraction: calendar?.bankHolidayStaffFraction ?? 0,
+      bankHolidayPremiumMultiplier: calendar?.bankHolidayPremiumMultiplier ?? 0,
+      bankHolidayAppliesTo,
+      bankHolidayPaidWhenNotWorked,
+      bankHolidayCoverageByDepartment: {},
+    }),
+    [
+      calendar?.bankHolidayStaffFraction,
+      calendar?.bankHolidayPremiumMultiplier,
+      bankHolidayAppliesTo,
+      bankHolidayPaidWhenNotWorked,
+    ]
+  );
+  const bankHolidayHourlyDays = bankHolidayCoefficient(bankHolidayProbe, {
+    hourlyRate: 1,
+    departmentCode: "",
+  });
+  const bankHolidaySalariedDays = bankHolidayCoefficient(bankHolidayProbe, {
+    hourlyRate: 0,
+    departmentCode: "",
+  });
 
   return (
     <Box sx={{ p: 3, maxWidth: 1600, mx: "auto" }}>
@@ -887,13 +1003,16 @@ export default function Home() {
                 </Typography>
                 <Chip
                   size="small"
-                  label="Hourly staff only"
+                  label={
+                    bankHolidayAppliesTo === "ALL" ? "All staff" : "Hourly staff only"
+                  }
                   sx={{ height: 20, fontSize: 11, fontWeight: 600 }}
                 />
               </Stack>
               <Typography variant="body2" sx={{ color: "text.secondary", maxWidth: 640 }}>
-                Add the extra cost of the staff who actually work each public holiday.
-                Salaried pay already covers the day, so only hourly-paid staff are affected.
+                Add the cost of the staff who work each public holiday. Set a hotel-wide
+                starting point here and refine it per department — or leave it off and
+                build the cost yourself with a block.
               </Typography>
             </Box>
             <Switch
@@ -922,7 +1041,7 @@ export default function Home() {
               >
                 <Field
                   label="Staff working"
-                  hint="Roughly what share of a position's hourly staff actually work a public holiday — a skeleton crew, not everyone."
+                  hint="Share of a position's staff rostered to work a public holiday — the rest have the day off and earn no premium. A 5-day rota in a 7-day operation already puts about 70% of a team on duty on any given day; departments that close on holidays are far lower, which is what the per-department overrides below are for."
                 >
                   <TextField
                     type="number"
@@ -959,6 +1078,24 @@ export default function Home() {
                 </Field>
 
                 <Field
+                  label="Applies to"
+                  hint="Hourly pay is calculated on net productive days, which already exclude public holidays — so a worked holiday is entirely additional and is charged at the full pay rate. Salaried pay spreads over the whole year and already covers the day, so including them charges only the uplift over a normal day."
+                >
+                  <TextField
+                    select
+                    size="small"
+                    value={bankHolidayAppliesTo}
+                    onChange={(event) =>
+                      handleBankHolidayAppliesTo(event.target.value as BankHolidayAppliesTo)
+                    }
+                    sx={{ width: 190, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
+                  >
+                    <MenuItem value="HOURLY">Hourly-paid staff</MenuItem>
+                    <MenuItem value="ALL">All staff</MenuItem>
+                  </TextField>
+                </Field>
+
+                <Field
                   label="Post to account"
                   hint="The GL account the premium is booked to, using each position's own department. Search by description; the account code is stored."
                 >
@@ -975,27 +1112,176 @@ export default function Home() {
                 </Field>
               </Stack>
 
-              <Stack direction="row" spacing={1} sx={{ mt: 0.5, alignItems: "flex-start" }}>
+              <FormControlLabel
+                sx={{ mt: 1.5, alignItems: "flex-start" }}
+                control={
+                  <Switch
+                    size="small"
+                    checked={bankHolidayPaidWhenNotWorked}
+                    onChange={(event) =>
+                      handleBankHolidayPaidWhenNotWorked(event.target.checked)
+                    }
+                    sx={{ mt: 0.25, mr: 1 }}
+                  />
+                }
+                label={
+                  <Box>
+                    <Typography variant="body2">
+                      The holiday is paid even when it is not worked
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      Hourly pay is calculated on net productive days, so a public holiday
+                      is not in base pay at all. Switch this on where the law or the
+                      contract pays the day regardless — it adds a normal day&rsquo;s pay
+                      for the staff who are off, which the budget would otherwise miss.
+                    </Typography>
+                  </Box>
+                }
+              />
+
+              {departments.length === 0 ? (
+                <Typography
+                  variant="caption"
+                  sx={{ color: "text.secondary", display: "block", mt: 1.5 }}
+                >
+                  Coverage can be set per department once this hotel&rsquo;s budget file
+                  has been pulled — the departments come from the file, not the
+                  company-wide chart.
+                </Typography>
+              ) : (
+                <Box sx={{ mt: 1.5 }}>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                    <Button
+                      size="small"
+                      variant="text"
+                      onClick={() => setCoverageOpen((open) => !open)}
+                    >
+                      {coverageOpen ? "Hide" : "Coverage by department"}
+                      {bankHolidayOverrideCount > 0 && ` (${bankHolidayOverrideCount})`}
+                    </Button>
+                    {bankHolidayOverrideCount > 0 && (
+                      <Button
+                        size="small"
+                        variant="text"
+                        color="inherit"
+                        onClick={handleClearBankHolidayCoverage}
+                      >
+                        Clear overrides
+                      </Button>
+                    )}
+                  </Stack>
+
+                  <Collapse in={coverageOpen} unmountOnExit>
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "text.secondary", display: "block", mt: 0.5, mb: 1 }}
+                    >
+                      A hotel does not staff a holiday evenly: Rooms and F&amp;B run close
+                      to normal while the back office closes. Leave a department blank to
+                      follow the hotel-wide {bankHolidayStaffPct}%.
+                    </Typography>
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                        gap: 1,
+                      }}
+                    >
+                      {coverageRows.map((department) => {
+                        const override = bankHolidayCoverage[department.code];
+                        return (
+                          <Stack
+                            key={department.code}
+                            direction="row"
+                            spacing={1}
+                            sx={{ alignItems: "center" }}
+                          >
+                            <Typography
+                              variant="body2"
+                              sx={{
+                                flex: 1,
+                                minWidth: 0,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                color: override === undefined ? "text.secondary" : "text.primary",
+                              }}
+                              title={`${department.code} — ${department.name}`}
+                            >
+                              {department.name}
+                            </Typography>
+                            <TextField
+                              type="number"
+                              size="small"
+                              value={override === undefined ? "" : Math.round(override * 100)}
+                              placeholder={String(bankHolidayStaffPct)}
+                              onChange={(event) =>
+                                handleBankHolidayCoverage(department.code, event.target.value)
+                              }
+                              slotProps={{
+                                htmlInput: {
+                                  min: 0,
+                                  max: 100,
+                                  step: 5,
+                                  "aria-label": `${department.name} coverage`,
+                                },
+                                input: {
+                                  endAdornment: (
+                                    <InputAdornment position="end">%</InputAdornment>
+                                  ),
+                                },
+                              }}
+                              sx={{
+                                width: 96,
+                                "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT },
+                              }}
+                            />
+                          </Stack>
+                        );
+                      })}
+                    </Box>
+                  </Collapse>
+                </Box>
+              )}
+
+              <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: "flex-start" }}>
                 <InfoOutlinedIcon sx={{ fontSize: 16, color: "primary.main", mt: "3px" }} />
                 <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                  {bankHolidayCombined > 0 ? (
+                  {bankHolidayHourlyDays > 0 || bankHolidaySalariedDays > 0 ? (
                     <>
-                      Each public holiday adds about{" "}
+                      At {bankHolidayStaffPct}% coverage, each public holiday costs about{" "}
                       <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
-                        {formatDefault(bankHolidayCombined)}×
+                        {formatDefault(bankHolidayHourlyDays)} days
                       </Box>{" "}
-                      a day&rsquo;s pay per hourly employee
+                      of pay per hourly employee
+                      {bankHolidayAppliesTo === "ALL" && (
+                        <>
+                          {" "}and{" "}
+                          <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
+                            {formatDefault(bankHolidaySalariedDays)} days
+                          </Box>{" "}
+                          per salaried employee
+                        </>
+                      )}
                       {totals && totals.publicHolidays > 0 ? (
                         <>
                           {" "}— roughly{" "}
                           <Box component="span" sx={{ fontWeight: 700, color: "text.primary" }}>
-                            {formatDefault(bankHolidayCombined * totals.publicHolidays)} days
+                            {formatDefault(bankHolidayHourlyDays * totals.publicHolidays)} days
                           </Box>{" "}
-                          of extra pay each across the {totals.publicHolidays} bank holiday
+                          each across the {totals.publicHolidays} bank holiday
                           {totals.publicHolidays === 1 ? "" : "s"} recorded this year.
                         </>
                       ) : (
                         <>. Record public holidays in the grid above to see the yearly cost.</>
+                      )}
+                      {bankHolidayOverrideCount > 0 && (
+                        <>
+                          {" "}
+                          {bankHolidayOverrideCount} department
+                          {bankHolidayOverrideCount === 1 ? " is" : "s are"} priced at their
+                          own coverage.
+                        </>
                       )}
                     </>
                   ) : (
@@ -1054,6 +1340,9 @@ export default function Home() {
           </Stack>
         </CardContent>
       </Card>
+
+      {/* Below the inputs, not above them: the calendar is why the page exists. */}
+      <BetaNotice />
 
       <Snackbar
         open={!!toast}

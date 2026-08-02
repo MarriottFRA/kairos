@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
 import { blockCostDefId } from "../../../shared/blocks/ipc";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { saveCluster } from "../../hotelClusters/repo";
 import {
@@ -41,7 +41,7 @@ let valuesDb: Db;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);

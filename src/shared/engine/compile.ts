@@ -20,7 +20,12 @@ import {
 } from "./opcodes";
 import {
   AggregateKey,
+  bankHolidayCoefficient,
+  BaseSelector,
+  CALENDAR_SERIES_ARG,
+  COMBINE_OPS,
   CompileError,
+  ComponentDefId,
   ComponentValue,
   CostComponentDefinition,
   MONTHS,
@@ -91,6 +96,50 @@ const BASE_REFERENCEABLE = new Set([
 
 function compareDefs(a: CostComponentDefinition, b: CostComponentDefinition): number {
   return a.sortOrder - b.sortOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/**
+ * Every component id a base selector references, recursing through COMBINE.
+ *
+ * Validation, the topological sort and the delete guards all need the FULL ref
+ * set — reading `selector.componentIds` directly would miss a compound's sides
+ * and let a dangling ref or a cycle through.
+ */
+export function collectBaseRefIds(
+  selector: BaseSelector | undefined,
+  out: ComponentDefId[] = []
+): ComponentDefId[] {
+  if (!selector) return out;
+  if (selector.kind === "COMBINE") {
+    collectBaseRefIds(selector.left, out);
+    collectBaseRefIds(selector.right, out);
+    return out;
+  }
+  if (selector.kind === "COMPONENTS" || selector.kind === "SS_BASE") {
+    for (const id of selector.componentIds) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * True when the selector needs a topo edge to the BASE_SALARY def.
+ *
+ * Everything except a pure COMPONENTS list gets one: BASE_SALARY and VACATION
+ * read its scratch directly, SS_BASE reads its net line, and CALENDAR is given
+ * one conservatively (it needs no series, but BASE_SALARY is a source node so
+ * the edge only pins ordering — kept to preserve the pre-COMBINE emission
+ * order). A COMBINE inherits the need from either side.
+ */
+function selectorNeedsBaseSalary(selector: BaseSelector | undefined): boolean {
+  if (!selector) return true; // default base = base salary
+  if (selector.kind === "COMPONENTS") return false;
+  if (selector.kind === "COMBINE") {
+    return (
+      selectorNeedsBaseSalary(selector.left) ||
+      selectorNeedsBaseSalary(selector.right)
+    );
+  }
+  return true;
 }
 
 function validate(
@@ -169,26 +218,33 @@ function validate(
         if (schemeErrors) errors.push(schemeErrors);
       }
     }
-    const baseComponentIds =
-      def.baseSelector?.kind === "COMPONENTS" || def.baseSelector?.kind === "SS_BASE"
-        ? def.baseSelector.componentIds
-        : null;
-    if (baseComponentIds) {
-      for (const refId of baseComponentIds) {
-        const target = defById.get(refId);
-        if (!target) {
-          errors.push({
-            code: "MISSING_DEF",
-            message: `"${def.label}" includes an unknown component in its base.`,
-            refs: [def.id, refId],
-          });
-        } else if (!BASE_REFERENCEABLE.has(target.kind)) {
-          errors.push({
-            code: "INVALID_BASE_REF",
-            message: `"${def.label}" cannot include ${target.kind} component "${target.label}" in its base.`,
-            refs: [def.id, refId],
-          });
-        }
+    // The VM saves exactly one operand vector (Op.ACC_PUSH), so a compound may
+    // not nest. The type is recursive so this cap can be lifted without
+    // touching stored data — see BaseSelector.COMBINE.
+    if (def.baseSelector?.kind === "COMBINE") {
+      const { left, right } = def.baseSelector;
+      if (left.kind === "COMBINE" || right.kind === "COMBINE") {
+        errors.push({
+          code: "INVALID_BASE_REF",
+          message: `"${def.label}": a combined base cannot contain another combined base.`,
+          refs: [def.id],
+        });
+      }
+    }
+    for (const refId of collectBaseRefIds(def.baseSelector)) {
+      const target = defById.get(refId);
+      if (!target) {
+        errors.push({
+          code: "MISSING_DEF",
+          message: `"${def.label}" includes an unknown component in its base.`,
+          refs: [def.id, refId],
+        });
+      } else if (!BASE_REFERENCEABLE.has(target.kind)) {
+        errors.push({
+          code: "INVALID_BASE_REF",
+          message: `"${def.label}" cannot include ${target.kind} component "${target.label}" in its base.`,
+          refs: [def.id, refId],
+        });
       }
     }
   }
@@ -287,21 +343,17 @@ function topoSort(
       def.kind !== "HOLIDAY_ACCRUAL" && def.kind !== "BANK_HOLIDAY"
         ? def.baseSelector
         : undefined;
-    if (selector?.kind === "COMPONENTS") {
-      for (const refId of selector.componentIds) {
-        const refIndex = indexById.get(refId);
-        if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
-      }
-    } else if (selector?.kind === "SS_BASE") {
-      // Net base + vacation scratch are both produced by the BASE_SALARY block,
-      // so always depend on it; then on each custom component line.
-      if (baseIndex >= 0 && baseIndex !== i) dependsOn[i].push(baseIndex);
-      for (const refId of selector.componentIds) {
-        const refIndex = indexById.get(refId);
-        if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
-      }
-    } else if (baseIndex >= 0 && baseIndex !== i) {
+    // SS_BASE reads the net base line and the vacation scratch, both produced
+    // by BASE_SALARY; COMBINE inherits the need from whichever side wants it;
+    // a bare BASE_SALARY/VACATION/absent selector wants it directly. Only a
+    // pure COMPONENTS or CALENDAR selector needs no base edge.
+    if (selectorNeedsBaseSalary(selector) && baseIndex >= 0 && baseIndex !== i) {
       dependsOn[i].push(baseIndex);
+    }
+    // Every referenced line, including both sides of a compound.
+    for (const refId of collectBaseRefIds(selector)) {
+      const refIndex = indexById.get(refId);
+      if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
     }
   }
 
@@ -427,12 +479,21 @@ export function compile(input: ScenarioInput): CompileResult {
   const positionInstrStart = new Uint32Array(positionCount + 1);
 
   /** Emits ACC_CLEAR + ACC_ADD_* ops realizing a base selector for position p. */
-  const emitAccumulator = (
-    def: CostComponentDefinition,
+  const emitSelector = (
+    selector: BaseSelector | undefined,
     lineBase: number
   ): void => {
+    if (selector?.kind === "COMBINE") {
+      // Depth-1 (validated): build the LEFT operand in the accumulator, park it
+      // in acc2, then build the right one the same way. Nothing new is needed
+      // for the operands themselves — every ACC_ADD_* op is reused as-is, each
+      // recursion emitting its own ACC_CLEAR.
+      emitSelector(selector.left, lineBase);
+      emitter.emit(Op.ACC_PUSH, LINE_NONE, 0, []);
+      emitSelector(selector.right, lineBase);
+      return;
+    }
     emitter.emit(Op.ACC_CLEAR, LINE_NONE, 0, []);
-    const selector = def.baseSelector;
     if (!selector || selector.kind === "BASE_SALARY") {
       emitter.emit(Op.ACC_ADD_GROSS, LINE_NONE, 0, []);
       return;
@@ -441,7 +502,7 @@ export function compile(input: ScenarioInput): CompileResult {
       emitter.emit(
         Op.ACC_ADD_DAYS,
         LINE_NONE,
-        selector.series === "REAL_DAYS" ? 1 : 0,
+        CALENDAR_SERIES_ARG[selector.series] ?? 0,
         []
       );
       return;
@@ -477,6 +538,9 @@ export function compile(input: ScenarioInput): CompileResult {
       }
     }
   };
+
+  const emitAccumulator = (def: CostComponentDefinition, lineBase: number): void =>
+    emitSelector(def.baseSelector, lineBase);
 
   for (let p = 0; p < positionCount; p++) {
     const position = positions[p];
@@ -555,14 +619,11 @@ export function compile(input: ScenarioInput): CompileResult {
           break;
         }
         case "BANK_HOLIDAY": {
-          // The staff-fraction × premium is folded into one coefficient here.
-          // Hourly-wage staff only (hourlyRate > 0) — their base excludes the
-          // holiday day, so a worked holiday is fully additional; for everyone
-          // else the coefficient is 0, so the line is a branchless zero.
-          const combinedMult =
-            position.hourlyRate > 0
-              ? (def.bankHolidayStaffFraction ?? 0) * (def.bankHolidayPremiumMultiplier ?? 0)
-              : 0;
+          // Every knob — coverage (hotel-wide or the position's department),
+          // pay rate, who it applies to, whether the day is paid regardless —
+          // folds into one coefficient here, shared with reference.ts. An
+          // ineligible position gets 0, so the line is a branchless zero.
+          const combinedMult = bankHolidayCoefficient(def, position);
           emitter.emit(Op.BANK_HOLIDAY, line, increaseFlag, [combinedMult]);
           break;
         }
@@ -592,6 +653,13 @@ export function compile(input: ScenarioInput): CompileResult {
             emitter.emit(Op.STAT_HC, line, 0, [position.headcount]);
           } else if (def.statKind === "FTE") {
             emitter.emit(Op.STAT_FTE, line, 0, [position.fte]);
+          } else if (def.statKind === "HOURS_PAID") {
+            // Worked + vacation, spread by days and NOT taken back out — so it
+            // needs no weights. See reference.hoursPaid.
+            emitter.emit(Op.STAT_HOURS_PAID, line, 0, [
+              position.yearlyHoursWorked +
+                position.vacationDays * position.dailyContractHours,
+            ]);
           } else {
             const vacationHours = position.vacationDays * position.dailyContractHours;
             emitter.emit(Op.STAT_HOURS, line, 0, [
@@ -606,7 +674,17 @@ export function compile(input: ScenarioInput): CompileResult {
           switch (def.spreadMethod) {
             case "PERCENT_OF": {
               emitAccumulator(def, lineBase);
-              emitter.emit(Op.PCT_OF_ACC, line, 0, [value?.rate ?? 0]);
+              if (def.baseSelector?.kind === "COMBINE") {
+                // The accumulator pair now holds (left, right); COMBINE_ACC
+                // applies the operation and the rate in one go. A pinned
+                // selector rate wins over the per-row value (see the type).
+                emitter.emit(Op.COMBINE_ACC, line, 0, [
+                  def.baseSelector.rate ?? value?.rate ?? 0,
+                  COMBINE_OPS.indexOf(def.baseSelector.op),
+                ]);
+              } else {
+                emitter.emit(Op.PCT_OF_ACC, line, 0, [value?.rate ?? 0]);
+              }
               break;
             }
             case "WEIGHTED_BY_BASE": {

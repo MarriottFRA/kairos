@@ -26,10 +26,13 @@ import {
   commitImport,
   getCurrentImport,
   getImportRows,
+  listImportDepartments,
 } from "../../main/budgetImport/repo";
+import { listDepartments } from "../../main/mappingTables/repo";
 import { recomputeAllForOu } from "../../main/kpiDrivers/repo";
 import {
   BUDGET_IMPORT_CHANNELS,
+  BudgetDepartmentOption,
   ImportRowsResult,
   PullResult,
 } from "../../shared/budgetImport/ipc";
@@ -155,8 +158,40 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
     }
   };
 
+  /**
+   * The hotel's own department list, from its budget file rather than from the
+   * company-wide mapping tables. Names are resolved here, the same way the
+   * allocations view does it, so the renderer never crosses the wide map.
+   * Returns [] when the hotel has never pulled — the caller shows that as "pull
+   * the file first" rather than falling back to 200 irrelevant departments.
+   */
+  const listDepartmentsHandler: IpcHandler<
+    any,
+    IpcResult<BudgetDepartmentOption[]>
+  > = async (_event, request) => {
+    try {
+      const scope = resolveOuScope(request);
+      const db = localDbHandle();
+      const nameByCode = new Map(
+        listDepartments(db).map((option) => [option.code, option.name])
+      );
+      const options = listImportDepartments(db, scope.ou).map((code) => ({
+        code,
+        name: nameByCode.get(code) ?? code,
+      }));
+      // By description, so the picker reads the way the user thinks about the
+      // hotel rather than in GL-code order.
+      options.sort((a, b) => a.name.localeCompare(b.name));
+      return ok(options);
+    } catch (error) {
+      console.error("Budget import listDepartments failed:", error);
+      return fail(error, [] as BudgetDepartmentOption[]);
+    }
+  };
+
   return {
     [BUDGET_IMPORT_CHANNELS.pull]: pull,
     [BUDGET_IMPORT_CHANNELS.getCurrent]: getCurrent,
+    [BUDGET_IMPORT_CHANNELS.listDepartments]: listDepartmentsHandler,
   };
 }

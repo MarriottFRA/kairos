@@ -343,7 +343,13 @@ export function sanitizeRow(
       if (min !== undefined) num = Math.max(min, num);
       if (max !== undefined) num = Math.min(max, num);
       if (def.dataType === "INTEGER") num = Math.trunc(num);
-      if (decimals !== undefined) {
+      // Vacation weights are exempt from the decimals clamp. They are relative
+      // proportions the engine normalizes by their own total, so rounding them
+      // buys no storage tidiness and actively breaks the holiday accrual: an
+      // even spread is 1/12 = 8.3333…%, which cannot survive 4 decimals, and the
+      // accrual nets to zero only when the months are exactly equal to each
+      // other. Rounding here is what put 0.28 in every month. min/max still bite.
+      if (decimals !== undefined && def.vector !== "vacationMonthlyWeights") {
         const factor = 10 ** decimals;
         num = Math.round(num * factor) / factor;
       }
@@ -415,9 +421,11 @@ export function newDraftRow(
     }
   }
 
-  // Vacation weights default to an even spread (the workbook's 1/12 pattern).
+  // Vacation weights default to an even year. They are relative weights the
+  // engine normalizes by their own sum, so twelve 1s says "even" more plainly
+  // than twelve 0.0833s — and unlike 1/12 it is a number a user can retype.
   for (let m = 1; m <= MONTHS; m++) {
-    row[vectorKey("vacationMonthlyWeights", m)] = 1 / 12;
+    row[vectorKey("vacationMonthlyWeights", m)] = 1;
   }
 
   return { ...row, ...init };
@@ -476,9 +484,11 @@ export function rowToEnginePosition(
     yearlyHoursWorked: toNumber(row.yearlyHoursWorked, 0),
     vacationDays: toNumber(row.vacationDays, 0),
     vacationMonthlyWeights: rowVector(row, "vacationMonthlyWeights"),
-    // Accrual is auto-calculated (Yearly Days ÷ 12) and ALWAYS computed — the
-    // accrual account decides whether the line is POSTED, not whether it is
-    // calculated. Mirror in loadScenarioInput.
+    // Accrual is ALWAYS computed — the accrual account decides whether the line
+    // is POSTED, not whether it is calculated. Mirror in loadScenarioInput.
+    // The engine reads this as an on/off guard only (nonzero = accrue): the
+    // roll-forward derives its own earning leg from the leave actually taken,
+    // so the magnitude here is not the rate. See the ACCRUAL op in opcodes.ts.
     accrualDaysPerMonth: toNumber(row.vacationDays, 0) / 12,
     updatedAt: "",
     deletedAt: null,
@@ -596,10 +606,16 @@ export const COMPUTES: Record<string, ComputeFn> = {
 
   vacationWeightsTotal: (row) => sumVector(row, "vacationMonthlyWeights"),
 
-  /** Monthly holiday-accrual entitlement: Yearly Days ÷ 12. Read-only, and
-   *  always calculated — the Accrual account decides only whether the resulting
-   *  line is POSTED (see rowToEnginePosition / loadScenarioInput). */
-  accrualDaysPerMonth: (row) => toNumber(row.vacationDays, 0) / 12,
+  /** Monthly holiday-accrual entitlement: Yearly Days ÷ WORKING months, not ÷ 12.
+   *  The engine earns the provision across the months the position actually works
+   *  (a 9-month post earns its entitlement in 9), so dividing by 12 would under-
+   *  report the rate for a seasonal row. Identical for a full-year row. Read-only,
+   *  and always calculated — the Accrual account decides only whether the
+   *  resulting line is POSTED (see rowToEnginePosition / loadScenarioInput). */
+  accrualDaysPerMonth: (row) => {
+    const workingMonths = sumVector(row, "seasonality");
+    return workingMonths > 0 ? toNumber(row.vacationDays, 0) / workingMonths : 0;
+  },
 
   /** Σ of the twelve Additional Cost months — the summary the family collapses
    *  behind (see COLLAPSIBLE_MONTH_FAMILIES). Deliberately the raw sum, NOT the

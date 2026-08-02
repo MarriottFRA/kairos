@@ -480,7 +480,8 @@ export function getComponentDefinitions(
     db,
     `SELECT id, ou, kind, spread_method, stat_kind, label, account_code,
             department_mode, fixed_department, increase_aware, sort_order,
-            base_selector_kind, ss_scheme_id, kpi_driver_id, base_ref, updated_at
+            base_selector_kind, ss_scheme_id, kpi_driver_id, base_ref,
+            count_exempt, updated_at
        FROM cost_component_definitions
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY sort_order, id`
@@ -516,7 +517,11 @@ export function getComponentDefinitions(
       // on base_selector_kind cannot be widened in SQLite. Unknown kinds are
       // dropped rather than surfaced as a selector the compiler can't run.
       const parsed = JSON.parse(row.base_ref) as { kind?: string } & Record<string, unknown>;
-      if (parsed.kind === "CALENDAR" || parsed.kind === "VACATION") {
+      if (
+        parsed.kind === "CALENDAR" ||
+        parsed.kind === "VACATION" ||
+        parsed.kind === "COMBINE"
+      ) {
         baseSelector = parsed as BaseSelector;
       }
     }
@@ -536,6 +541,7 @@ export function getComponentDefinitions(
       baseSelector,
       ssSchemeId: (row.ss_scheme_id as SsSchemeId) ?? undefined,
       kpiDriverId: (row.kpi_driver_id as string) ?? undefined,
+      countExempt: row.count_exempt === 1,
       updatedAt: row.updated_at as string,
       deletedAt: null,
     };

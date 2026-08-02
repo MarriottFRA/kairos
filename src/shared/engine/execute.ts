@@ -16,6 +16,7 @@ import {
   FLAG_INCREASE_AWARE,
   Op,
   SCRATCH_ACC,
+  SCRATCH_ACC2,
   SCRATCH_DAYRATE,
   SCRATCH_GROSS,
   SCRATCH_INC,
@@ -26,6 +27,7 @@ import {
   SCRATCH_TWD2,
   SCRATCH_TWM,
   SCRATCH_VAC,
+  SCRATCH_VACDAYS,
 } from "./opcodes";
 import { MONTHS } from "./types";
 
@@ -74,6 +76,9 @@ const OP_SOCIAL_SEC = Op.SOCIAL_SEC;
 const OP_STAT_HC = Op.STAT_HC;
 const OP_STAT_FTE = Op.STAT_FTE;
 const OP_STAT_HOURS = Op.STAT_HOURS;
+const OP_STAT_HOURS_PAID = Op.STAT_HOURS_PAID;
+const OP_ACC_PUSH = Op.ACC_PUSH;
+const OP_COMBINE_ACC = Op.COMBINE_ACC;
 
 export function executePosition(
   plan: CompiledPlan,
@@ -173,17 +178,21 @@ export function executePosition(
       case OP_VACATION: {
         const vacationDays = paramPool[pp];
         const dayRate = scratch[SCRATCH_DAYRATE];
-        // Weights are normalized by their own total (see reference.vacationCost),
+        // Weights are normalized by their own total (see reference.vacationDaysTaken),
         // so the year's leave sums to vacationDays whatever the raw weights total.
+        // Days are kept alongside the priced series: ACCRUAL provisions for the
+        // same days, and deriving both legs from one series is what makes the
+        // accrual line net to zero.
         let weightTotal = 0;
         for (let m = 0; m < MONTHS; m++) weightTotal += paramPool[pp + 1 + m];
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
-          scratch[SCRATCH_VAC + m] =
+          const takenDays =
             s === 0 || weightTotal === 0
               ? 0
-              : vacationDays * paramPool[pp + 1 + m] / weightTotal * s * dayRate *
-                scratch[SCRATCH_INC + m];
+              : vacationDays * paramPool[pp + 1 + m] / weightTotal * s;
+          scratch[SCRATCH_VACDAYS + m] = takenDays;
+          scratch[SCRATCH_VAC + m] = takenDays * dayRate * scratch[SCRATCH_INC + m];
         }
         break;
       }
@@ -195,16 +204,28 @@ export function executePosition(
       }
 
       case OP_ACCRUAL: {
+        // Liability roll-forward in days — mirrors reference.holidayAccrual term
+        // for term. accrualDays is an on/off guard only; the earning leg is
+        // derived from the taken-days series so the year telescopes to zero.
         const out = outLine[i] * MONTHS;
         const accrualDays = paramPool[pp];
         const dayRate = scratch[SCRATCH_DAYRATE];
+        const twm = scratch[SCRATCH_TWM];
+        let totalTaken = 0;
+        for (let m = 0; m < MONTHS; m++) totalTaken += scratch[SCRATCH_VACDAYS + m];
+        let balance = 0;
+        let prevRate = 0;
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
-          values[out + m] =
-            accrualDays === 0 || s === 0
-              ? 0
-              : accrualDays * dayRate * s * scratch[SCRATCH_INC + m] -
-                scratch[SCRATCH_VAC + m];
+          if (accrualDays === 0 || s === 0 || twm === 0) {
+            values[out + m] = 0;
+            continue;
+          }
+          const rate = dayRate * scratch[SCRATCH_INC + m];
+          const opening = balance;
+          balance += totalTaken * s / twm - scratch[SCRATCH_VACDAYS + m];
+          values[out + m] = balance * rate - opening * prevRate;
+          prevRate = rate;
         }
         break;
       }
@@ -242,10 +263,15 @@ export function executePosition(
       }
 
       case OP_ACC_ADD_DAYS: {
-        // arg0 = 1 → productive-days calendar; 0 → the position's pay basis.
+        // arg0 = 1 → productive-days calendar; 2 → public-holiday count;
+        // 0 → the position's pay basis.
         if (arg0[i] === 1) {
           for (let m = 0; m < MONTHS; m++) {
             scratch[SCRATCH_ACC + m] += realDays[m] * seasonality[posOfs + m];
+          }
+        } else if (arg0[i] === 2) {
+          for (let m = 0; m < MONTHS; m++) {
+            scratch[SCRATCH_ACC + m] += holidayDays[m] * seasonality[posOfs + m];
           }
         } else {
           for (let m = 0; m < MONTHS; m++) {
@@ -413,6 +439,46 @@ export function executePosition(
         }
         break;
       }
+
+      case OP_ACC_PUSH: {
+        for (let m = 0; m < MONTHS; m++) scratch[SCRATCH_ACC2 + m] = scratch[SCRATCH_ACC + m];
+        break;
+      }
+
+      case OP_COMBINE_ACC: {
+        // acc2 is the LEFT operand (saved by ACC_PUSH), acc the right.
+        // Mirrors the COMBINE branch of reference.resolveBase term for term.
+        const out = outLine[i] * MONTHS;
+        const rate = paramPool[pp];
+        const combineOp = paramPool[pp + 1];
+        for (let m = 0; m < MONTHS; m++) {
+          const l = scratch[SCRATCH_ACC2 + m];
+          const r = scratch[SCRATCH_ACC + m];
+          let v = 0;
+          if (combineOp === 0) v = l + r;
+          else if (combineOp === 1) v = l - r;
+          else if (combineOp === 2) v = l * r;
+          else v = r === 0 ? 0 : l / r;
+          values[out + m] = rate * v;
+        }
+        break;
+      }
+
+      case OP_STAT_HOURS_PAID: {
+        // STAT_HOURS without the vacation take-out — see reference.hoursPaid.
+        const out = outLine[i] * MONTHS;
+        const totalHours = paramPool[pp];
+        const twd2 = scratch[SCRATCH_TWD2];
+        for (let m = 0; m < MONTHS; m++) {
+          const s = seasonality[posOfs + m];
+          if (totalHours === 0 || s === 0) {
+            values[out + m] = 0;
+          } else {
+            values[out + m] = (totalHours / twd2) * realDays[m] * s;
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -433,6 +499,8 @@ export function executePosition(
       const def = defs[di];
       if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
       if (def.spreadMethod === "DIRECT_ABS") continue;
+      // Ratios opt out — see CostComponentDefinition.countExempt.
+      if (def.countExempt) continue;
       const lineOfs = (p * defCount + di) * MONTHS;
       for (let m = 0; m < MONTHS; m++) values[lineOfs + m] *= coeff;
     }

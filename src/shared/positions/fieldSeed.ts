@@ -191,7 +191,17 @@ import { POSITION_COUNT_ACCOUNT, STATS_ACCOUNT_FILTER } from "./systemAccounts";
 //     written), and previously typed values are ignored. Anything that consumed
 //     FTE — the STAT_FTE head, FTE-based pool spread, allocation bases — keeps
 //     working unchanged, on a number the user can no longer contradict.
-export const SEED_VERSION = 24;
+// v25: Vacation months became WEIGHTS, not percentages — dataType PERCENT →
+//     NUMBER, the max-1 clamp dropped, labels "Vacation % n" → "Vacation Weight
+//     n", and the total renamed "Total Weight" with its must-equal-100% tint
+//     removed. The engine always normalized these by their own sum, so this is a
+//     display/parse change only and STORED VALUES NEED NO MIGRATION: a row
+//     holding twelve 0.0833s is still a perfectly even year, it now just reads
+//     0.0833 instead of 8.33%. New rows seed twelve 1s. The percent skin could
+//     not express an even year at all (1/12 = 8.3333…% ≠ 8.33%), and the 100%
+//     cue actively pushed users into unequal months, which the holiday accrual
+//     then reported as permanent monthly noise.
+export const SEED_VERSION = 25;
 
 /** base_account prefixes each account field books to — a first, broad pass the
  *  user will narrow later. The stats side is the shared STATS_ACCOUNT_FILTER, so
@@ -764,9 +774,11 @@ const SEED: FieldDef[] = [
     locked: true,
     validation: { min: 0, max: 366 },
   }),
-  // Auto-calculated, not entered: the monthly entitlement is Yearly Days ÷ 12.
-  // Read-only COMPUTED, so it always shows the accrued amount; whether the
-  // accrual is actually booked is gated separately by the Accrual account below.
+  // Auto-calculated, not entered: the monthly entitlement is Yearly Days ÷ the
+  // position's WORKING months (the engine earns the provision only in months it
+  // works, so a seasonal row accrues faster than a twelfth a month). Read-only
+  // COMPUTED, so it always shows the accrued amount; whether the accrual is
+  // actually booked is gated separately by the Accrual account below.
   sys("vacation", "NUMBER", "COMPUTED", {
     key: "accrualDaysPerMonth",
     defaultLabel: "Accrual Days",
@@ -778,19 +790,29 @@ const SEED: FieldDef[] = [
     defaultLabel: "Accrual",
     dropdownSource: { kind: "accounts", filter: VACATION_ACCOUNT_FILTER },
   }),
-  // PERCENT, not NUMBER: the twelve are shares of the year, so they read as
-  // "8.33%" and total "100%" rather than "0.0833" summing to "1.00". Storage is
-  // unchanged — still the 0..1 fraction the engine normalizes — because PERCENT
-  // is purely a display/parse skin (columnFactory), so nothing downstream moves.
+  // NUMBER, not PERCENT: these are relative WEIGHTS, not shares of 100. The
+  // engine normalizes them by their own total (reference.vacationDaysTaken), so
+  // twelve 1s, twelve 8.33s and twelve 0.0833s all mean the same even year —
+  // only the ratios between the months matter.
+  //
+  // They were PERCENT, and that skin caused a real bug. It scaled ×100, parsed
+  // anything > 1 as a whole percent (so a typed "2" silently became 0.02),
+  // clamped at max 1, and paired with a "must total 100%" cue. Users hand-nudged
+  // months to 8.36/8.40 to make the column add up, and the holiday accrual — which
+  // reads zero only when the twelve are exactly EQUAL — showed the resulting
+  // inequality as permanent monthly noise. An even year is 1/12 = 8.3333…%, which
+  // two decimals cannot express, so the percent framing could not represent the
+  // most common case. Weights can: type 1 twelve times.
   ...monthFamily(
     "vacation",
     "vacationMonthlyWeights",
-    (m) => `Vacation % ${m}`,
-    { dataType: "PERCENT", validation: { min: 0, max: 1, decimals: 4 } }
+    (m) => `Vacation Weight ${m}`,
+    { dataType: "NUMBER", validation: { min: 0, decimals: 4 } }
   ),
-  sys("vacation", "PERCENT", "COMPUTED", {
+  // Informational only — there is no target to hit, so nothing reddens.
+  sys("vacation", "NUMBER", "COMPUTED", {
     key: "vacationWeightsTotal",
-    defaultLabel: "Total Weights",
+    defaultLabel: "Total Weight",
     locked: true,
     computeKey: "vacationWeightsTotal",
   }),

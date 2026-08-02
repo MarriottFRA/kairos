@@ -11,7 +11,9 @@ import type { KpiSeriesSlice } from "../engineInput";
 import {
   applyPoolSpread,
   buildPoolSpecs,
+  clampPoolWeight,
   isPoolEligible,
+  poolShareWeight,
   resolvePoolPot,
   type PoolSpreadSpec,
 } from "../poolSpread";
@@ -56,6 +58,7 @@ function spec(over: Partial<PoolSpreadSpec> = {}): PoolSpreadSpec {
     eligibilityMode: "RULE",
     departments: [],
     jobTypes: [],
+    jobTypeWeights: {},
     ...over,
   };
 }
@@ -182,7 +185,7 @@ describe("applyPoolSpread", () => {
     expect(bookedByMonth(out, positions)[0]).toBe(0);
   });
 
-  it("MANUAL spreads across the ticked rows only", () => {
+  it("MANUAL spreads across the weighted rows only", () => {
     const positions = [mkPos({ id: "in" }), mkPos({ id: "out" })];
     const values = [
       { positionId: "in", componentDefId: DEF, rate: 1 },
@@ -198,7 +201,7 @@ describe("applyPoolSpread", () => {
     expect(sharesFor(out, "out")[0]).toBe(0);
   });
 
-  it("MANUAL with nothing ticked spreads nothing", () => {
+  it("MANUAL with nothing weighted spreads nothing", () => {
     const positions = [mkPos({ id: "a" }), mkPos({ id: "b" })];
     const out = applyPoolSpread(
       [spec({ eligibilityMode: "MANUAL" })],
@@ -206,6 +209,153 @@ describe("applyPoolSpread", () => {
       []
     );
     expect(bookedByMonth(out, positions)[0]).toBe(0);
+  });
+
+  it("gives a double weight twice the share, on the same pot", () => {
+    const positions = [mkPos({ id: "gm" }), mkPos({ id: "a" }), mkPos({ id: "b" })];
+    const values = [
+      { positionId: "gm", componentDefId: DEF, rate: 2 },
+      { positionId: "a", componentDefId: DEF, rate: 1 },
+      { positionId: "b", componentDefId: DEF, rate: 1 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ eligibilityMode: "MANUAL" })],
+      positions,
+      values
+    );
+    expect(sharesFor(out, "gm")[0]).toBeCloseTo(600, 8);
+    expect(sharesFor(out, "a")[0]).toBeCloseTo(300, 8);
+    expect(sharesFor(out, "b")[0]).toBeCloseTo(300, 8);
+    expect(bookedByMonth(out, positions)[0]).toBeCloseTo(1200, 8);
+  });
+
+  it("weights multiply the spread basis rather than replacing it", () => {
+    // Salary-proportional (3000 vs 1000 = 3:1) with the junior on a double
+    // weight lands at 3:2, which neither the basis nor the weight gives alone.
+    const positions = [
+      mkPos({ id: "senior", monthlyBaseSalary: 3000 }),
+      mkPos({ id: "junior", monthlyBaseSalary: 1000 }),
+    ];
+    const values = [
+      { positionId: "senior", componentDefId: DEF, rate: 1 },
+      { positionId: "junior", componentDefId: DEF, rate: 2 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ eligibilityMode: "MANUAL", spreadBase: "BASE_SALARY" })],
+      positions,
+      values
+    );
+    expect(sharesFor(out, "senior")[0]).toBeCloseTo(720, 8);
+    expect(sharesFor(out, "junior")[0]).toBeCloseTo(480, 8);
+  });
+
+  it("RULE weights a classification from the block config", () => {
+    const positions = [
+      mkPos({ id: "mgr", jobTypeCode: "Manager" }),
+      mkPos({ id: "assoc", jobTypeCode: "Associate" }),
+    ];
+    const out = applyPoolSpread(
+      [spec({ jobTypeWeights: { Manager: 1.5 } })],
+      positions,
+      []
+    );
+    // 1.5 : 1 of 1200.
+    expect(sharesFor(out, "mgr")[0]).toBeCloseTo(720, 8);
+    expect(sharesFor(out, "assoc")[0]).toBeCloseTo(480, 8);
+  });
+
+  it("RULE lets one row override its classification's weight", () => {
+    const positions = [
+      mkPos({ id: "gm", jobTypeCode: "Manager" }),
+      mkPos({ id: "mgr", jobTypeCode: "Manager" }),
+    ];
+    const values = [
+      { positionId: "gm", componentDefId: DEF, rate: 3 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ jobTypeWeights: { Manager: 1.5 } })],
+      positions,
+      values
+    );
+    // 3 : 1.5 of 1200 — the GM's own number wins, the other manager keeps the
+    // classification default.
+    expect(sharesFor(out, "gm")[0]).toBeCloseTo(800, 8);
+    expect(sharesFor(out, "mgr")[0]).toBeCloseTo(400, 8);
+  });
+
+  it("RULE ignores a weight typed against a row the rule leaves out", () => {
+    const positions = [
+      mkPos({ id: "in", departmentCode: "D0010" }),
+      mkPos({ id: "out", departmentCode: "D0020" }),
+    ];
+    const values = [
+      { positionId: "out", componentDefId: DEF, rate: 5 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ departments: ["D0010"] })],
+      positions,
+      values
+    );
+    expect(sharesFor(out, "in")[0]).toBeCloseTo(1200, 8);
+    expect(sharesFor(out, "out")[0]).toBe(0);
+  });
+
+  it("RULE still includes a row carrying the old tick box's stored 0", () => {
+    // The whole no-migration promise: rate 0 was "unticked" before weights
+    // existed, and it must not read as "excluded" against a rule that plainly
+    // includes the row.
+    const positions = [mkPos({ id: "a" }), mkPos({ id: "b" })];
+    const values = [
+      { positionId: "a", componentDefId: DEF, rate: 0 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread([spec()], positions, values);
+    expect(sharesFor(out, "a")[0]).toBeCloseTo(600, 8);
+    expect(sharesFor(out, "b")[0]).toBeCloseTo(600, 8);
+  });
+
+  it("conserves the pot with lopsided weights and part-year people", () => {
+    const seasonality = Array(MONTHS).fill(1);
+    seasonality[0] = 0.25;
+    const positions = [
+      mkPos({ id: "a", headcount: 2, jobTypeCode: "Manager" }),
+      mkPos({ id: "b", seasonality, hotelClusterWeight: 0.5 }),
+      mkPos({ id: "c", jobTypeCode: "Associate" }),
+    ];
+    const values = [
+      { positionId: "c", componentDefId: DEF, rate: 7.5 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ jobTypeWeights: { Manager: 1.5 } })],
+      positions,
+      values
+    );
+    for (const booked of bookedByMonth(out, positions)) {
+      expect(booked).toBeCloseTo(1200, 8);
+    }
+  });
+
+  it("caps an absurd weight instead of starving everyone else", () => {
+    const positions = [mkPos({ id: "fat" }), mkPos({ id: "rest" })];
+    const values = [
+      { positionId: "fat", componentDefId: DEF, rate: 1e9 },
+      { positionId: "rest", componentDefId: DEF, rate: 1 },
+    ] as unknown as ComponentValue[];
+
+    const out = applyPoolSpread(
+      [spec({ eligibilityMode: "MANUAL" })],
+      positions,
+      values
+    );
+    // Capped at 1000 : 1 — still lopsided, but the pot is conserved and the
+    // small share is a real number rather than a rounding artefact.
+    expect(sharesFor(out, "rest")[0]).toBeCloseTo(1200 / 1001, 8);
+    expect(bookedByMonth(out, positions)[0]).toBeCloseTo(1200, 8);
   });
 
   it("keeps a stored row's account override while overwriting its months", () => {
@@ -299,7 +449,7 @@ describe("isPoolEligible", () => {
     ).toBe(true);
   });
 
-  it("MANUAL ignores the filters and uses the tick", () => {
+  it("MANUAL ignores the filters and uses the weight", () => {
     const manual = {
       eligibilityMode: "MANUAL" as const,
       departments: ["D9999"],
@@ -307,6 +457,50 @@ describe("isPoolEligible", () => {
     };
     expect(isPoolEligible(manual, position, true)).toBe(true);
     expect(isPoolEligible(manual, position, false)).toBe(false);
+  });
+});
+
+describe("poolShareWeight", () => {
+  const manager = { departmentCode: "D0010", jobTypeCode: "Manager" };
+  const manual = {
+    eligibilityMode: "MANUAL" as const,
+    departments: [] as string[],
+    jobTypes: [] as string[],
+    jobTypeWeights: { Manager: 1.5 },
+  };
+  const rule = { ...manual, eligibilityMode: "RULE" as const };
+
+  it("MANUAL takes the row's number, and nothing else", () => {
+    expect(poolShareWeight(manual, manager, 2)).toBe(2);
+    // No classification default here — under MANUAL the row's number is the
+    // only statement of membership there is, so there is nothing to default.
+    expect(poolShareWeight(manual, manager, null)).toBe(0);
+    expect(poolShareWeight(manual, manager, 0)).toBe(0);
+  });
+
+  it("RULE falls back row -> classification -> one whole share", () => {
+    expect(poolShareWeight(rule, manager, 3)).toBe(3);
+    expect(poolShareWeight(rule, manager, null)).toBe(1.5);
+    expect(poolShareWeight(rule, { ...manager, jobTypeCode: "Associate" }, null)).toBe(1);
+  });
+
+  it("is zero for a row the rule excludes, whatever it carries", () => {
+    const scoped = { ...rule, departments: ["D9999"] };
+    expect(poolShareWeight(scoped, manager, 4)).toBe(0);
+    expect(poolShareWeight(scoped, manager, null)).toBe(0);
+  });
+});
+
+describe("clampPoolWeight", () => {
+  it("keeps positive numbers, caps the absurd, zeroes the rest", () => {
+    expect(clampPoolWeight(1.5)).toBe(1.5);
+    expect(clampPoolWeight("2")).toBe(2);
+    expect(clampPoolWeight(5000)).toBe(1000);
+    expect(clampPoolWeight(0)).toBe(0);
+    expect(clampPoolWeight(-3)).toBe(0);
+    expect(clampPoolWeight(null)).toBe(0);
+    expect(clampPoolWeight("abc")).toBe(0);
+    expect(clampPoolWeight(Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 

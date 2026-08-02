@@ -46,6 +46,7 @@ import PersonIcon from "@mui/icons-material/Person";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutlined";
 import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
 import AccountPortalDialog from "../components/account/AccountPortalDialog";
+import TermsAcceptanceGate from "../components/legal/TermsAcceptanceGate";
 import { onAccessDenied } from "../services/api";
 import Tooltip from "@mui/material/Tooltip";
 import { alpha } from "@mui/material/styles";
@@ -898,6 +899,9 @@ const handleSignOut = useCallback(async () => {
         message={portalDialogCopy.message}
         actionLabel={portalDialogCopy.actionLabel}
       />
+      {/* Shown once per user per terms version, over whichever page they land
+          on. It decides for itself whether to open — see the component. */}
+      <TermsAcceptanceGate userEmail={userEmail} onDecline={handleSignOut} />
     </Box>
   );
 }

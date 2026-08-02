@@ -18,7 +18,7 @@ import {
 import { POSITIONS_STRUCTURE_TABLES_SQL } from "../../positions/schema";
 import { resolveOuScope } from "../../positions/ouScope";
 import { getComponentDefinitions } from "../../positions/structureRepo";
-import { applyBlocksStructureV12 } from "../schema";
+import { applyStructureColumns } from "../schema";
 import { applySocialSecurityBase } from "../../../shared/positions/engineInput";
 import { BlockDto } from "../../../shared/blocks/ipc";
 import { ensureBaseSalaryDef, listBlocks, saveBlock } from "../repo";
@@ -34,7 +34,7 @@ let db: Db;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(db);
+  applyStructureColumns(db);
   ensureBaseSalaryDef(db, OU, NOW);
 });
 

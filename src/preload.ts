@@ -120,6 +120,12 @@ export interface AuthApi {
   offSessionExpired: (cb: () => void) => void;
   onDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => void;
   offDeviceProgress: (cb: (event: DeviceProgressEvent) => void) => void;
+
+  // [AUTH-DEBUG] temporary sign-in tracing (see main/auth/authDebug.ts).
+  debugTraceGet: () => Promise<{ on: boolean }>;
+  debugTraceSet: (p?: { on?: boolean }) => Promise<{ on: boolean }>;
+  onDebugTraceChanged: (cb: (state: { on: boolean }) => void) => void;
+  offDebugTraceChanged: (cb: (state: { on: boolean }) => void) => void;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -134,6 +140,11 @@ const expiredListeners = new WeakMap<() => void, (event: any) => void>();
 const progressListeners = new WeakMap<
   (event: DeviceProgressEvent) => void,
   (event: any, payload: DeviceProgressEvent) => void
+>();
+// [AUTH-DEBUG]
+const traceListeners = new WeakMap<
+  (state: { on: boolean }) => void,
+  (event: any, state: { on: boolean }) => void
 >();
 
 // ────────────────────────────────────────────────────────────
@@ -226,6 +237,22 @@ contextBridge.exposeInMainWorld("authApi", {
     if (wrapped) {
       ipcRenderer.off("auth:device-progress", wrapped);
       progressListeners.delete(cb);
+    }
+  },
+
+  // ── [AUTH-DEBUG] temporary sign-in tracing ────────────────────
+  debugTraceGet: () => invokeUnwrapped("auth:debugTraceGet"),
+  debugTraceSet: (p?: { on?: boolean }) => invokeUnwrapped("auth:debugTraceSet", p),
+  onDebugTraceChanged: (cb: (state: { on: boolean }) => void) => {
+    const wrapped = (_event: any, state: { on: boolean }) => cb(state);
+    traceListeners.set(cb, wrapped);
+    ipcRenderer.on("auth:debug-trace-changed", wrapped);
+  },
+  offDebugTraceChanged: (cb: (state: { on: boolean }) => void) => {
+    const wrapped = traceListeners.get(cb);
+    if (wrapped) {
+      ipcRenderer.off("auth:debug-trace-changed", wrapped);
+      traceListeners.delete(cb);
     }
   },
 });

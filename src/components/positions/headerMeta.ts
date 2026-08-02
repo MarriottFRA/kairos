@@ -248,8 +248,11 @@ const OVERRIDES: Readonly<
       "and the salary line stays net of it either way.",
   },
   vacationWeightsTotal: {
-    unit: "must = 100%",
-    hint: "Derived: the twelve vacation percentages must add up to 100%. Read-only.",
+    unit: "= derived",
+    hint:
+      "Derived: the sum of the twelve vacation weights. There is no total to hit — " +
+      "the engine divides each month by this sum, so only the ratios matter. " +
+      "Read-only.",
   },
   vacationEstimate: {
     unit: "= simulated",
@@ -261,7 +264,7 @@ const OVERRIDES: Readonly<
 const VECTOR_UNITS: Readonly<Record<string, string>> = {
   seasonality: "0–1 worked",
   additionalMonthlyCosts: "add. cost",
-  vacationMonthlyWeights: "% of yr",
+  vacationMonthlyWeights: "weight",
 };
 
 const VECTOR_HINTS: Readonly<Record<string, string>> = {
@@ -269,7 +272,9 @@ const VECTOR_HINTS: Readonly<Record<string, string>> = {
     "Share of the month the position is worked — 1 is a full month, 0 is closed.",
   additionalMonthlyCosts: "One-off cost added to this month on top of basic salary.",
   vacationMonthlyWeights:
-    "Share of the yearly vacation cost booked in this month. The twelve percentages must add up to 100%.",
+    "How much of the year's leave falls in this month, as a relative weight. Only " +
+    "the ratios matter — twelve 1s is an even year, and a month set to 2 takes " +
+    "twice what a 1 month takes. They do not need to add up to anything.",
 };
 
 /** Fallback sub-line when a field has no override — never invents a unit it

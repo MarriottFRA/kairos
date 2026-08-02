@@ -122,12 +122,18 @@ describe("percent fields", () => {
     expect(commitValue(merit, row, seeded).meritIncreasePct).toBeCloseTo(0.05, 10);
   });
 
-  it("round-trips an awkward vacation weight without inventing precision", () => {
+  it("round-trips a vacation weight on the stored scale, no percent skin", () => {
+    // Vacation months are WEIGHTS (seed v25), not percentages: no ×100, no "%",
+    // and no >1 → /100 parse. A legacy row still holding 1/12 therefore offers
+    // 1/12 to the editor, and a typed 2 stays 2 rather than becoming 0.02.
     const weights = col("vacw_1");
     const row: PositionRow = { id: "p1", vacw_1: 1 / 12 };
     const seeded = rawEditText(weights, def("vacw_1"), row);
-    expect(Number(seeded)).toBeCloseTo(8.3333, 3);
-    expect(commitValue(weights, row, seeded).vacw_1).toBeCloseTo(1 / 12, 5);
+    expect(Number(seeded)).toBeCloseTo(1 / 12, 10);
+    expect(commitValue(weights, row, seeded).vacw_1).toBeCloseTo(1 / 12, 10);
+    // NUMBER columns commit the raw entry (sanitizeRow coerces); what matters
+    // is that 2 is NOT read as 2% and quietly stored as 0.02.
+    expect(Number(commitValue(weights, row, "2").vacw_1)).toBe(2);
   });
 });
 

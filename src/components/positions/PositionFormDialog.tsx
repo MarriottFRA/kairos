@@ -36,7 +36,6 @@
  */
 
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import ButtonBase from "@mui/material/ButtonBase";
 import Chip from "@mui/material/Chip";
@@ -74,9 +73,9 @@ import {
   isEssentialField,
   matchFormFields,
 } from "../../shared/positions/positionForm";
-import { COMPUTES, PositionRow } from "../../shared/positions/rowModel";
+import { PositionRow } from "../../shared/positions/rowModel";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
-import { buildBlockColumns, slotPresentation } from "./blockColumns";
+import { buildBlockColumns, poolWeightGate, slotPresentation } from "./blockColumns";
 import {
   blockAccountKey,
   blockFieldKey,
@@ -298,8 +297,16 @@ export default function PositionFormDialog({
   }, [catalog, blockLabels, query]);
 
   const editCtx = useMemo(
-    () => ({ masked, maskableKeys, hotelClusters, currentOu }),
-    [masked, maskableKeys, hotelClusters, currentOu]
+    () => ({
+      masked,
+      maskableKeys,
+      hotelClusters,
+      currentOu,
+      // Same pooled-weight lock the grid applies, so the form cannot offer an
+      // edit the grid refuses (or the other way round).
+      poolWeightEditable: poolWeightGate(blocks),
+    }),
+    [masked, maskableKeys, hotelClusters, currentOu, blocks]
   );
 
   // Two commits can land in one tick (Enter blurs one field and focuses the
@@ -523,7 +530,6 @@ export default function PositionFormDialog({
           }
           editable={cellEditable(shown, column, editCtx)}
           lockNote={lockNoteFor(def, shown, masked)}
-          warn={key === "vacationWeightsTotal" && weightsDrift(shown)}
           dense={options?.dense}
           action={options?.action}
           departments={departments}
@@ -906,15 +912,6 @@ export default function PositionFormDialog({
             pb: 4,
           }}
         >
-          {weightsDrift(shown) ? (
-            <Alert severity="warning" sx={{ mt: 1.5, py: 0 }}>
-              Vacation weights total{" "}
-              {columns.get("vacationWeightsTotal")
-                ? displayValue(columns.get("vacationWeightsTotal")!, shown)
-                : ""}
-              . The engine normalises them, but they are easier to reason about at 100%.
-            </Alert>
-          ) : null}
           {bands.map(renderBand)}
           {bands.length === 0 ? (
             <Typography variant="body2" sx={{ color: "text.secondary", mt: 3 }}>
@@ -1073,17 +1070,6 @@ function SaveDot({ status }: { status?: RowSaveStatus }) {
         </Tooltip>
       );
   }
-}
-
-/**
- * Do the twelve vacation weights still add up?
- *
- * Same Σ and same 0.001 threshold the grid reddens its weight cells at
- * (columnFactory), read through the same COMPUTES entry so the two surfaces
- * cannot end up disagreeing about whether a row needs attention.
- */
-function weightsDrift(row: PositionRow): boolean {
-  return Math.abs(COMPUTES.vacationWeightsTotal(row) - 1) > 0.001;
 }
 
 /**

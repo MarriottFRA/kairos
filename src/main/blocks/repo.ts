@@ -19,15 +19,19 @@
 
 import type Database from "better-sqlite3-multiple-ciphers";
 import { uuidv7 } from "../../shared/engine/ids";
+import type { BaseSelector, ComponentDefId } from "../../shared/engine/types";
 import {
   BLOCK_TYPES,
   BlockBaseRef,
+  BLOCK_COMBINE_OPS,
   BlockDto,
   BlockInput,
   BlockSpread,
   BlockType,
   POOL_MONTHS,
   POOL_SPREAD_BASES,
+  POOL_WEIGHT_DEFAULT,
+  POOL_WEIGHT_MAX,
   PoolEligibilityMode,
   PoolSource,
   PoolSpreadBase,
@@ -37,6 +41,7 @@ import {
   holidayAccrualDefId,
   positionCountDefId,
   SPREAD_TO_METHOD,
+  SPREAD_TO_STAT_BASE,
   systemStatDefId,
   vacationCostDefId,
 } from "../../shared/blocks/ipc";
@@ -53,6 +58,10 @@ interface StoredConfig {
   statsAccountCode: string;
   statsAccountLocked: boolean;
   base?: BlockBaseRef;
+  /** MULTIPLIER + COMBINE base only — see BlockInput.useRowRate. */
+  useRowRate?: boolean;
+  /** MULTIPLIER + COMBINE base only — see BlockInput.ratioNoHeadcount. */
+  ratioNoHeadcount?: boolean;
   spread: BlockSpread;
   increaseAware: boolean;
   departmentMode: "POSITION" | "FIXED";
@@ -68,6 +77,7 @@ interface StoredConfig {
   poolEligibilityMode?: PoolEligibilityMode;
   poolDepartments?: string[];
   poolJobTypes?: string[];
+  poolJobTypeWeights?: Record<string, number>;
 }
 
 /** Twelve finite amounts, padded/truncated from whatever was supplied. */
@@ -77,6 +87,26 @@ function normPoolAmounts(raw: unknown): number[] {
     const value = Number(list[index]);
     return Number.isFinite(value) ? value : 0;
   });
+}
+
+/**
+ * Share weights per job classification, cleaned to what the spread can use:
+ * positive, capped, and free of entries that only say "one whole share" — the
+ * default — so the stored config stays as small as what the user actually
+ * changed and a block hashes the same whether a 1 was typed or left alone.
+ */
+function normWeightMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [code, value] of Object.entries(raw as Record<string, unknown>)) {
+    const key = String(code ?? "").trim();
+    if (!key) continue;
+    const weight = Number(value);
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    if (weight === POOL_WEIGHT_DEFAULT) continue;
+    out[key] = Math.min(weight, POOL_WEIGHT_MAX);
+  }
+  return out;
 }
 
 /** Trimmed, de-duplicated, blank-free codes — the shape both the rule matcher
@@ -112,6 +142,12 @@ function rowToDto(row: BlockRow): BlockDto {
     statsAccountCode: config.statsAccountCode ?? "",
     statsAccountLocked: config.statsAccountLocked ?? true,
     base: config.base,
+    // Only meaningful for a compound base; defaults keep every existing block
+    // (which has no COMBINE base) reading exactly as before.
+    useRowRate: config.useRowRate ?? true,
+    ratioNoHeadcount:
+      config.ratioNoHeadcount ??
+      (config.base?.kind === "COMBINE" && config.base.op === "DIV"),
     spread: config.spread ?? "ACTIVE_MONTHS",
     increaseAware: config.increaseAware ?? false,
     departmentMode: config.departmentMode ?? "POSITION",
@@ -126,6 +162,7 @@ function rowToDto(row: BlockRow): BlockDto {
           poolEligibilityMode: config.poolEligibilityMode ?? "MANUAL",
           poolDepartments: normCodeList(config.poolDepartments),
           poolJobTypes: normCodeList(config.poolJobTypes),
+          poolJobTypeWeights: normWeightMap(config.poolJobTypeWeights),
         }
       : {}),
     sortOrder: row.sort_order,
@@ -175,6 +212,26 @@ function assertUsableBaseBlock(
   if (!exists) throw new Error("The base block no longer exists.");
 }
 
+/**
+ * The BLOCK ids a base references directly, through COMPOSITE members and both
+ * sides of a COMBINE. The single source of truth for the cycle walk, the
+ * save-time validation and the delete guard — miss a shape here and a block can
+ * be deleted out from under a compound that divides by it.
+ */
+function baseBlockIds(base: BlockBaseRef | undefined): string[] {
+  if (!base) return [];
+  switch (base.kind) {
+    case "BLOCK":
+      return [base.blockId];
+    case "COMPOSITE":
+      return normCodeList(base.blockIds);
+    case "COMBINE":
+      return [...baseBlockIds(base.left), ...baseBlockIds(base.right)];
+    default:
+      return [];
+  }
+}
+
 /** Every block this one would reach through its base chain, plus their labels. */
 function walkBaseChain(
   db: Db,
@@ -194,8 +251,7 @@ function walkBaseChain(
     if (!row) continue;
     seen.set(blockId, row.label);
     const base = (JSON.parse(row.config || "{}") as Partial<StoredConfig>).base;
-    if (base?.kind === "BLOCK") queue.push(base.blockId);
-    else if (base?.kind === "COMPOSITE") queue.push(...normCodeList(base.blockIds));
+    queue.push(...baseBlockIds(base));
   }
   return seen;
 }
@@ -247,6 +303,37 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
     if (base.kind === "KPI" && !String(base.kpiDriverId ?? "").trim()) {
       throw new Error("A KPI base needs a KPI driver.");
     }
+    if (base.kind === "COMBINE") {
+      if (!BLOCK_COMBINE_OPS.includes(base.op)) {
+        throw new Error(`Unknown operation: ${base.op}`);
+      }
+      for (const side of [base.left, base.right]) {
+        if (!side) throw new Error("A combined block needs both sides filled in.");
+        // The VM saves exactly one operand vector, so a side cannot itself be a
+        // combination (mirrored by the compiler's own depth check). KPI bases
+        // compile to DIRECT_ABS rather than a base series, so they cannot be an
+        // operand at all.
+        if (side.kind === "COMBINE") {
+          throw new Error(
+            "A combined block cannot use another combined block as a side — yet."
+          );
+        }
+        if (side.kind === "KPI") {
+          throw new Error("A KPI cannot be one side of a combined block.");
+        }
+        if (side.kind === "COMPOSITE") {
+          const ids = normCodeList(side.blockIds);
+          if (!side.includeBaseSalary && ids.length === 0) {
+            throw new Error("Choose at least one thing for the base to add up.");
+          }
+        }
+      }
+      const referenced = baseBlockIds(base);
+      for (const blockId of referenced) {
+        assertUsableBaseBlock(db, scope, input.id, blockId);
+      }
+      assertNoBaseCycle(db, scope, input.id, referenced);
+    }
   }
 
   if (input.blockType === "POOL_SPREAD") {
@@ -269,8 +356,20 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
     ) {
       throw new Error(`Unknown spread basis: ${input.poolSpreadBase}`);
     }
+    for (const [code, weight] of Object.entries(
+      input.poolJobTypeWeights ?? {}
+    )) {
+      // Rejected rather than dropped: a weight of 0 or -1 is someone trying to
+      // exclude a classification, and the honest answer is that the rule's own
+      // classification filter is where that happens.
+      if (!Number.isFinite(Number(weight)) || Number(weight) <= 0) {
+        throw new Error(
+          `Share weight for "${code}" must be a positive number. To leave a classification out of the pool, remove it from the rule.`
+        );
+      }
+    }
     // A RULE with both filter lists empty is legal and means "everyone" — the
-    // simplest way to pool across the whole hotel without ticking every row.
+    // simplest way to pool across the whole hotel without weighting every row.
   }
 
   if (
@@ -300,6 +399,106 @@ interface DefRow {
   kpiDriverId: string | null;
   ssSchemeId: string | null;
   increaseAware: boolean;
+  /** Ratio blocks opt out of the engine's headcount post-pass. */
+  countExempt: boolean;
+}
+
+/**
+ * Lower one side of a compound base to an engine BaseSelector.
+ *
+ * Only the kinds a COMBINE side may take are handled — the caller validates
+ * that KPI and nested COMBINE never get here (KPI compiles to a wholly
+ * different engine path, DIRECT_ABS, and cannot act as a base series).
+ */
+function toEngineSelector(base: BlockBaseRef, ou: string): BaseSelector {
+  switch (base.kind) {
+    case "BASE_SALARY":
+      return { kind: "BASE_SALARY" };
+    case "BLOCK":
+      return { kind: "COMPONENTS", componentIds: [blockCostDefId(base.blockId)] as ComponentDefId[] };
+    case "COMPOSITE":
+      return {
+        kind: "COMPONENTS",
+        componentIds: [
+          ...(base.includeBaseSalary ? [baseSalaryDefId(ou)] : []),
+          ...normCodeList(base.blockIds).map(blockCostDefId),
+        ] as ComponentDefId[],
+      };
+    case "STAT":
+      return {
+        kind: "COMPONENTS",
+        componentIds: [systemStatDefId(ou, base.stat)] as ComponentDefId[],
+      };
+    case "CALENDAR":
+      return { kind: "CALENDAR", series: base.series };
+    case "VACATION":
+      return { kind: "VACATION" };
+    case "COMBINE":
+      return {
+        kind: "COMBINE",
+        op: base.op,
+        left: toEngineSelector(base.left, ou),
+        right: toEngineSelector(base.right, ou),
+      };
+    default:
+      throw new Error(`Unsupported base for a combined block: ${base.kind}`);
+  }
+}
+
+/** Every engine definition id a block base references, through COMBINE sides.
+ *  Feeds the component_base_refs projection. */
+function collectBlockBaseRefIds(base: BlockBaseRef, ou: string): string[] {
+  const out: string[] = [];
+  const walk = (node: BlockBaseRef): void => {
+    switch (node.kind) {
+      case "BLOCK":
+        out.push(blockCostDefId(node.blockId));
+        break;
+      case "COMPOSITE":
+        if (node.includeBaseSalary) out.push(baseSalaryDefId(ou));
+        for (const blockId of normCodeList(node.blockIds)) out.push(blockCostDefId(blockId));
+        break;
+      case "STAT":
+        out.push(systemStatDefId(ou, node.stat));
+        break;
+      case "COMBINE":
+        walk(node.left);
+        walk(node.right);
+        break;
+      default:
+        break; // BASE_SALARY / CALENDAR / VACATION reference no line by id
+    }
+  };
+  walk(base);
+  return [...new Set(out)];
+}
+
+/** Every system head a base tree needs seeded before its defs are written. */
+function seedHeadsForBase(
+  db: Db,
+  scope: OuScope,
+  base: BlockBaseRef,
+  opts: { now: string }
+): void {
+  const walk = (node: BlockBaseRef): void => {
+    switch (node.kind) {
+      case "STAT":
+        ensureSystemStatDef(db, scope, node.stat, opts);
+        break;
+      case "COMPOSITE":
+        // Only a composite refs base salary BY ID; a bare BASE_SALARY base (top
+        // level or as a COMBINE side) reads the gross scratch and needs no head.
+        if (node.includeBaseSalary) ensureBaseSalaryDef(db, scope, opts);
+        break;
+      case "COMBINE":
+        walk(node.left);
+        walk(node.right);
+        break;
+      default:
+        break;
+    }
+  };
+  walk(base);
 }
 
 /** The engine definitions a block compiles to (pure; exported for tests). */
@@ -315,6 +514,7 @@ export function compileBlockDefs(
     baseRefDefIds: [] as string[],
     kpiDriverId: null as string | null,
     ssSchemeId: null as string | null,
+    countExempt: false,
   };
 
   switch (input.blockType) {
@@ -373,11 +573,28 @@ export function compileBlockDefs(
           ...normCodeList(base.blockIds).map(blockCostDefId),
         ];
       } else if (base.kind === "STAT") {
-        // Stat series (hours worked, headcount, FTE) are ordinary engine
+        // Stat series (hours worked/paid, headcount, FTE) are ordinary engine
         // lines: reference the system stat definition (seeded on save) via
         // the existing COMPONENTS selector.
         def.baseSelectorKind = "COMPONENTS";
         def.baseRefDefIds = [systemStatDefId(ou, base.stat)];
+      } else if (base.kind === "COMBINE") {
+        // Compound: lower both sides to engine selectors and carry the whole
+        // tree as base_ref JSON — base_selector_kind's CHECK cannot be widened
+        // in SQLite, the same reason CALENDAR/VACATION ride the JSON column.
+        // No per-row column means no stored value, which would read as rate 0
+        // and zero the line — pin the rate to 1 so the block IS the
+        // combination. See BaseSelector.COMBINE.rate.
+        const selector = toEngineSelector(base, ou);
+        if (input.useRowRate === false && selector.kind === "COMBINE") {
+          selector.rate = 1;
+        }
+        def.baseRefJson = JSON.stringify(selector);
+        // The nested block refs still go into component_base_refs so the
+        // queryable projection stays truthful (the delete guard reads config,
+        // but this keeps the two views consistent).
+        def.baseRefDefIds = collectBlockBaseRefIds(base, ou);
+        def.countExempt = input.ratioNoHeadcount ?? base.op === "DIV";
       } else {
         // CALENDAR / VACATION — engine base kinds beyond the legacy CHECK,
         // carried as base_ref JSON (read preference in getComponentDefinitions).
@@ -398,10 +615,22 @@ export function compileBlockDefs(
       ];
     }
     case "COUNT_RATE": {
-      const method = SPREAD_TO_METHOD[input.spread ?? "ACTIVE_MONTHS"];
+      const spread = input.spread ?? "ACTIVE_MONTHS";
+      const method = SPREAD_TO_METHOD[spread];
+      // WEIGHTED_BY_BASE distributes over whatever its base selector resolves
+      // to; the WEIGHTED_* stat spreads just point it at a stat line instead of
+      // the default base-salary curve (seeded on save).
+      const statBase = SPREAD_TO_STAT_BASE[spread];
+      const weighting: Partial<DefRow> = statBase
+        ? {
+            baseSelectorKind: "COMPONENTS",
+            baseRefDefIds: [systemStatDefId(ou, statBase)],
+          }
+        : {};
       return [
         {
           ...common,
+          ...weighting,
           id: blockCostDefId(blockId),
           spreadMethod: method,
           label: input.label,
@@ -410,6 +639,7 @@ export function compileBlockDefs(
         },
         {
           ...common,
+          ...weighting,
           id: blockStatDefId(blockId),
           spreadMethod: method,
           label: `${input.label} (count)`,
@@ -493,6 +723,12 @@ export function saveBlock(
     statsAccountCode: input.statsAccountCode ?? "",
     statsAccountLocked: input.statsAccountLocked ?? true,
     base: input.base,
+    ...(input.base?.kind === "COMBINE"
+      ? {
+          useRowRate: input.useRowRate ?? true,
+          ratioNoHeadcount: input.ratioNoHeadcount ?? input.base.op === "DIV",
+        }
+      : {}),
     spread: input.spread ?? "ACTIVE_MONTHS",
     increaseAware: input.increaseAware ?? false,
     departmentMode: input.departmentMode ?? "POSITION",
@@ -507,23 +743,24 @@ export function saveBlock(
           poolEligibilityMode: input.poolEligibilityMode ?? "MANUAL",
           poolDepartments: normCodeList(input.poolDepartments),
           poolJobTypes: normCodeList(input.poolJobTypes),
+          poolJobTypeWeights: normWeightMap(input.poolJobTypeWeights),
         }
       : {}),
   };
   const defs = compileBlockDefs(id, scope.ou, input);
 
   db.transaction(() => {
-    if (input.blockType === "MULTIPLIER" && input.base?.kind === "STAT") {
-      ensureSystemStatDef(db, scope, input.base.stat, opts);
+    if (input.blockType === "MULTIPLIER" && input.base) {
+      // Any base referencing a system head by id needs that head to exist, even
+      // when the block is saved before the structure read model has ever been
+      // built. Walks COMBINE sides too.
+      seedHeadsForBase(db, scope, input.base, opts);
     }
-    if (
-      input.blockType === "MULTIPLIER" &&
-      input.base?.kind === "COMPOSITE" &&
-      input.base.includeBaseSalary
-    ) {
-      // The composite refs it by id, so make sure the head exists even when the
-      // block is saved before the structure read model has ever been built.
-      ensureBaseSalaryDef(db, scope, opts);
+    if (input.blockType === "COUNT_RATE") {
+      // A "spread like hours / like FTE" block weights by a stat line, so that
+      // head must exist before the defs referencing it are written.
+      const statBase = SPREAD_TO_STAT_BASE[input.spread ?? "ACTIVE_MONTHS"];
+      if (statBase) ensureSystemStatDef(db, scope, statBase, opts);
     }
     prepared(
       db,
@@ -554,8 +791,8 @@ export function saveBlock(
            id, ou, kind, spread_method, stat_kind, label, account_code,
            department_mode, fixed_department, increase_aware, sort_order,
            base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
-           updated_at, deleted_at
-         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           count_exempt, updated_at, deleted_at
+         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
            spread_method = excluded.spread_method,
            label = excluded.label,
@@ -568,6 +805,7 @@ export function saveBlock(
            ss_scheme_id = excluded.ss_scheme_id,
            kpi_driver_id = excluded.kpi_driver_id,
            base_ref = excluded.base_ref,
+           count_exempt = excluded.count_exempt,
            updated_at = excluded.updated_at,
            deleted_at = NULL
          WHERE cost_component_definitions.ou = excluded.ou`
@@ -587,6 +825,7 @@ export function saveBlock(
         def.kpiDriverId,
         id,
         def.baseRefJson,
+        def.countExempt ? 1 : 0,
         opts.now
       );
 
@@ -772,8 +1011,9 @@ export function ensurePositionCountDef(
   ).run(positionCountDefId(scope.ou), scope.ou, POSITION_COUNT_ACCOUNT, opts.now);
 }
 
-const STAT_DEF_LABELS: Record<"HOURS" | "HEADCOUNT" | "FTE", string> = {
+const STAT_DEF_LABELS: Record<"HOURS" | "HOURS_PAID" | "HEADCOUNT" | "FTE", string> = {
   HOURS: "Hours Worked",
+  HOURS_PAID: "Hours Paid",
   HEADCOUNT: "Headcount",
   FTE: "FTE",
 };
@@ -782,13 +1022,14 @@ const STAT_DEF_LABELS: Record<"HOURS" | "HEADCOUNT" | "FTE", string> = {
  *  Blank account → the line computes (and is base-referenceable) but is
  *  never part of the output. HOURS and HEADCOUNT are additionally seeded
  *  unconditionally (see ensureSystemDefs) because the Positions grid offers a
- *  per-row account for each; FTE is still on-demand only, having no account
- *  field of its own (retired in field seed v13 — FTE is a ratio with no GL
- *  account). */
+ *  per-row account for each; FTE and HOURS_PAID are on-demand only, having no
+ *  account field of their own (FTE retired in field seed v13 — a ratio has no
+ *  GL account; HOURS_PAID posts through the same working-hours account as
+ *  HOURS when a block needs it). */
 export function ensureSystemStatDef(
   db: Db,
   scope: OuScope,
-  stat: "HOURS" | "HEADCOUNT" | "FTE",
+  stat: "HOURS" | "HOURS_PAID" | "HEADCOUNT" | "FTE",
   opts: { now: string }
 ): void {
   prepared(

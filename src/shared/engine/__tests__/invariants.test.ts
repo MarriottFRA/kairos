@@ -76,6 +76,38 @@ describe("conservation invariants", () => {
     expect(sum(line("hours"))).toBeCloseTo(1780, 8);
   });
 
+  it("the holiday-accrual line nets to zero over the year, for every position", () => {
+    // The accrual is a liability roll-forward: it earns exactly the days it
+    // releases, so the closing balance is zero and the twelve movements
+    // telescope away. This must hold whatever the inputs do — skewed vacation
+    // weights, weights that total ≠ 1, weights parked in off-season months,
+    // mid-year merit steps, hourly and salaried bases alike. randomScenario
+    // generates all of those, which is why the assertion is fuzzed rather than
+    // hand-built: the old 1/12-vs-normalized-weights formula drifted on each of
+    // them independently.
+    for (const seed of [1, 7, 42, 99, 2024]) {
+      const input = randomScenario(seed, 12);
+      const compiled = compile(input);
+      if (!("plan" in compiled)) throw new Error("compile failed");
+      const sim = simulate(compiled.plan);
+      for (const position of input.positions) {
+        const accrual = sim
+          .positionLines(position.id)
+          .find((entry) => (entry.component.id as string) === "def-accrual");
+        if (!accrual) continue;
+        // Scale the tolerance to the line's own size — a position with a 5k
+        // salary and 30 days' leave swings ±10k, so a fixed epsilon would
+        // either be vacuous for big rows or flaky for small ones.
+        let magnitude = 0;
+        for (let m = 0; m < MONTHS; m++) magnitude += Math.abs(accrual.months[m]);
+        expect(
+          Math.abs(sum(accrual.months)),
+          `seed ${seed} ${position.id as string}`
+        ).toBeLessThan(1e-9 * Math.max(magnitude, 1));
+      }
+    }
+  });
+
   it("a position with zero seasonality produces all-zero lines", () => {
     const input = randomScenario(99, 3);
     input.positions[1].seasonality = new Array(MONTHS).fill(0);

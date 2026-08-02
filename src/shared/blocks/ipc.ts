@@ -43,12 +43,22 @@ export const BLOCK_TYPES: readonly BlockType[] = [
  */
 export const USER_ADDABLE_BLOCK_TYPES: readonly BlockType[] = BLOCK_TYPES;
 
-/** How a COUNT_RATE block distributes its yearly figures across months. */
+/**
+ * How a COUNT_RATE block distributes its yearly figures across months.
+ *
+ * The WEIGHTED_* family all compile to the engine's WEIGHTED_BY_BASE, which
+ * distributes a yearly figure over whatever its base selector resolves to — so
+ * "spread like hours" is that method pointed at the system hours stat, and
+ * needs no engine work. See SPREAD_TO_STAT_BASE.
+ */
 export type BlockSpread =
   | "ACTIVE_MONTHS" // evenly over the position's working months
   | "DAYS" // proportional to working days per month
   | "VACATION_PATTERN" // following the position's vacation weights
-  | "WEIGHTED_BASE"; // proportional to the monthly base-salary curve
+  | "WEIGHTED_BASE" // proportional to the monthly base-salary curve
+  | "WEIGHTED_HOURS_WORKED" // proportional to the hours-worked curve
+  | "WEIGHTED_HOURS_PAID" // proportional to the hours-paid curve
+  | "WEIGHTED_FTE"; // proportional to the FTE curve
 
 /**
  * What a MULTIPLIER block multiplies against. BASE_SALARY / BLOCK / COMPOSITE
@@ -69,9 +79,40 @@ export type BlockBaseRef =
   | { kind: "BLOCK"; blockId: string }
   | { kind: "COMPOSITE"; includeBaseSalary: boolean; blockIds: string[] }
   | { kind: "KPI"; kpiDriverId: string }
-  | { kind: "STAT"; stat: "HOURS" | "HEADCOUNT" | "FTE" }
-  | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" }
-  | { kind: "VACATION" };
+  | { kind: "STAT"; stat: "HOURS" | "HOURS_PAID" | "HEADCOUNT" | "FTE" }
+  | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" | "HOLIDAY_DAYS" }
+  | { kind: "VACATION" }
+  /**
+   * The compound block: two bases and an operation between them, so the
+   * "multiplier" can be another block rather than a typed number. COMPOSITE
+   * already covers addition of several series; this is what expresses a
+   * difference, a product or a ratio.
+   *
+   * Sides may not themselves be COMBINE (validated) — the VM saves exactly one
+   * operand vector. KPI is also rejected as a side, since a KPI base compiles
+   * to a different engine path (DIRECT_ABS) rather than a base series.
+   */
+  | { kind: "COMBINE"; op: BlockCombineOp; left: BlockBaseRef; right: BlockBaseRef };
+
+/** The operations a compound block offers. */
+export type BlockCombineOp = "ADD" | "SUB" | "MUL" | "DIV";
+
+export const BLOCK_COMBINE_OPS: readonly BlockCombineOp[] = [
+  "ADD",
+  "SUB",
+  "MUL",
+  "DIV",
+] as const;
+
+export const BLOCK_COMBINE_OP_META: Record<
+  BlockCombineOp,
+  { symbol: string; label: string }
+> = {
+  ADD: { symbol: "+", label: "Plus" },
+  SUB: { symbol: "−", label: "Minus" },
+  MUL: { symbol: "×", label: "Times" },
+  DIV: { symbol: "÷", label: "Divided by" },
+};
 
 /** Where a POOL_SPREAD block's monthly pot comes from. */
 export type PoolSource =
@@ -80,14 +121,20 @@ export type PoolSource =
 
 /**
  * The per-position weight a POOL_SPREAD block divides its pot by. Mirrors the
- * Allocations vocabulary (see shared/allocations/ipc.ts) minus MANHOURS_PAID and
- * CONTRACT_DAYS, whose inputs (contractYearlyDays / contractDaysOff) are
- * POSITION_EXTRA and never reach the engine Position type.
+ * Allocations vocabulary (see shared/allocations/ipc.ts) minus CONTRACT_DAYS,
+ * whose inputs (contractYearlyDays / contractDaysOff) are POSITION_EXTRA and
+ * never reach the engine Position type.
+ *
+ * MANHOURS_PAID is available here on the engine's own definition — worked hours
+ * plus vacation hours, both already on Position — rather than Allocations'
+ * contract-days formula. The two differ by public holidays; see the STAT
+ * HOURS_PAID note in engine/reference.ts.
  */
 export type PoolSpreadBase =
   | "HEADCOUNT"
   | "FTE"
   | "MANHOURS_WORKED"
+  | "MANHOURS_PAID"
   | "BASE_SALARY"
   | "VACATION_DAYS"
   | "FLAT";
@@ -96,6 +143,7 @@ export const POOL_SPREAD_BASES: readonly PoolSpreadBase[] = [
   "HEADCOUNT",
   "FTE",
   "MANHOURS_WORKED",
+  "MANHOURS_PAID",
   "BASE_SALARY",
   "VACATION_DAYS",
   "FLAT",
@@ -117,6 +165,10 @@ export const POOL_SPREAD_BASE_META: Record<
     label: "Man-hours worked",
     hint: "By hours actually worked over the year, vacation excluded.",
   },
+  MANHOURS_PAID: {
+    label: "Man-hours paid",
+    hint: "By hours paid over the year, vacation included. Reads slightly lower than the Manhours Paid grid column, which also counts public holidays.",
+  },
   BASE_SALARY: {
     label: "Base salary",
     hint: "Higher earners take proportionally more. Note that hourly-paid positions carry no monthly base salary and would take nothing.",
@@ -127,17 +179,33 @@ export const POOL_SPREAD_BASE_META: Record<
   },
   FLAT: {
     label: "Flat (equal per row)",
-    hint: "Every eligible row takes the same share regardless of how many people it counts.",
+    hint: "Every eligible row takes the same share regardless of how many people it counts. With share weights on top, this is the classic 'points' pool.",
   },
 };
 
 /** How a POOL_SPREAD block decides which positions share the pot. */
 export type PoolEligibilityMode =
-  | "MANUAL" // per-row tick box in the grid
+  | "MANUAL" // per-row share weight in the grid — anything above zero is in
   | "RULE"; // department / classification filters here in the config
 
 /** Number of monthly amounts a MANUAL pool carries. */
 export const POOL_MONTHS = 12;
+
+/**
+ * The share weight of a position nobody has weighted — one whole share.
+ *
+ * Weights multiply the spread basis, so 1 is the neutral element: leaving every
+ * weight alone reproduces exactly the split this feature had before weights
+ * existed, which is what makes the upgrade safe for saved plans.
+ */
+export const POOL_WEIGHT_DEFAULT = 1;
+
+/**
+ * The most a share weight may be. Not a modelling opinion — a guard. The weights
+ * divide by their own sum, so an accidental 1e9 pasted into one cell would round
+ * everyone else's share to zero without any other symptom.
+ */
+export const POOL_WEIGHT_MAX = 1000;
 
 /** The payload the renderer sends to create/update a block. */
 export interface BlockInput {
@@ -155,6 +223,15 @@ export interface BlockInput {
   statsAccountLocked?: boolean;
   /** MULTIPLIER only. */
   base?: BlockBaseRef;
+  /** MULTIPLIER + COMBINE base: keep a per-row multiplier column as well as the
+   *  two combined sides. False = the block is pure calculation with no grid
+   *  input. Ignored for every other base kind, which always has a rate.
+   *  Defaults to true. */
+  useRowRate?: boolean;
+  /** MULTIPLIER + COMBINE base: exempt the line from the engine's headcount
+   *  multiplier because it is a ratio. Defaults to true for DIV, false
+   *  otherwise (a ÷ b is the same figure however many people the row counts). */
+  ratioNoHeadcount?: boolean;
   /** COUNT_RATE only; defaults to ACTIVE_MONTHS. */
   spread?: BlockSpread;
   /** Apply the merit increase from the position's increase month onward. */
@@ -175,6 +252,7 @@ export interface BlockInput {
   poolEligibilityMode?: PoolEligibilityMode;
   poolDepartments?: string[];
   poolJobTypes?: string[];
+  poolJobTypeWeights?: Record<string, number>;
 }
 
 /** A block as seen by the renderer. */
@@ -188,6 +266,11 @@ export interface BlockDto {
   statsAccountCode: string;
   statsAccountLocked: boolean;
   base?: BlockBaseRef;
+  /** MULTIPLIER + COMBINE base — see BlockInput. Defaults to true; drives
+   *  whether the grid shows a multiplier column (blockInputSlots). */
+  useRowRate?: boolean;
+  /** MULTIPLIER + COMBINE base — see BlockInput. */
+  ratioNoHeadcount?: boolean;
   spread: BlockSpread;
   increaseAware: boolean;
   departmentMode: "POSITION" | "FIXED";
@@ -210,15 +293,27 @@ export interface BlockDto {
   poolKpiDriverId?: string;
   /** POOL_SPREAD + poolSource MANUAL: twelve amounts, Jan..Dec. */
   poolMonthlyAmounts?: number[];
-  /** POOL_SPREAD: what each eligible position's share is proportional to. */
+  /** POOL_SPREAD: what each eligible position's share is proportional to. The
+   *  per-row share weight multiplies whatever this picks. */
   poolSpreadBase?: PoolSpreadBase;
-  /** POOL_SPREAD: RULE derives eligibility here (and locks the grid cells);
-   *  MANUAL leaves it to a per-row tick box. */
+  /** POOL_SPREAD: RULE derives membership here (the grid's weight column then
+   *  only tunes the size of a member's share); MANUAL reads membership off that
+   *  column itself — any weight above zero is in the pool. */
   poolEligibilityMode?: PoolEligibilityMode;
   /** POOL_SPREAD + RULE: department codes; empty means every department. */
   poolDepartments?: string[];
   /** POOL_SPREAD + RULE: job-type codes; empty means every classification. */
   poolJobTypes?: string[];
+  /**
+   * POOL_SPREAD + RULE: the default share weight per job classification —
+   * `{ "Manager": 1.5, "Supervisor": 1.25 }`. A classification that is absent
+   * (or set to 1) takes one whole share. A weight typed on the row itself wins.
+   *
+   * RULE only, and deliberately so: under MANUAL the row's own number is both
+   * "in the pool" and "how big a share", so there is no such thing as a member
+   * with no weight of their own for a default to fill in.
+   */
+  poolJobTypeWeights?: Record<string, number>;
   sortOrder: number;
   updatedAt: string;
   /** Compiled engine definition ids (the grid keys inputs/totals by these). */
@@ -264,7 +359,7 @@ export function positionCountDefId(ou: string): string {
 }
 export function systemStatDefId(
   ou: string,
-  stat: "HOURS" | "HEADCOUNT" | "FTE"
+  stat: "HOURS" | "HOURS_PAID" | "HEADCOUNT" | "FTE"
 ): string {
   return `sys-stat-${stat.toLowerCase()}:${ou}`;
 }
@@ -282,6 +377,58 @@ export const SPREAD_TO_METHOD: Record<BlockSpread, SpreadMethod> = {
   DAYS: "FLAT_PER_DAY",
   VACATION_PATTERN: "VACATION_WEIGHTED",
   WEIGHTED_BASE: "WEIGHTED_BY_BASE",
+  WEIGHTED_HOURS_WORKED: "WEIGHTED_BY_BASE",
+  WEIGHTED_HOURS_PAID: "WEIGHTED_BY_BASE",
+  WEIGHTED_FTE: "WEIGHTED_BY_BASE",
+};
+
+/**
+ * Which system stat definition a WEIGHTED_* spread points its base selector at.
+ * Absent = the engine default, the base-salary curve (WEIGHTED_BASE). Kept as a
+ * companion map rather than reshaping SPREAD_TO_METHOD, which is read in several
+ * places that only care about the method.
+ */
+export const SPREAD_TO_STAT_BASE: Partial<
+  Record<BlockSpread, "HOURS" | "HOURS_PAID" | "FTE">
+> = {
+  WEIGHTED_HOURS_WORKED: "HOURS",
+  WEIGHTED_HOURS_PAID: "HOURS_PAID",
+  WEIGHTED_FTE: "FTE",
+};
+
+/** Dropdown labels + hints for the COUNT_RATE spread choice. */
+export const BLOCK_SPREAD_META: Record<
+  BlockSpread,
+  { label: string; hint: string }
+> = {
+  ACTIVE_MONTHS: {
+    label: "Evenly over months",
+    hint: "The same amount each month the position is active.",
+  },
+  DAYS: {
+    label: "By days in month",
+    hint: "Proportional to working days, so longer months carry more.",
+  },
+  VACATION_PATTERN: {
+    label: "Like vacation",
+    hint: "Following the position's vacation weights.",
+  },
+  WEIGHTED_BASE: {
+    label: "Like salary",
+    hint: "Proportional to the monthly base-salary curve, so it steps with merit increases.",
+  },
+  WEIGHTED_HOURS_WORKED: {
+    label: "Like hours worked",
+    hint: "Proportional to hours actually at work, so vacation months carry less.",
+  },
+  WEIGHTED_HOURS_PAID: {
+    label: "Like hours paid",
+    hint: "Proportional to hours paid, vacation included.",
+  },
+  WEIGHTED_FTE: {
+    label: "Like FTE",
+    hint: "Proportional to the full-time-equivalent curve across the year.",
+  },
 };
 
 export const BLOCKS_CHANNELS = {

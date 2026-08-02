@@ -95,9 +95,20 @@ export interface ImportRowsResult {
   rows: WideBudgetRow[];
 }
 
+/** A department the hotel's budget file carries, named from the mapping tables. */
+export interface BudgetDepartmentOption {
+  /** App-standard "D"+4-digit code — the same form a position's department uses. */
+  code: string;
+  /** Mapping-table description, falling back to the code when unmapped. */
+  name: string;
+}
+
 export const BUDGET_IMPORT_CHANNELS = {
   /** Open a file dialog, parse + OU-gate, persist (overwrite), return the data. */
   pull: "budgetImport:pull",
   /** The current stored import (metadata + rows) for the selected OU, or null. */
   getCurrent: "budgetImport:getCurrent",
+  /** Just the department codes the current import carries — the hotel's own
+   *  chart, rather than the mapping tables' 200-plus company-wide list. */
+  listDepartments: "budgetImport:listDepartments",
 } as const;

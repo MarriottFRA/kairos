@@ -9,7 +9,7 @@
  *   blk:<defId>:qty        COUNT_RATE — the count
  *   blk:<defId>:unitRate   COUNT_RATE — the rate
  *   blk:<defId>:m1..m12    CUSTOM_MONTHLY — exploded months (monthlyValues)
- *   blk:<defId>:eligible   POOL_SPREAD — shares the pot? (boolean)
+ *   blk:<defId>:poolWeight POOL_SPREAD — how many shares of the pot
  *
  * One source of truth: grid editing, optimistic updates and the live
  * simulation all read the row; the write path diffs these keys back into
@@ -17,9 +17,10 @@
  * This module is pure and shared by renderer + main-side tests.
  */
 
-import { BlockDto } from "../blocks/ipc";
+import { BlockDto, POOL_WEIGHT_DEFAULT } from "../blocks/ipc";
+import { clampPoolWeight } from "./poolSpread";
 import { ComponentValuePatch, ComponentValueRecord } from "./ipc";
-import { coerceBooleanCell, PositionRow } from "./rowModel";
+import { PositionRow } from "./rowModel";
 
 const MONTHS = 12;
 
@@ -29,21 +30,20 @@ export type BlockSlot =
   | "qty"
   | "unitRate"
   | "openingBase"
-  | "eligible"
+  | "poolWeight"
   | `m${number}`;
 
 /**
- * Slots the grid renders as a tick box rather than a number.
- *
- * "eligible" persists into the ComponentValue.rate column as 0/1 — that column
- * is meaningless for POOL_SPREAD (its definition is DIRECT_ABS, never
+ * The pooled-share weight persists into the ComponentValue.rate column — that
+ * column is meaningless for POOL_SPREAD (its definition is DIRECT_ABS, never
  * PERCENT_OF), so reusing it keeps the whole feature free of a secure-store
- * migration. It also leaves room to reinterpret the number as a participation
- * weight later (0 = out, 2 = a double share) without touching storage.
+ * migration.
+ *
+ * It held 0/1 while this was a tick box, and a plan written back then still
+ * reads correctly: 1 IS one whole share. Nothing needed converting, which is
+ * why there is no migration to go with the weights.
  */
-export const BOOLEAN_BLOCK_SLOTS: ReadonlySet<BlockSlot> = new Set<BlockSlot>([
-  "eligible",
-]);
+export const POOL_WEIGHT_SLOT: BlockSlot = "poolWeight";
 
 export const BLOCK_KEY_PREFIX = "blk:";
 
@@ -55,7 +55,10 @@ export function blockFieldKey(defId: string, slot: BlockSlot): string {
 export function blockInputSlots(block: BlockDto): BlockSlot[] {
   switch (block.blockType) {
     case "MULTIPLIER":
-      return ["rate"];
+      // A compound block can drop its per-row multiplier entirely — the two
+      // combined sides are then the whole calculation and there is nothing to
+      // type, so the block contributes no editable column.
+      return block.useRowRate === false ? [] : ["rate"];
     case "FLAT_MONTHLY":
       return ["amount"];
     case "COUNT_RATE":
@@ -67,11 +70,11 @@ export function blockInputSlots(block: BlockDto): BlockSlot[] {
       // a CUMULATIVE, non-January scheme carries one per (position, scheme).
       return block.ssCumulativeNonJan ? ["openingBase"] : [];
     case "POOL_SPREAD":
-      // The column exists in both eligibility modes — under a RULE it is
-      // read-only and shows what the block config decided, which is the point:
-      // the user can always see who is in the pool. Only MANUAL mode stores a
-      // value (see buildBlockColumns, which locks the cell under a RULE).
-      return ["eligible"];
+      // The column exists in both eligibility modes. Under MANUAL it is both
+      // membership and size of share; under a RULE the rule owns membership and
+      // this only tunes a member's share, so the cells of everyone the rule
+      // leaves out are locked (see buildBlockColumns).
+      return [POOL_WEIGHT_SLOT];
   }
 }
 
@@ -135,8 +138,13 @@ export function applyComponentValuesToRow(
       else if (slot === "qty") row[key] = value.qty ?? null;
       else if (slot === "unitRate") row[key] = value.unitRate ?? null;
       else if (slot === "openingBase") row[key] = value.ssOpeningBase ?? null;
-      else if (slot === "eligible") row[key] = (value.rate ?? 0) > 0;
-      else {
+      else if (slot === POOL_WEIGHT_SLOT) {
+        // A stored 0 is the old tick box's "unticked" and means no weight of
+        // one's own — blank, so the cell shows the default the block resolves
+        // rather than a zero the user never typed.
+        const weight = clampPoolWeight(value.rate);
+        row[key] = weight > 0 ? weight : null;
+      } else {
         const month = Number(slot.slice(1));
         row[key] = value.monthlyValues?.[month - 1] ?? null;
       }
@@ -183,20 +191,31 @@ export function sanitizeBlockInputs(
     for (const slot of blockInputSlots(block)) {
       const key = blockFieldKey(block.costDefId, slot);
       const value = out[key];
-      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
-        // Only normalize a key the row actually carries. Materializing a `false`
-        // where there was nothing would read as a change on every unrelated
-        // edit, enqueueing a pointless write for every position.
-        if (!(key in out)) continue;
-        // Same normalization the catalog's BOOLEAN fields get in sanitizeRow —
-        // a pasted "TRUE"/"0"/"" must reach the grid as a real boolean or the
-        // checkbox renderer and the is-true filter disagree.
-        out[key] = coerceBooleanCell(value);
-        continue;
-      }
       if (value === undefined || value === null) continue;
       if (value === "") {
         out[key] = null;
+        continue;
+      }
+      if (slot === POOL_WEIGHT_SLOT) {
+        // This column was a tick box until weights arrived, and the sheets
+        // people paste from still hold TRUE/FALSE. Read them as one share and
+        // none rather than rejecting the paste as junk.
+        const asBoolean = booleanish(value);
+        if (asBoolean !== null) {
+          out[key] = asBoolean ? POOL_WEIGHT_DEFAULT : null;
+          continue;
+        }
+        // Otherwise a share weight is only ever positive: zero and below mean
+        // "no weight of my own", stored as blank so each eligibility mode can
+        // give that its own meaning (out of the pool / take the block's
+        // default). Junk still reverts rather than silently emptying the cell.
+        const weight = clampPoolWeight(value);
+        out[key] =
+          weight > 0
+            ? weight
+            : Number.isFinite(Number(String(value).trim()))
+              ? null
+              : oldRow[key] ?? null;
         continue;
       }
       const num = typeof value === "number" ? value : Number(String(value).trim());
@@ -241,8 +260,9 @@ export function blockPatchesFromRow(
     else if (slot === "qty") fields.qty = numberOrNull(row[key]);
     else if (slot === "unitRate") fields.unitRate = numberOrNull(row[key]);
     else if (slot === "openingBase") fields.ssOpeningBase = numberOrNull(row[key]);
-    // The tick box rides the rate column as 0/1 — see BOOLEAN_BLOCK_SLOTS.
-    else if (slot === "eligible") fields.rate = row[key] === true ? 1 : 0;
+    // The share weight rides the rate column — see POOL_WEIGHT_SLOT. Cleared to
+    // NULL rather than 0 so "no weight of my own" is one value, not two.
+    else if (slot === POOL_WEIGHT_SLOT) fields.rate = numberOrNull(row[key]);
     else if (slot === "account") fields.accountCode = stringOrNull(row[key]);
     else if (slot === "statsAccount") fields.statsAccountCode = stringOrNull(row[key]);
     else if (/^m\d{1,2}$/.test(slot)) touchedMonthsByDef.add(defId);
@@ -292,20 +312,11 @@ export function rowToComponentValues(
     let hasValue = false;
     for (const slot of blockInputSlots(block)) {
       const value = row[blockFieldKey(block.costDefId, slot)];
-      if (BOOLEAN_BLOCK_SLOTS.has(slot)) {
-        // Only a ticked row is worth a record; an unticked one is indistinguishable
-        // from "never touched" as far as the pool spread is concerned.
-        if (value === true) {
-          record.rate = 1;
-          hasValue = true;
-        }
-        continue;
-      }
       const num =
         typeof value === "number" && Number.isFinite(value) ? value : null;
       if (num === null) continue;
       hasValue = true;
-      if (slot === "rate") record.rate = num;
+      if (slot === "rate" || slot === POOL_WEIGHT_SLOT) record.rate = num;
       else if (slot === "amount") record.yearlyValue = num;
       else if (slot === "qty") record.qty = num;
       else if (slot === "unitRate") record.unitRate = num;
@@ -333,6 +344,16 @@ export function rowToComponentValues(
     if (hasValue) out.push(record);
   }
   return out;
+}
+
+/** TRUE/FALSE as a spreadsheet writes it, or null when this is not that. */
+function booleanish(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return null;
+  const text = value.trim().toLowerCase();
+  if (text === "true" || text === "yes" || text === "y") return true;
+  if (text === "false" || text === "no" || text === "n") return false;
+  return null;
 }
 
 function numberOrNull(value: unknown): number | null {

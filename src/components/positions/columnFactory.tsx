@@ -588,9 +588,9 @@ function autofilledCodeKeys(
  * May this cell be edited on THIS row?
  *
  * `column.editable` answers the row-independent half (COMPUTED columns, a
- * mirrored department code, a block Total, a RULE-mode pool tick). The three
- * rules below need the row itself, so they cannot live on the colDef — and they
- * are exactly the rules a second editing surface would get wrong. The grid's
+ * mirrored department code, a block Total). The rules below need the row itself,
+ * so they cannot live on the colDef — and they are exactly the rules a second
+ * editing surface would get wrong. The grid's
  * isCellEditable and the position form's field controls both call this, so
  * there is one answer rather than two that drift.
  */
@@ -626,6 +626,14 @@ export interface EditabilityContext {
    * (`423 kairos_plan_locked_by_support`), or the plan is archived.
    */
   planLocked?: boolean;
+  /**
+   * Pooled-block share weights: `false` for a cell whose block decides
+   * membership by RULE and whose row the rule leaves out. Blocks are the
+   * renderer's own concept, so the predicate is built there
+   * (blockColumns.poolWeightGate) and passed in rather than resolved here —
+   * `undefined` when no block needs it, which keeps this hot path free.
+   */
+  poolWeightEditable?: (row: PositionRow | undefined, field: string) => boolean;
 }
 
 /**
@@ -643,24 +651,6 @@ export interface EditabilityContext {
  * The cache is per column-build (keyed on ctx), so a new OU or a changed cluster
  * set builds a new ctx and therefore a new, empty cache.
  */
-/**
- * Do this row's vacation weights drift from 100%?
- *
- * All twelve vacw_* columns ask this in their cellClassName, and the answer sums
- * twelve keys — so an uncached row costs 144 property reads per render, for one
- * boolean that is identical across all twelve cells. Same immutability argument
- * as the cluster cache above; a row is never edited in place.
- */
-const vacationDrift = new WeakMap<PositionRow, boolean>();
-
-function vacationWeightsDrift(row: PositionRow): boolean {
-  const hit = vacationDrift.get(row);
-  if (hit !== undefined) return hit;
-  const drift = Math.abs(COMPUTES.vacationWeightsTotal(row) - 1) > 0.001;
-  vacationDrift.set(row, drift);
-  return drift;
-}
-
 const clusterResolvers = new WeakMap<
   object,
   (row: PositionRow | undefined) => ResolvedClusterWeight
@@ -771,6 +761,10 @@ export function cellEditable(
   // Basis picks the outer pair and Salary Entry the inner one; the two faces it
   // locks are derived from the one it leaves live.
   if (basicSalaryCellLocked(row, column.field)) return false;
+  // A pooled block's share weight, on a row its rule excludes from the pool.
+  if (ctx.poolWeightEditable && !ctx.poolWeightEditable(row, column.field)) {
+    return false;
+  }
   // Only a single-hotel cluster's multiplier may be overridden by hand — with
   // several member hotels the cluster's weights ARE the spread, and a manual
   // number would silently break the split.
@@ -967,13 +961,6 @@ function buildColumn(
       };
     }
 
-    // Weights must sum to 1 (shown as 100%) — tint the total when it drifts.
-    if (def.computeKey === "vacationWeightsTotal") {
-      column.cellClassName = (params) =>
-        Math.abs(Number(params.value) - 1) > 0.001
-          ? "pos-cell--num pos-cell--warn"
-          : "pos-cell--num pos-cell--derived";
-    }
   }
 
   // HC Stats: the account the permanent position-count head always books to.
@@ -1313,17 +1300,6 @@ function buildColumn(
     column.cellClassName = (params) =>
       basicSalaryCellLocked(params.row, def.key)
         ? "pos-cell--num pos-cell--derived"
-        : "pos-cell--num";
-  }
-
-  // Vacation weights are relative proportions the engine normalizes by their
-  // total (see reference.vacationCost). Redden the weight cells while the row's
-  // total drifts from 1 (100%) — a nudge to tidy up, though the math
-  // self-corrects. Compared on the stored fraction, not the shown percentage.
-  if (def.vector === "vacationMonthlyWeights") {
-    column.cellClassName = (params) =>
-      params.row && vacationWeightsDrift(params.row)
-        ? "pos-cell--num pos-cell--warn"
         : "pos-cell--num";
   }
 

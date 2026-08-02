@@ -8,7 +8,15 @@
  * revenue × a percentage, shared out across the service staff.
  *
  *   share_i[m] = pot[m] × w_i[m] / Σ_j w_j[m]
- *   w_i[m]     = basis_i × headcount_i × hotelClusterWeight_i × seasonality_i[m]
+ *   w_i[m]     = shareWeight_i × basis_i × headcount_i × hotelClusterWeight_i
+ *                × seasonality_i[m]
+ *
+ * shareWeight is the "points" half of the model and the reason the pot can be
+ * split the way a real tips pool is: the basis says what a share is proportional
+ * to (heads, hours, salary…), the weight says how many shares this person takes
+ * of it — a GM on 2 draws twice an associate on 1 from the same basis. It is
+ * also what membership is expressed in under MANUAL: any weight above zero is in
+ * the pool, zero is out, which is why the grid column replaced a tick box.
  *
  * Two consequences are the point of the design, not side effects:
  *   - The pot is CONSERVED: the shares sum to exactly pot[m]. Zeroing someone's
@@ -26,7 +34,13 @@
  * pins them).
  */
 
-import { BlockDto, PoolEligibilityMode, PoolSpreadBase } from "../blocks/ipc";
+import {
+  BlockDto,
+  POOL_WEIGHT_DEFAULT,
+  POOL_WEIGHT_MAX,
+  PoolEligibilityMode,
+  PoolSpreadBase,
+} from "../blocks/ipc";
 import { KPI_EXPLICIT_DEPT_KEY } from "../kpiDrivers/ipc";
 import { ComponentValue, MONTHS, Position } from "../engine/types";
 import type { KpiSeriesSlice } from "./engineInput";
@@ -43,7 +57,16 @@ export interface PoolSpreadSpec {
   departments: string[];
   /** RULE only: job-type codes; empty means every classification. */
   jobTypes: string[];
+  /** RULE only: default share weight per job classification; missing = 1. */
+  jobTypeWeights: Record<string, number>;
 }
+
+/** The subset of a spec that decides who is in and for how many shares — what
+ *  the grid needs to render the weight column without resolving a whole pot. */
+export type PoolMembershipSpec = Pick<
+  PoolSpreadSpec,
+  "eligibilityMode" | "departments" | "jobTypes" | "jobTypeWeights"
+>;
 
 /** What one position's share is proportional to, before headcount/cluster/season.
  *  Negative inputs are clamped away — a negative weight would flip the sign of
@@ -63,6 +86,13 @@ export function poolBasisValue(
       case "MANHOURS_WORKED":
         // Already resolved (derived or overridden) by both loaders.
         return position.yearlyHoursWorked;
+      case "MANHOURS_PAID":
+        // Worked + vacation, matching the engine's HOURS_PAID stat rather than
+        // the Allocations contract-days formula (see PoolSpreadBase).
+        return (
+          position.yearlyHoursWorked +
+          position.vacationDays * position.dailyContractHours
+        );
       case "BASE_SALARY":
         return position.monthlyBaseSalary;
       case "VACATION_DAYS":
@@ -81,16 +111,17 @@ export function poolBasisValue(
  *
  * RULE derives it from the block config — an empty filter list means "every
  * one of these", so a rule with neither list set includes the whole hotel. The
- * per-row tick box is ignored (and rendered locked) in this mode: the config
- * wins, so eligibility can never silently disagree with what it states.
- * MANUAL uses the tick alone.
+ * per-row weight cannot add or remove a member in this mode: the config wins,
+ * so membership can never silently disagree with what it states, and a weight
+ * typed against a non-member is ignored (the grid locks that cell).
+ * MANUAL reads membership off the weight itself — above zero is in.
  */
 export function isPoolEligible(
   spec: Pick<PoolSpreadSpec, "eligibilityMode" | "departments" | "jobTypes">,
   position: Pick<Position, "departmentCode" | "jobTypeCode">,
-  ticked: boolean
+  hasWeight: boolean
 ): boolean {
-  if (spec.eligibilityMode !== "RULE") return ticked;
+  if (spec.eligibilityMode !== "RULE") return hasWeight;
   if (
     spec.departments.length > 0 &&
     !spec.departments.includes(position.departmentCode)
@@ -104,6 +135,49 @@ export function isPoolEligible(
     return false;
   }
   return true;
+}
+
+/**
+ * A weight as the maths may use it: finite, positive, and capped.
+ *
+ * Anything else reads as "no weight" (0) rather than throwing, because this
+ * number arrives from a pasted grid cell as often as it does from the config.
+ * The cap matters because weights are divided by their own sum — one cell
+ * holding 1e9 would silently round every colleague's share to zero.
+ */
+export function clampPoolWeight(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(value, POOL_WEIGHT_MAX);
+}
+
+/**
+ * How many shares this position takes — 0 meaning "not in this pool".
+ *
+ * The resolution order is the whole contract of the weight system, and it is
+ * the same one the grid renders:
+ *
+ *   MANUAL  the row's own weight, full stop. Nothing typed = not in the pool.
+ *   RULE    the rule decides membership; a member's weight is their own if they
+ *           have one, else their classification's default, else one whole share.
+ *
+ * The RULE fallback is what keeps saved plans intact: rows carry a stored 0
+ * from the days when this column was a tick box, and a 0 there must not read as
+ * "excluded" against a rule that plainly includes them.
+ */
+export function poolShareWeight(
+  spec: PoolMembershipSpec,
+  position: Pick<Position, "departmentCode" | "jobTypeCode">,
+  storedWeight: number | null | undefined
+): number {
+  const own = clampPoolWeight(storedWeight);
+  if (spec.eligibilityMode !== "RULE") return own;
+  if (!isPoolEligible(spec, position, own > 0)) return 0;
+  if (own > 0) return own;
+  const byClassification = clampPoolWeight(
+    spec.jobTypeWeights[position.jobTypeCode]
+  );
+  return byClassification > 0 ? byClassification : POOL_WEIGHT_DEFAULT;
 }
 
 /** Twelve zeros — a pot/share vector that books nothing. */
@@ -166,6 +240,7 @@ export function buildPoolSpecs(
       eligibilityMode: block.poolEligibilityMode ?? "MANUAL",
       departments: block.poolDepartments ?? [],
       jobTypes: block.poolJobTypes ?? [],
+      jobTypeWeights: block.poolJobTypeWeights ?? {},
     }));
 }
 
@@ -205,13 +280,15 @@ export function applyPoolSpread(
     const eligible: Array<{ position: Position; basis: number }> = [];
     for (const position of positions) {
       const stored = byKey.get(`${position.id}|${spec.costDefId}`);
-      // The tick box persists into the (otherwise unused for this block type)
-      // rate slot — see blockRows.ts. Anything above zero counts as ticked.
-      const ticked = (stored?.rate ?? 0) > 0;
-      if (!isPoolEligible(spec, position, ticked)) continue;
+      // The share weight persists into the (otherwise unused for this block
+      // type) rate slot — see blockRows.ts. Zero means out of the pool, so this
+      // one call answers both membership and size of share.
+      const weight = poolShareWeight(spec, position, stored?.rate);
+      if (weight <= 0) continue;
       eligible.push({
         position,
         basis:
+          weight *
           poolBasisValue(spec.spreadBase, position) *
           Math.max(0, position.headcount) *
           Math.max(0, position.hotelClusterWeight),

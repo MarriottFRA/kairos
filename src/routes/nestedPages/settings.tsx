@@ -43,6 +43,7 @@ import type {
 import LegacyImportCard from "../../components/settings/LegacyImportCard";
 import OracleImportCard from "../../components/settings/OracleImportCard";
 import StorageCleanupCard from "../../components/settings/StorageCleanupCard";
+import TermsCard from "../../components/settings/TermsCard";
 
 export default function Settings() {
   const themeMode = useSettingsStore((s) => s.themeMode);
@@ -569,6 +570,10 @@ export default function Settings() {
       {/* Purge soft-deleted rows from both stores (all hotels). Self-contained:
           everything it needs lives in components/settings + main/maintenance. */}
       <StorageCleanupCard />
+
+      {/* What was accepted on this device, and the text itself. The acceptance
+          is taken once by the shell's gate — this card only replays it. */}
+      <TermsCard />
 
       <Card
         variant="outlined"

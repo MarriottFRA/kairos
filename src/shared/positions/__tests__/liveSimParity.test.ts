@@ -19,7 +19,7 @@ import {
 } from "../../positionDefaults";
 import { compile, simulate } from "../../engine/simulate";
 import { PositionId } from "../../engine/types";
-import { applyBlocksStructureV12 } from "../../../main/blocks/schema";
+import { applyStructureColumns } from "../../../main/blocks/schema";
 import { KPI_DRIVERS_SQL } from "../../../main/kpiDrivers/schema";
 import {
   ensureBaseSalaryDef,
@@ -103,7 +103,7 @@ let scenarioId: string;
 beforeEach(() => {
   structureDb = new Database(":memory:");
   structureDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(structureDb);
+  applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   // The pooled block reads a KPI's cached series through the loader, so the
   // parity fixture needs the KPI tables the plaintext store carries.
@@ -169,6 +169,10 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       blockType: "POOL_SPREAD", label: "Gratuities", accountCode: "601000",
       accountLocked: true, poolSource: "KPI", poolKpiDriverId: GRAT_DRIVER,
       poolSpreadBase: "HEADCOUNT", poolEligibilityMode: "RULE",
+      // Managers draw one-and-a-half shares of the pot. Nothing is stored per
+      // row for it, so the weight only lands if BOTH sides read it off the
+      // block config — which is exactly what this test is for.
+      poolJobTypeWeights: { MGR: 1.5 },
     },
     NOW
   );
@@ -247,9 +251,9 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         { positionId: "pos-2", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 85 } },
         { positionId: "pos-2", componentDefId: `${multSalaryId}:cost`, fields: { rate: 0.08 } },
         { positionId: "pos-2", componentDefId: `${countRateId}:cost`, fields: { qty: 22, unitRate: 4 } },
-        // The pool tick box rides the rate slot: pos-2 is in the service-charge
-        // pool, pos-1 is deliberately not (and has no row at all).
-        { positionId: "pos-2", componentDefId: `${poolManualId}:cost`, fields: { rate: 1 } },
+        // The pool share weight rides the rate slot: pos-2 takes a double share
+        // of the service charge, pos-1 is deliberately out (no row at all).
+        { positionId: "pos-2", componentDefId: `${poolManualId}:cost`, fields: { rate: 2 } },
       ],
     },
     lookup,
@@ -351,12 +355,13 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   expect(vacLevy.total).toBeGreaterThan(0);
 
   // The pooled gratuity fund: 1200/month split by headcount (pos-1 counts 2,
-  // pos-2 counts 1) and gated by working months. The whole pot always lands.
+  // pos-2 counts 1), weighted 1.5× because pos-1 is a manager, and gated by
+  // working months. The whole pot always lands.
   const gratOne = live.results.get("pos-1")!.get(`${poolKpiId}:cost`)!;
   const gratTwo = live.results.get("pos-2")!.get(`${poolKpiId}:cost`)!;
-  expect(gratOne.months[0]).toBeCloseTo(800, 9); // Jan: 1200 × 2/3
-  expect(gratTwo.months[0]).toBeCloseTo(400, 9); // Jan: 1200 × 1/3
-  expect(gratOne.months[3]).toBeCloseTo(600, 9); // Apr: pos-1 half-active → 1/2
+  expect(gratOne.months[0]).toBeCloseTo(900, 9); // Jan: 1200 × 3/4 (2 × 1.5)
+  expect(gratTwo.months[0]).toBeCloseTo(300, 9); // Jan: 1200 × 1/4
+  expect(gratOne.months[3]).toBeCloseTo(720, 9); // Apr: pos-1 half-active → 1.5/2.5
   expect(gratOne.months[4]).toBe(0); // May: pos-1 dark…
   expect(gratTwo.months[4]).toBeCloseTo(1200, 9); // …so pos-2 takes it all
   for (let m = 0; m < 12; m++) {
@@ -365,8 +370,8 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   // Merit does not touch a share of a fixed pot (contrast Uniforms above).
   expect(gratOne.months[7] + gratTwo.months[7]).toBeCloseTo(1200, 9);
 
-  // The manual pool: only pos-2 is ticked, so it takes the whole 600 and
-  // pos-1 books nothing despite being the bigger row.
+  // The manual pool: only pos-2 carries a share weight, so it takes the whole
+  // 600 and pos-1 books nothing despite being the bigger row.
   expect(live.results.get("pos-1")!.get(`${poolManualId}:cost`)!.total).toBe(0);
   expect(
     live.results.get("pos-2")!.get(`${poolManualId}:cost`)!.months[0]

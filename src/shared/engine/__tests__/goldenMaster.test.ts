@@ -129,7 +129,18 @@ describe("golden master 2 — hourly seasonal with mid-year increase, vacation a
     // A vacation/accrual day is now valued at that derived day rate (45), not a
     // stored input. Vacation (all in Aug, priced at Aug's 1.10 merit):
     //   10 days × 45 × 1.10 = 495.
-    // Accrual: 1 day × 45/day → 45 before Jul, 49.5 after; Aug nets 49.5 − 495.
+    // Accrual is a liability roll-forward in days. The 10 days are earned evenly
+    // over the 9 WORKED months (twm = 9) → 10/9 = 1.1111 days/month, and released
+    // in Aug. Each month posts the movement in the liability, bal[m]·r[m] −
+    // bal[m−1]·r[m−1]:
+    //   Apr–Jun  1.1111 d × 45   = 50    (earn at the pre-increase rate)
+    //   Jul      1.1111 × 49.5 = 55 fresh, plus remeasuring the 3.3333-day
+    //            balance across the merit step, 3.3333 × 4.5 = 15  → 70
+    //   Aug      55 fresh − 495 released                            → −440
+    //   Sep–Dec  1.1111 × 49.5                                      = 55
+    // Closing balance is zero, so the twelve months sum to exactly zero — the
+    // whole point of the line. Note the merit revaluation lands in Jul, where the
+    // rate stepped, NOT in Aug where the leave happens to fall.
     const definitions = [
       makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
       makeDef({ id: "accrual", kind: "HOLIDAY_ACCRUAL", accountCode: "611000" }),
@@ -163,10 +174,9 @@ describe("golden master 2 — hourly seasonal with mid-year increase, vacation a
       months(lines, "base"),
       [0, 0, 0, 900, 900, 900, 1005, 1005 - 495, 1005, 1005, 1005, 1005]
     );
-    expectMonths(
-      months(lines, "accrual"),
-      [0, 0, 0, 45, 45, 45, 49.5, 49.5 - 495, 49.5, 49.5, 49.5, 49.5]
-    );
+    const accrual = months(lines, "accrual");
+    expectMonths(accrual, [0, 0, 0, 50, 50, 50, 70, -440, 55, 55, 55, 55]);
+    expect(accrual.reduce((a, b) => a + b, 0)).toBeCloseTo(0, 9);
     // Pension runs on the GROSS base — Aug's vacation deduction must not leak in.
     expectMonths(
       months(lines, "pension"),
@@ -335,6 +345,155 @@ describe("golden master 5 — bank-holiday premium (hourly-only, staff × premiu
     if (!("plan" in compiled)) throw new Error("compile failed");
     const lines = simulate(compiled.plan).positionLines(posId("h"));
     expectMonths(months(lines, "bankhol"), new Array(MONTHS).fill(0));
+  });
+
+  it("prices a department's own coverage where one is set", () => {
+    // Housekeeping (2010) is overridden to 25%; Rooms (1010) has no entry and so
+    // follows the hotel-wide 50%. Day rate 240 either way.
+    const input = makeInput({
+      definitions: [
+        definitions[0],
+        makeDef({
+          id: "bankhol",
+          kind: "BANK_HOLIDAY",
+          accountCode: "612000",
+          bankHolidayStaffFraction: 0.5,
+          bankHolidayPremiumMultiplier: 2,
+          bankHolidayCoverageByDepartment: { "2010": 0.25 },
+        }),
+      ],
+      calendar: makeCalendar(undefined, holidayDays),
+      positions: [
+        makePosition({ id: "rooms", payType: "HOURLY", hourlyRate: 30, dailyContractHours: 8 }),
+        makePosition({
+          id: "hskp",
+          departmentCode: "2010",
+          payType: "HOURLY",
+          hourlyRate: 30,
+          dailyContractHours: 8,
+        }),
+      ],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+
+    const bh = (id: string) => months(result.positionLines(posId(id)), "bankhol");
+    // 0.5 × 2 × 240 = 240 (hotel-wide) vs 0.25 × 2 × 240 = 120 (override).
+    expectMonths(bh("rooms"), [240, 0, 0, 0, 0, 0, 0, 240, 0, 0, 0, 0]);
+    expectMonths(bh("hskp"), [120, 0, 0, 0, 0, 0, 0, 120, 0, 0, 0, 0]);
+  });
+
+  it("adds a normal day for the staff who are off when the holiday is paid regardless", () => {
+    // Hourly base is built on net productive days, so the holiday is not in base
+    // pay at all. Where the day is paid whether worked or not, the half who work
+    // it earn 2× and the half who are off still earn 1×: 0.5×2 + 0.5 = 1.5.
+    const input = makeInput({
+      definitions: [
+        definitions[0],
+        makeDef({
+          id: "bankhol",
+          kind: "BANK_HOLIDAY",
+          accountCode: "612000",
+          bankHolidayStaffFraction: 0.5,
+          bankHolidayPremiumMultiplier: 2,
+          bankHolidayPaidWhenNotWorked: true,
+        }),
+      ],
+      calendar: makeCalendar(undefined, holidayDays),
+      positions: [
+        makePosition({ id: "hourly", payType: "HOURLY", hourlyRate: 30, dailyContractHours: 8 }),
+      ],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("hourly"));
+    // 1.5 × 240 = 360.
+    expectMonths(months(lines, "bankhol"), [360, 0, 0, 0, 0, 0, 0, 360, 0, 0, 0, 0]);
+  });
+
+  it("charges salaried staff only the uplift when the premium applies to everyone", () => {
+    // Salaried pay spreads over flat 30-day months, so the holiday is already in
+    // base pay: only the extra 1× over a normal day is incremental. Salaried day
+    // rate = 1200 × 12 / 360 = 40, so 0.5 × (2 − 1) × 40 = 20.
+    const input = makeInput({
+      definitions: [
+        definitions[0],
+        makeDef({
+          id: "bankhol",
+          kind: "BANK_HOLIDAY",
+          accountCode: "612000",
+          bankHolidayStaffFraction: 0.5,
+          bankHolidayPremiumMultiplier: 2,
+          bankHolidayAppliesTo: "ALL",
+        }),
+      ],
+      calendar: makeCalendar(undefined, holidayDays),
+      positions: [
+        makePosition({ id: "salaried", monthlyBaseSalary: 1200 }),
+        makePosition({ id: "hourly", payType: "HOURLY", hourlyRate: 30, dailyContractHours: 8 }),
+      ],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const result = simulate(compiled.plan);
+
+    const bh = (id: string) => months(result.positionLines(posId(id)), "bankhol");
+    expectMonths(bh("salaried"), [20, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0]);
+    // Hourly is untouched by the switch — still the full 0.5 × 2 × 240.
+    expectMonths(bh("hourly"), [240, 0, 0, 0, 0, 0, 0, 240, 0, 0, 0, 0]);
+  });
+});
+
+describe("golden master 5b — the public-holiday calendar base", () => {
+  // A block driven by HOLIDAY_DAYS: the same per-month count the premium reads,
+  // available as an ordinary base so a hotel can price anything holiday-shaped
+  // (relief cover, holiday meal allowance) without the built-in premium.
+  const holidayDays = [2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3];
+
+  it("multiplies a rate by the public holidays in each month", () => {
+    const input = makeInput({
+      definitions: [
+        makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+        makeDef({
+          id: "holmeals",
+          spreadMethod: "PERCENT_OF",
+          accountCode: "628300",
+          baseSelector: { kind: "CALENDAR", series: "HOLIDAY_DAYS" },
+        }),
+      ],
+      calendar: makeCalendar(undefined, holidayDays),
+      positions: [makePosition({ id: "p" })],
+      componentValues: [makeValue("p", "holmeals", { rate: 12 })],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p"));
+    // 12 per holiday day × the month's count × seasonality 1.
+    expectMonths(months(lines, "holmeals"), [24, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 36]);
+  });
+
+  it("contributes nothing in a month the position does not work", () => {
+    const seasonality = new Array(MONTHS).fill(1);
+    seasonality[0] = 0; // closed in January, where two holidays fall
+    const input = makeInput({
+      definitions: [
+        makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+        makeDef({
+          id: "holmeals",
+          spreadMethod: "PERCENT_OF",
+          accountCode: "628300",
+          baseSelector: { kind: "CALENDAR", series: "HOLIDAY_DAYS" },
+        }),
+      ],
+      calendar: makeCalendar(undefined, holidayDays),
+      positions: [makePosition({ id: "p", seasonality })],
+      componentValues: [makeValue("p", "holmeals", { rate: 12 })],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p"));
+    expectMonths(months(lines, "holmeals"), [0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 36]);
   });
 });
 

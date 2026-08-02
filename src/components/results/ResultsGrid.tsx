@@ -4,12 +4,10 @@
  * Extracted from the Results route when the page grew an inspector: the route
  * now owns scope, loading and selection, and this owns how a result row looks.
  * Same DataGridPremium shape it always had (grouped by department, month
- * aggregation, Year pinned right) plus two things the four-source union needs:
- *
- *   - a Source column, so a hand-entered number is never mistaken for a
- *     calculated one at a glance;
- *   - percent-aware formatting, because an allocation split is a share out of
- *     100 rather than money (see format.ts).
+ * aggregation, Year pinned right) plus what the four-source union needs: a
+ * Source column, so a hand-entered number is never mistaken for a calculated
+ * one at a glance. Every cell prints the bare number that gets loaded — an
+ * allocation split included, so a 6.5% share reads as 6.5 (see format.ts).
  *
  * The level-valued rows — headcount, position count, allocation splits — read
  * as a January value followed by eleven zeroes. That is not a display trick: it

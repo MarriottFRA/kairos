@@ -16,7 +16,7 @@ import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../../positions/schema";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
 import { resolveOuScope } from "../../positions/ouScope";
@@ -1026,7 +1026,7 @@ describe("commitImportPlan", () => {
   beforeEach(() => {
     localDb = new Database(":memory:");
     localDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-    applyBlocksStructureV12(localDb);
+    applyStructureColumns(localDb);
     localDb.exec(ALLOCATIONS_SQL);
     secureDb = new Database(":memory:");
     secureDb.exec(POSITIONS_VALUE_TABLES_SQL);

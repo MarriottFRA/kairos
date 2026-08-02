@@ -30,6 +30,8 @@ import IconButton from '@mui/material/IconButton';
 import KairosMark from '../components/KairosMark';
 import AccountPortalActions from '../components/account/AccountPortalActions';
 import AccountPortalPanel from '../components/account/AccountPortalPanel';
+// [AUTH-DEBUG] temporary sign-in tracing — delete with main/auth/authDebug.ts
+import AuthDebugToggle from '../components/AuthDebugToggle';
 
 // Styled Components — Kairos teal aesthetic (lightweight, no WebGL / liquid orbs)
 const PageRoot = styled('div')(({ theme }) => ({
@@ -583,6 +585,8 @@ const Login: React.FC = () => {
           </CardContent>
         </HolographicCard>
       </Box>
+      {/* [AUTH-DEBUG] temporary sign-in tracing toggle (discreet corner dot) */}
+      <AuthDebugToggle />
     </PageRoot>
   );
 };

@@ -36,7 +36,11 @@ import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
 import Autocomplete from "@mui/material/Autocomplete";
 import Chip from "@mui/material/Chip";
 import {
+  BLOCK_COMBINE_OPS,
+  BLOCK_COMBINE_OP_META,
+  BLOCK_SPREAD_META,
   BlockBaseRef,
+  BlockCombineOp,
   BlockDto,
   BlockInput,
   BlockSpread,
@@ -44,6 +48,7 @@ import {
   POOL_MONTHS,
   POOL_SPREAD_BASES,
   POOL_SPREAD_BASE_META,
+  POOL_WEIGHT_MAX,
   PoolEligibilityMode,
   PoolSource,
   PoolSpreadBase,
@@ -76,6 +81,18 @@ export interface BlockDialogProps {
    *  (rich brackets/caps/base config) instead of the generic block form. */
   onPickSocialSecurity?: () => void;
 }
+
+/** COUNT_RATE spread options, grouped for the dropdown's subheaders. */
+const SPREAD_GROUPS: Record<"byTime" | "byCurve", readonly BlockSpread[]> = {
+  byTime: ["ACTIVE_MONTHS", "DAYS"],
+  byCurve: [
+    "WEIGHTED_BASE",
+    "VACATION_PATTERN",
+    "WEIGHTED_HOURS_WORKED",
+    "WEIGHTED_HOURS_PAID",
+    "WEIGHTED_FTE",
+  ],
+};
 
 const TYPE_TILES: Array<{
   type: BlockType;
@@ -135,7 +152,9 @@ const JOB_TYPE_CODES = JOB_TYPE_OPTIONS.map((option) => option.value);
 const COMPOSITE_OPTION = "COMPOSITE";
 function baseValue(base: BlockBaseRef | undefined): string {
   if (!base) return "";
-  return base.kind === "COMPOSITE" ? COMPOSITE_OPTION : JSON.stringify(base);
+  if (base.kind === "COMPOSITE") return COMPOSITE_OPTION;
+  if (base.kind === "COMBINE") return COMBINE_OPTION;
+  return JSON.stringify(base);
 }
 
 /** A composite with nothing ticked multiplies against zero — treat as unset. */
@@ -144,6 +163,76 @@ function isEmptyComposite(base: BlockBaseRef | undefined): boolean {
     base?.kind === "COMPOSITE" &&
     !base.includeBaseSalary &&
     base.blockIds.length === 0
+  );
+}
+
+/** Sentinel for the compound option — its sides live in the editor below. */
+const COMBINE_OPTION = "COMBINE";
+
+/** A compound needs both sides chosen before it means anything. */
+function isIncompleteCombine(base: BlockBaseRef | undefined): boolean {
+  return base?.kind === "COMBINE" && (!base.left || !base.right);
+}
+
+/**
+ * One side of a compound base. Deliberately a narrower menu than the top-level
+ * base picker: no KPI (it compiles to a different engine path and cannot act as
+ * a base series) and no composite/compound (the members would need their own
+ * nested editor, and the VM holds only one saved operand).
+ */
+function CombineSideSelect({
+  label,
+  value,
+  onChange,
+  blockOptions,
+}: {
+  label: string;
+  value: BlockBaseRef | undefined;
+  onChange: (next: BlockBaseRef) => void;
+  blockOptions: BlockDto[];
+}) {
+  return (
+    <TextField
+      select
+      label={label}
+      value={value ? JSON.stringify(value) : ""}
+      onChange={(event) => onChange(JSON.parse(event.target.value) as BlockBaseRef)}
+      error={!value}
+      size="small"
+      fullWidth
+    >
+      <ListSubheader>Salary</ListSubheader>
+      <MenuItem value={JSON.stringify({ kind: "BASE_SALARY" })}>
+        Basic salary (gross)
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "VACATION" })}>Vacation cost</MenuItem>
+      <ListSubheader>Days &amp; hours</ListSubheader>
+      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "PAY_DAYS" })}>
+        Working days in month
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "REAL_DAYS" })}>
+        Productive days in month
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "HOLIDAY_DAYS" })}>
+        Public holidays in month
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "HOURS" })}>
+        Hours worked
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "HOURS_PAID" })}>
+        Hours paid
+      </MenuItem>
+      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "FTE" })}>FTE</MenuItem>
+      {blockOptions.length > 0 && <ListSubheader>Your blocks</ListSubheader>}
+      {blockOptions.map((candidate) => (
+        <MenuItem
+          key={candidate.id}
+          value={JSON.stringify({ kind: "BLOCK", blockId: candidate.id })}
+        >
+          {candidate.label}
+        </MenuItem>
+      ))}
+    </TextField>
   );
 }
 
@@ -167,6 +256,9 @@ export default function BlockDialog({
   const [accountLocked, setAccountLocked] = useState(true);
   const [statsAccountCode, setStatsAccountCode] = useState("");
   const [base, setBase] = useState<BlockBaseRef | undefined>(undefined);
+  // Compound-base options; ignored for every other base kind.
+  const [useRowRate, setUseRowRate] = useState(true);
+  const [ratioNoHeadcount, setRatioNoHeadcount] = useState(false);
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
   const [increaseAware, setIncreaseAware] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -183,6 +275,9 @@ export default function BlockDialog({
     useState<PoolEligibilityMode>("MANUAL");
   const [poolDepartments, setPoolDepartments] = useState<string[]>([]);
   const [poolJobTypes, setPoolJobTypes] = useState<string[]>([]);
+  // Classification -> share weight, as text for the same half-typed reason.
+  // Absent or blank means one whole share; only the exceptions are stored.
+  const [poolWeights, setPoolWeights] = useState<Record<string, string>>({});
 
   // Seed the form each time the dialog opens.
   useEffect(() => {
@@ -193,6 +288,11 @@ export default function BlockDialog({
     setAccountLocked(block?.accountLocked ?? true);
     setStatsAccountCode(block?.statsAccountCode ?? "");
     setBase(block?.base);
+    setUseRowRate(block?.useRowRate ?? true);
+    setRatioNoHeadcount(
+      block?.ratioNoHeadcount ??
+        (block?.base?.kind === "COMBINE" && block.base.op === "DIV")
+    );
     setSpread(block?.spread ?? "ACTIVE_MONTHS");
     setIncreaseAware(block?.increaseAware ?? false);
     setConfirmingDelete(false);
@@ -208,6 +308,14 @@ export default function BlockDialog({
     setPoolEligibilityMode(block?.poolEligibilityMode ?? "MANUAL");
     setPoolDepartments(block?.poolDepartments ?? []);
     setPoolJobTypes(block?.poolJobTypes ?? []);
+    setPoolWeights(
+      Object.fromEntries(
+        Object.entries(block?.poolJobTypeWeights ?? {}).map(([code, weight]) => [
+          code,
+          String(weight),
+        ])
+      )
+    );
   }, [open, block]);
 
   const baseOptions = useMemo(() => {
@@ -233,9 +341,23 @@ export default function BlockDialog({
       ...poolJobTypes.filter((code) => !known.has(code)),
     ];
   }, [poolJobTypes]);
+  // Which classifications get a weight box: the ones the rule selects, or every
+  // classification when the rule selects "any". A weight saved against a
+  // classification the rule no longer names stays on screen rather than
+  // lingering invisibly in the config — it can be cleared where it was set.
+  const weightedJobTypes = useMemo(() => {
+    const listed = poolJobTypes.length > 0 ? poolJobTypes : jobTypeCodes;
+    const known = new Set(listed);
+    return [
+      ...listed,
+      ...Object.keys(poolWeights).filter((code) => !known.has(code)),
+    ];
+  }, [poolJobTypes, jobTypeCodes, poolWeights]);
 
   const labelError = label.trim() === "";
-  const baseError = type === "MULTIPLIER" && (!base || isEmptyComposite(base));
+  const baseError =
+    type === "MULTIPLIER" &&
+    (!base || isEmptyComposite(base) || isIncompleteCombine(base));
   const isPool = type === "POOL_SPREAD";
   const poolAmountValues = useMemo(
     () =>
@@ -250,8 +372,29 @@ export default function BlockDialog({
     poolSource === "MANUAL" &&
     poolAmountValues.some((value) => !Number.isFinite(value));
   const poolKpiError = isPool && poolSource === "KPI" && !poolKpiDriverId;
+  // Only the classifications the user actually weighted travel: a blank box is
+  // "one whole share", which is the default the spread already applies.
+  const poolWeightValues = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const [code, text] of Object.entries(poolWeights)) {
+      if (text.trim() === "") continue;
+      out[code] = Number(text.trim());
+    }
+    return out;
+  }, [poolWeights]);
+  const poolWeightError =
+    isPool &&
+    poolEligibilityMode === "RULE" &&
+    Object.values(poolWeightValues).some(
+      (weight) => !Number.isFinite(weight) || weight <= 0 || weight > POOL_WEIGHT_MAX
+    );
   const valid =
-    !!type && !labelError && !baseError && !poolAmountError && !poolKpiError;
+    !!type &&
+    !labelError &&
+    !baseError &&
+    !poolAmountError &&
+    !poolKpiError &&
+    !poolWeightError;
 
   const handleSave = () => {
     if (!type || !valid) return;
@@ -263,6 +406,9 @@ export default function BlockDialog({
       accountLocked,
       statsAccountCode: type === "COUNT_RATE" ? statsAccountCode : undefined,
       base: type === "MULTIPLIER" ? base : undefined,
+      ...(type === "MULTIPLIER" && base?.kind === "COMBINE"
+        ? { useRowRate, ratioNoHeadcount }
+        : {}),
       spread: type === "COUNT_RATE" ? spread : undefined,
       // A pooled block's share IS the pot; a merit increase would inflate it.
       increaseAware:
@@ -278,6 +424,8 @@ export default function BlockDialog({
         isPool && poolEligibilityMode === "RULE" ? poolDepartments : undefined,
       poolJobTypes:
         isPool && poolEligibilityMode === "RULE" ? poolJobTypes : undefined,
+      poolJobTypeWeights:
+        isPool && poolEligibilityMode === "RULE" ? poolWeightValues : undefined,
     });
   };
 
@@ -370,6 +518,18 @@ export default function BlockDialog({
                         : { kind: "COMPOSITE", includeBaseSalary: true, blockIds: [] }
                     );
                   }
+                  if (picked === COMBINE_OPTION) {
+                    if (base?.kind === "COMBINE") return setBase(base);
+                    // Seed the commonest compound: something ÷ hours worked,
+                    // which is also why the ratio tick starts on.
+                    setRatioNoHeadcount(true);
+                    return setBase({
+                      kind: "COMBINE",
+                      op: "DIV",
+                      left: { kind: "BASE_SALARY" },
+                      right: { kind: "STAT", stat: "HOURS" },
+                    });
+                  }
                   setBase(JSON.parse(picked) as BlockBaseRef);
                 }}
                 error={baseError}
@@ -381,8 +541,15 @@ export default function BlockDialog({
                 <MenuItem value={baseValue({ kind: "BASE_SALARY" })}>
                   Basic salary (gross)
                 </MenuItem>
+                <MenuItem value={baseValue({ kind: "VACATION" })}>
+                  Vacation cost
+                </MenuItem>
+                <ListSubheader>Combine several things</ListSubheader>
                 <MenuItem value={COMPOSITE_OPTION}>
-                  Several things added together…
+                  Composite — several things added together…
+                </MenuItem>
+                <MenuItem value={COMBINE_OPTION}>
+                  Compound — one thing +&nbsp;−&nbsp;×&nbsp;÷ another…
                 </MenuItem>
                 <ListSubheader>Days &amp; hours</ListSubheader>
                 <MenuItem value={baseValue({ kind: "CALENDAR", series: "PAY_DAYS" })}>
@@ -391,11 +558,17 @@ export default function BlockDialog({
                 <MenuItem value={baseValue({ kind: "CALENDAR", series: "REAL_DAYS" })}>
                   Productive days in month
                 </MenuItem>
+                <MenuItem value={baseValue({ kind: "CALENDAR", series: "HOLIDAY_DAYS" })}>
+                  Public holidays in month
+                </MenuItem>
                 <MenuItem value={baseValue({ kind: "STAT", stat: "HOURS" })}>
                   Hours worked
                 </MenuItem>
-                <MenuItem value={baseValue({ kind: "VACATION" })}>
-                  Vacation cost
+                <MenuItem value={baseValue({ kind: "STAT", stat: "HOURS_PAID" })}>
+                  Hours paid
+                </MenuItem>
+                <MenuItem value={baseValue({ kind: "STAT", stat: "FTE" })}>
+                  FTE
                 </MenuItem>
                 {baseOptions.blockOptions.length > 0 && (
                   <ListSubheader>Your blocks</ListSubheader>
@@ -470,30 +643,109 @@ export default function BlockDialog({
               </Stack>
             )}
 
-            {type === "COUNT_RATE" && (
-              <Stack spacing={1}>
-                <Typography variant="subtitle2">Spread the year's figures</Typography>
-                <ToggleButtonGroup
-                  exclusive
-                  size="small"
-                  value={spread}
-                  onChange={(_event, next: BlockSpread | null) => next && setSpread(next)}
-                >
-                  <ToggleButton value="ACTIVE_MONTHS">Evenly over months</ToggleButton>
-                  <ToggleButton value="DAYS">By days in month</ToggleButton>
-                  <ToggleButton value="VACATION_PATTERN">Like vacation</ToggleButton>
-                  <ToggleButton value="WEIGHTED_BASE">Like salary</ToggleButton>
-                </ToggleButtonGroup>
+            {type === "MULTIPLIER" && base?.kind === "COMBINE" && (
+              <Stack
+                spacing={1.5}
+                sx={{
+                  p: 1.5,
+                  borderRadius: 1,
+                  border: (theme) => `1px solid ${theme.palette.divider}`,
+                }}
+              >
+                <Typography variant="subtitle2">Combine</Typography>
+                <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
+                  <CombineSideSelect
+                    label="First"
+                    value={base.left}
+                    onChange={(left) => setBase({ ...base, left })}
+                    blockOptions={baseOptions.blockOptions}
+                  />
+                  <TextField
+                    select
+                    label="Operation"
+                    value={base.op}
+                    onChange={(event) => {
+                      const op = event.target.value as BlockCombineOp;
+                      setBase({ ...base, op });
+                      // A ratio is the only one that must not be multiplied by
+                      // headcount, so follow the operation unless the user has
+                      // already overridden it below.
+                      setRatioNoHeadcount(op === "DIV");
+                    }}
+                    size="small"
+                    sx={{ minWidth: 132 }}
+                  >
+                    {BLOCK_COMBINE_OPS.map((op) => (
+                      <MenuItem key={op} value={op}>
+                        {BLOCK_COMBINE_OP_META[op].symbol}{" "}
+                        {BLOCK_COMBINE_OP_META[op].label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <CombineSideSelect
+                    label="Second"
+                    value={base.right}
+                    onChange={(right) => setBase({ ...base, right })}
+                    blockOptions={baseOptions.blockOptions}
+                  />
+                </Stack>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={useRowRate}
+                      onChange={(event) => setUseRowRate(event.target.checked)}
+                    />
+                  }
+                  label="Also use a per-row multiplier"
+                />
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={ratioNoHeadcount}
+                      onChange={(event) => setRatioNoHeadcount(event.target.checked)}
+                    />
+                  }
+                  label="This is a ratio — don't multiply by headcount"
+                />
                 <Typography variant="caption" color="text.secondary">
-                  {spread === "ACTIVE_MONTHS"
-                    ? "The yearly total is split evenly across each position's working months."
-                    : spread === "DAYS"
-                      ? "Months with more working days carry proportionally more."
-                      : spread === "WEIGHTED_BASE"
-                        ? "Follows each position's basic salary curve, so a mid-year raise pulls more of the total into the later months."
-                        : "Follows each position's vacation pattern — the months leave is taken in."}
+                  {base.op === "DIV"
+                    ? "Dividing by zero in any month books nothing for that month rather than an error."
+                    : "The two are combined month by month."}
+                  {useRowRate
+                    ? " Each row's multiplier is then applied to the result."
+                    : " No multiplier column is added to the grid — the block is the combination itself."}
+                  {ratioNoHeadcount
+                    ? " A row standing for several people shows the per-person figure, not a multiple of it."
+                    : ""}
                 </Typography>
               </Stack>
+            )}
+
+            {type === "COUNT_RATE" && (
+              <TextField
+                select
+                label="Spread the year's figures"
+                value={spread}
+                onChange={(event) => setSpread(event.target.value as BlockSpread)}
+                size="small"
+                fullWidth
+                helperText={BLOCK_SPREAD_META[spread].hint}
+              >
+                <ListSubheader>By time</ListSubheader>
+                {SPREAD_GROUPS.byTime.map((option) => (
+                  <MenuItem key={option} value={option}>
+                    {BLOCK_SPREAD_META[option].label}
+                  </MenuItem>
+                ))}
+                <ListSubheader>By a curve</ListSubheader>
+                {SPREAD_GROUPS.byCurve.map((option) => (
+                  <MenuItem key={option} value={option}>
+                    {BLOCK_SPREAD_META[option].label}
+                  </MenuItem>
+                ))}
+              </TextField>
             )}
 
             {isPool && (
@@ -602,9 +854,10 @@ export default function BlockDialog({
                     ))}
                   </TextField>
                   <Typography variant="caption" color="text.secondary">
-                    Each position's share also follows its working months and
-                    hotel-cluster share, and the whole pot is always spread — if
-                    someone drops out of a month, the others take more.
+                    Each position's share also follows its share weight, working
+                    months and hotel-cluster share, and the whole pot is always
+                    spread — if someone drops out of a month, the others take
+                    more.
                   </Typography>
                 </Stack>
 
@@ -618,14 +871,15 @@ export default function BlockDialog({
                       next && setPoolEligibilityMode(next)
                     }
                   >
-                    <ToggleButton value="MANUAL">Tick each position</ToggleButton>
+                    <ToggleButton value="MANUAL">Weight each position</ToggleButton>
                     <ToggleButton value="RULE">By department / classification</ToggleButton>
                   </ToggleButtonGroup>
 
                   {poolEligibilityMode === "MANUAL" ? (
                     <Typography variant="caption" color="text.secondary">
-                      The grid gets a tick box column — tick the positions that
-                      share this pot.
+                      The grid gets a "Share weight" column. Type 1 for a normal
+                      share, 1.5 for one-and-a-half, 2 for a double share; blank
+                      leaves the position out of the pot.
                     </Typography>
                   ) : (
                     <>
@@ -673,9 +927,60 @@ export default function BlockDialog({
                         )}
                       />
                       <Typography variant="caption" color="text.secondary">
-                        Leave a list empty to mean "any". The grid's tick box
-                        becomes read-only and shows who this rule selects.
+                        Leave a list empty to mean "any". In the grid, everyone
+                        this rule selects shares the pot; the others' Share
+                        weight cells are locked.
                       </Typography>
+
+                      <Divider flexItem sx={{ my: 0.5 }} />
+
+                      <Typography variant="subtitle2">
+                        Share weight by classification
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        How many shares each classification takes. Leave blank
+                        for one whole share — set 1.5 for managers, 2 for
+                        directors, and they draw that much more of the pot than
+                        everyone else. A weight typed on a position's own row
+                        beats these, so one person can still be an exception.
+                      </Typography>
+                      <Box
+                        sx={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "repeat(auto-fill, minmax(168px, 1fr))",
+                          gap: 1,
+                        }}
+                      >
+                        {weightedJobTypes.map((code) => (
+                          <TextField
+                            key={code}
+                            size="small"
+                            label={code}
+                            value={poolWeights[code] ?? ""}
+                            placeholder="1"
+                            onChange={(event) =>
+                              setPoolWeights((current) => ({
+                                ...current,
+                                [code]: event.target.value,
+                              }))
+                            }
+                            slotProps={{
+                              htmlInput: {
+                                inputMode: "decimal",
+                                "aria-label": `Share weight for ${code}`,
+                              },
+                            }}
+                          />
+                        ))}
+                      </Box>
+                      {poolWeightError && (
+                        <Typography variant="caption" color="error">
+                          A share weight must be a positive number (up to{" "}
+                          {POOL_WEIGHT_MAX}). To leave a classification out
+                          entirely, remove it from the rule above.
+                        </Typography>
+                      )}
                     </>
                   )}
                 </Stack>

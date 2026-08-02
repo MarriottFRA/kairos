@@ -13,7 +13,7 @@ import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../../positions/schema";
-import { applyBlocksStructureV12 } from "../../blocks/schema";
+import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
@@ -33,7 +33,7 @@ beforeEach(() => {
   local = new Database(":memory:");
   local.pragma("foreign_keys = ON");
   local.exec(POSITIONS_STRUCTURE_TABLES_SQL);
-  applyBlocksStructureV12(local);
+  applyStructureColumns(local);
   applyHotelClustersV13(local);
   local.exec(ALLOCATIONS_SQL);
   local.exec(KPI_DRIVERS_SQL);

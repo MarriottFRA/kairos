@@ -1,6 +1,7 @@
 import { safeStorage } from "electron";
 import Database from "better-sqlite3-multiple-ciphers";
 import {
+  BankHolidayAppliesTo,
   CalendarYear,
   DEFAULT_WEEKEND_MASK,
   normalizeCalendar,
@@ -21,7 +22,8 @@ import {
   KPI_DRIVERS_SQL,
   applyKpiDriverMultiplier,
 } from "./main/kpiDrivers/schema";
-import { applyBlocksStructureV12 } from "./main/blocks/schema";
+import { applyCountExemptV3, applyStructureColumns } from "./main/blocks/schema";
+import { CALENDAR_TABLES_SQL, applyBankHolidayV4 } from "./main/calendar/schema";
 import { applyHotelClustersV13 } from "./main/hotelClusters/schema";
 import {
   applyAllocationInjectAccount,
@@ -73,7 +75,7 @@ db.pragma("foreign_keys = ON");
 // ABOVE a database's stored number, so an edited body silently never re-runs.
 // When the list grows unwieldy and every live store is at/above a known floor,
 // squash back to a fresh baseline the same way.
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 4;
 
 type LocalDb = InstanceType<typeof Database>;
 
@@ -99,6 +101,13 @@ const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
   // Allocations can post their split into Results, so a definition needs to say
   // which account it posts to. '' = not posted, i.e. today's behaviour.
   2: applyAllocationInjectAccount,
+  // Compound (ratio) blocks: a definition can opt out of the engine's
+  // count × cluster-weight post-pass. Default 0 = today's behaviour.
+  3: applyCountExemptV3,
+  // Bank-holiday premium: who it applies to, whether the holiday is paid when
+  // not worked, and per-department coverage overrides. The defaults reproduce
+  // the two-knob behaviour the feature shipped with.
+  4: applyBankHolidayV4,
 };
 
 /**
@@ -112,34 +121,11 @@ const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
  * key); initializeDatabase() creates them, and the rebuild path preserves them.
  */
 function applyBaselineSchema(handle: LocalDb): void {
-  // Budget/forecast calendar (former v2), one row per (hotel OU, year).
-  // weekend_mask seeds the Weekends row; per-month counts in calendar_months
-  // stay authoritative once edited. The bank_holiday_* columns are the
-  // per-hotel-year premium config (former v6; off by default, an empty account
-  // keeps the feature effectively inert).
-  handle.exec(`
-    CREATE TABLE IF NOT EXISTS calendar_years (
-        ou TEXT NOT NULL,
-        year INTEGER NOT NULL,
-        weekend_mask INTEGER NOT NULL,
-        bank_holiday_enabled INTEGER NOT NULL DEFAULT 0,
-        bank_holiday_staff_fraction REAL NOT NULL DEFAULT 0.5,
-        bank_holiday_premium_multiplier REAL NOT NULL DEFAULT 2,
-        bank_holiday_account TEXT NOT NULL DEFAULT '',
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (ou, year)
-    );
-    CREATE TABLE IF NOT EXISTS calendar_months (
-        ou TEXT NOT NULL,
-        year INTEGER NOT NULL,
-        month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
-        calendar_days INTEGER NOT NULL,
-        public_holidays INTEGER NOT NULL DEFAULT 0,
-        weekend_days INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (ou, year, month),
-        FOREIGN KEY (ou, year) REFERENCES calendar_years (ou, year) ON DELETE CASCADE
-    );
-  `);
+  // Budget/forecast calendar (former v2), plus the bank-holiday columns added
+  // after the baseline (v4). Both live in main/calendar/schema.ts so the tests
+  // can exec them without pulling in Electron.
+  handle.exec(CALENDAR_TABLES_SQL);
+  applyBankHolidayV4(handle);
   // Structure store: scenarios, cost component definitions, SS schemes, field
   // catalog, hotels cache (former v3).
   handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
@@ -156,7 +142,12 @@ function applyBaselineSchema(handle: LocalDb): void {
   applyKpiDriverMultiplier(handle);
   // Blocks: block_configs + the block_id / base_ref columns on
   // cost_component_definitions (former v12). Column-guarded, so idempotent.
-  applyBlocksStructureV12(handle);
+  // Blocks: block_configs, then every guarded column cost_component_definitions
+  // needs beyond its CREATE TABLE — block_id/base_ref (former v12) and
+  // count_exempt (v3). They are added by ALTER, so applying them in one place
+  // keeps a fresh install's COLUMN ORDER identical to an upgraded store's.
+  // All column-guarded, so this stays idempotent on every launch.
+  applyStructureColumns(handle);
   // Hotel clusters: hotel_clusters + hotel_cluster_members (former v13).
   applyHotelClustersV13(handle);
   // Per-scheme SS contributory-base columns on ss_schemes. Column-guarded.
@@ -497,6 +488,15 @@ export async function setUserSettings(settings: UserSettings): Promise<string> {
 // Plain planning data (day counts per month), so it lives here in the
 // unencrypted store alongside settings rather than in secure_db.ts.
 
+function parseCoverageJson(raw: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(raw || "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Read one hotel-year calendar, or null if it has never been saved. */
 export async function getCalendarYear(
   ou: string,
@@ -506,7 +506,9 @@ export async function getCalendarYear(
     .prepare(
       `SELECT weekend_mask, updated_at,
               bank_holiday_enabled, bank_holiday_staff_fraction,
-              bank_holiday_premium_multiplier, bank_holiday_account
+              bank_holiday_premium_multiplier, bank_holiday_account,
+              bank_holiday_applies_to, bank_holiday_paid_when_not_worked,
+              bank_holiday_coverage_json
          FROM calendar_years WHERE ou = ? AND year = ?`
     )
     .get(ou, year) as
@@ -517,6 +519,9 @@ export async function getCalendarYear(
         bank_holiday_staff_fraction: number;
         bank_holiday_premium_multiplier: number;
         bank_holiday_account: string;
+        bank_holiday_applies_to: string;
+        bank_holiday_paid_when_not_worked: number;
+        bank_holiday_coverage_json: string;
       }
     | undefined;
 
@@ -551,6 +556,11 @@ export async function getCalendarYear(
       bankHolidayStaffFraction: head.bank_holiday_staff_fraction,
       bankHolidayPremiumMultiplier: head.bank_holiday_premium_multiplier,
       bankHolidayAccount: head.bank_holiday_account,
+      bankHolidayAppliesTo: head.bank_holiday_applies_to as BankHolidayAppliesTo,
+      bankHolidayPaidWhenNotWorked: !!head.bank_holiday_paid_when_not_worked,
+      // normalizeBankHoliday re-validates the parsed map, so junk on disk
+      // degrades to "no overrides" rather than throwing on read.
+      bankHolidayCoverageByDepartment: parseCoverageJson(head.bank_holiday_coverage_json),
     }
   );
 
@@ -572,15 +582,20 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
     INSERT INTO calendar_years
       (ou, year, weekend_mask, updated_at,
        bank_holiday_enabled, bank_holiday_staff_fraction,
-       bank_holiday_premium_multiplier, bank_holiday_account)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+       bank_holiday_premium_multiplier, bank_holiday_account,
+       bank_holiday_applies_to, bank_holiday_paid_when_not_worked,
+       bank_holiday_coverage_json)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(ou, year) DO UPDATE SET
       weekend_mask = excluded.weekend_mask,
       updated_at = CURRENT_TIMESTAMP,
       bank_holiday_enabled = excluded.bank_holiday_enabled,
       bank_holiday_staff_fraction = excluded.bank_holiday_staff_fraction,
       bank_holiday_premium_multiplier = excluded.bank_holiday_premium_multiplier,
-      bank_holiday_account = excluded.bank_holiday_account
+      bank_holiday_account = excluded.bank_holiday_account,
+      bank_holiday_applies_to = excluded.bank_holiday_applies_to,
+      bank_holiday_paid_when_not_worked = excluded.bank_holiday_paid_when_not_worked,
+      bank_holiday_coverage_json = excluded.bank_holiday_coverage_json
   `);
   const upsertMonth = db.prepare(`
     INSERT INTO calendar_months
@@ -601,7 +616,10 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
         normalized.bankHolidayEnabled ? 1 : 0,
         normalized.bankHolidayStaffFraction,
         normalized.bankHolidayPremiumMultiplier,
-        normalized.bankHolidayAccount
+        normalized.bankHolidayAccount,
+        normalized.bankHolidayAppliesTo,
+        normalized.bankHolidayPaidWhenNotWorked ? 1 : 0,
+        JSON.stringify(normalized.bankHolidayCoverageByDepartment)
       );
       for (const row of normalized.months) {
         upsertMonth.run(

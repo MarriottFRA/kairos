@@ -9,7 +9,10 @@
 
 import { CompiledPlan } from "./compile";
 import { LINE_NONE, Op, OP_NAMES, OpCode } from "./opcodes";
-import { MONTHS, PositionId, SS_MAX_BRACKETS } from "./types";
+import { COMBINE_OPS, MONTHS, PositionId, SS_MAX_BRACKETS } from "./types";
+
+/** ACC_ADD_DAYS' arg0, indexed — mirrors CALENDAR_SERIES_ARG in types.ts. */
+const ACC_ADD_DAYS_SERIES = ["payBasisDays", "realDays", "holidayDays"] as const;
 
 function fmt(value: number): string {
   if (value === Infinity) return "∞";
@@ -64,7 +67,7 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         detail = `vacationDays=${fmt(pool[pp])} weights=${fmtVector(pool, pp + 1, MONTHS)}`;
         break;
       case Op.ACCRUAL:
-        detail = `daysPerMonth=${fmt(pool[pp])}`;
+        detail = `enabled=${pool[pp] === 0 ? "no" : "yes"} (roll-forward; earning leg derived)`;
         break;
       case Op.BANK_HOLIDAY:
         detail = `combinedMult=${fmt(pool[pp])}${plan.arg0[i] & 1 ? " +increase" : ""}`;
@@ -73,7 +76,7 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         detail = `src=${describeLine(plan.arg0[i])}`;
         break;
       case Op.ACC_ADD_DAYS:
-        detail = `series=${plan.arg0[i] === 1 ? "realDays" : "payBasisDays"}`;
+        detail = `series=${ACC_ADD_DAYS_SERIES[plan.arg0[i]] ?? "payBasisDays"}`;
         break;
       case Op.PCT_OF_ACC:
         detail = `rate=${fmt(pool[pp])}`;
@@ -112,6 +115,12 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         break;
       case Op.STAT_HOURS:
         detail = `totalHours=${fmt(pool[pp])} vacationHours=${fmt(pool[pp + 1])} weights=${fmtVector(pool, pp + 2, MONTHS)}`;
+        break;
+      case Op.STAT_HOURS_PAID:
+        detail = `totalHours=${fmt(pool[pp])}`;
+        break;
+      case Op.COMBINE_ACC:
+        detail = `rate=${fmt(pool[pp])} op=${COMBINE_OPS[pool[pp + 1]] ?? pool[pp + 1]}`;
         break;
     }
 
