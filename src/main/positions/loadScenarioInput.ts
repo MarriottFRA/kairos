@@ -280,7 +280,16 @@ export async function loadScenarioInput(
   const accountsByPosition = new Map(
     values.positions
       .filter((record) => record.active)
-      .map((record) => [record.id, readPositionAccounts(record.extraValues)] as const)
+      .map(
+        (record) =>
+          [
+            record.id,
+            // Classification rides alongside the extras bag: the Headcount
+            // account is derived from it, and being an ENGINE scalar it is not
+            // in extraValues. Mirror in runLiveSim.
+            readPositionAccounts(record.extraValues, record.jobTypeCode),
+          ] as const
+      )
   );
 
   return {

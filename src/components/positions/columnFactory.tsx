@@ -36,6 +36,7 @@ import {
 } from "@mui/x-data-grid-premium";
 import {
   AccountFilter,
+  ACCOUNT_FIELD_KEYS,
   BASIC_SALARY_ANNUAL_KEY,
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
@@ -64,7 +65,9 @@ import {
   COMPUTES,
   PositionRow,
 } from "../../shared/positions/rowModel";
+import { headcountAccountForJobType } from "../../shared/positions/systemAccounts";
 import AccountAutocomplete from "../common/AccountAutocomplete";
+import { ORPHAN_GROUP } from "./gridValueBridge";
 import { headerPresentation } from "./headerMeta";
 
 export const MASK_TEXT = "••••••";
@@ -305,7 +308,7 @@ function SelectEditCell(
  */
 const SEARCHABLE_OPTION_THRESHOLD = 12;
 
-type SelectOption = { value: string | number; label: string };
+type SelectOption = { value: string | number; label: string; group?: string };
 
 const filterOptionsByLabel = createFilterOptions<SelectOption>({
   limit: 50,
@@ -319,7 +322,14 @@ const filterOptionsByLabel = createFilterOptions<SelectOption>({
  * stopCellEditMode after setEditCellValue, or the pick sets the edit value and
  * leaves the cell open, so processRowUpdate never runs. A stored value the list
  * no longer offers is injected as its own option: shortening the standard-title
- * list must never blank a column of positions that were filled in under it.
+ * list must never blank a column of positions that were filled in under it. It
+ * gets a section header of its own rather than sitting silently under whichever
+ * group happens to come first.
+ *
+ * Options carrying a `group` are shown under section headers, so a long list
+ * reads as a stack of short ones. The seed emits them group-contiguously (MUI
+ * starts a new header every time the key changes); ungrouped lists pass "",
+ * which renders no header at all.
  */
 function OptionEditCell(
   props: GridRenderEditCellParams<PositionRow> & { options: SelectOption[] }
@@ -331,9 +341,10 @@ function OptionEditCell(
   const known = options.find((option) => option.value === value) ?? null;
   const orphan =
     !known && value !== null && value !== undefined && value !== ""
-      ? { value: value as string, label: String(value) }
+      ? { value: value as string, label: String(value), group: ORPHAN_GROUP }
       : null;
   const selectable = orphan ? [orphan, ...options] : options;
+  const grouped = selectable.some((option) => option.group);
 
   useEffect(() => {
     if (hasFocus) inputRef.current?.focus();
@@ -348,6 +359,7 @@ function OptionEditCell(
       fullWidth
       filterOptions={filterOptionsByLabel}
       getOptionLabel={(option) => option.label}
+      groupBy={grouped ? (option) => option.group ?? "" : undefined}
       isOptionEqualToValue={(option, picked) => option.value === picked.value}
       renderOption={(optionProps, option) => (
         <Box component="li" {...optionProps} key={String(option.value)}>
@@ -963,15 +975,24 @@ function buildColumn(
 
   }
 
-  // HC Stats: the account the permanent position-count head always books to.
-  // A constant, not a formula — hence no computeKey and no COMPUTES entry (those
-  // return numbers; this is a code). Rendered read-only and muted like any derived
-  // cell so it reads as "the system decided this", which is the whole point: it
-  // tells the user where the A972540 rows in Results come from.
+  // The two derived account columns. Neither has a computeKey or a COMPUTES
+  // entry — those return numbers, and these are codes. Both render read-only and
+  // muted like any derived cell, so they read as "the system decided this":
+  //
+  //  • HC Stats — the account the permanent position-count head always books to.
+  //    A constant, carried on the field's defaultValue. It tells the user where
+  //    the A972540 rows in Results come from.
+  //  • Headcount — fixed by the row's Classification (v26). Blank for a grade
+  //    that books no headcount account, and an empty cell posts no line, which
+  //    is the same contract a blank pick always had.
   if (def.storage === "COMPUTED" && def.dataType === "ACCOUNT_CODE") {
     const fixed = typeof def.defaultValue === "string" ? def.defaultValue : "";
+    const derive =
+      def.key === ACCOUNT_FIELD_KEYS.headcount
+        ? (row: PositionRow) => headcountAccountForJobType(row?.jobTypeCode)
+        : () => fixed;
     column.editable = false;
-    column.valueGetter = () => fixed;
+    column.valueGetter = (_value: unknown, row: PositionRow) => derive(row);
     column.cellClassName = "pos-cell--derived";
   }
 

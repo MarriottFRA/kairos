@@ -31,3 +31,71 @@ export const POSITION_COUNT_ACCOUNT = "A972540";
  * `accountAllowed` against this filter.
  */
 export const STATS_ACCOUNT_FILTER: AccountFilter = { startsWith: ["A9"] };
+
+/**
+ * Staffing statistics: the A988… family the per-grade heads and hours book to.
+ *
+ * A narrowing of the stats range, not a second definition of it — everything
+ * here is still a statistics account by STATS_ACCOUNT_FILTER. It scopes the
+ * Working Hours picker (the one staffing account a user may still choose) and is
+ * the range the two per-grade tables below must stay inside.
+ */
+export const STAFFING_ACCOUNT_FILTER: AccountFilter = { startsWith: ["A988"] };
+
+/**
+ * The headcount statistics account each Classification books to.
+ *
+ * The per-row Headcount account used to be a free pick over every A9… account,
+ * which made it a data-entry question with one right answer: the grade decides
+ * the account, always. So it is derived instead — the grid shows it as a
+ * calculated column and nothing stores it (seed v26).
+ *
+ * A grade that is ABSENT here has no headcount account, deliberately: Associate,
+ * Casual and Buyout Labour report their heads only through the pinned
+ * POSITION_COUNT_ACCOUNT head. A blank account makes the per-row headcount line
+ * compile with the (equally blank) account its definition carries, and the
+ * output projection drops blank-account lines — so nothing is posted, which is
+ * the intent. Keys must be values of JOB_TYPE_OPTIONS (fieldSeed); a test pins
+ * the two together.
+ */
+export const HEADCOUNT_ACCOUNT_BY_JOB_TYPE: Readonly<Record<string, string>> = {
+  Manager: "A988101",
+  "Manager (Non Exempt)": "A988113",
+  Supervisor: "A988102",
+};
+
+/**
+ * The headcount account for a Classification — "" for a grade that books none
+ * (and for a blank/unknown grade, which must never invent an account).
+ */
+export function headcountAccountForJobType(jobTypeCode: unknown): string {
+  if (typeof jobTypeCode !== "string") return "";
+  return HEADCOUNT_ACCOUNT_BY_JOB_TYPE[jobTypeCode.trim()] ?? "";
+}
+
+/**
+ * The worked-hours account each Classification DEFAULTS to — managers on their
+ * own head, everyone else pooled, and nothing for Buyout Labour (whose hours are
+ * bought in, not staffed).
+ *
+ * Unlike the headcount account, this is a starting point rather than a rule: the
+ * column stays a normal editable pick (narrowed to STAFFING_ACCOUNT_FILTER), and
+ * a post that books somewhere special keeps whatever the user chose. The default
+ * is (re)applied when the Classification changes — see rowModel.sanitizeRow.
+ */
+export const WORKING_HOURS_ACCOUNT_BY_JOB_TYPE: Readonly<Record<string, string>> = {
+  Manager: "A988308",
+  "Manager (Non Exempt)": "A988308",
+  Supervisor: "A988699",
+  Associate: "A988699",
+  Casual: "A988699",
+};
+
+/**
+ * The default worked-hours account for a Classification — "" for a grade that
+ * defaults to none (Buyout Labour) and for a blank/unknown one.
+ */
+export function workingHoursAccountForJobType(jobTypeCode: unknown): string {
+  if (typeof jobTypeCode !== "string") return "";
+  return WORKING_HOURS_ACCOUNT_BY_JOB_TYPE[jobTypeCode.trim()] ?? "";
+}

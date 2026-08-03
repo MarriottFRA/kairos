@@ -7,6 +7,11 @@
  *
  * A 0%-rate first band is the tax-free allowance; leave the top band's "Up to"
  * blank for "and above".
+ *
+ * The Add-block dialog's "Ready-made" tab can hand a country preset in. That
+ * only seeds the form — nothing is written until the user reads the rates and
+ * saves — which is the whole reason statutory presets do not insert on click
+ * the way the block presets do.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -37,6 +42,10 @@ import {
   validateSsSchemeInput,
 } from "../../shared/socialSecurity/ipc";
 import {
+  SS_PRESET_DISCLAIMER,
+  SsCountryPreset,
+} from "../../shared/socialSecurity/presets";
+import {
   SocialSecurityScheme,
   SsAccumulationMode,
   SS_MAX_BRACKETS,
@@ -65,6 +74,9 @@ export interface SsSchemeDialogProps {
   /** All blocks for the OU — the non-SS ones are the base-membership candidates. */
   blocks: BlockDto[];
   accounts: AccountOption[];
+  /** Create mode only — a country preset to seed the bands, caps and account
+   *  from. Ignored when editing an existing scheme. */
+  preset?: SsCountryPreset;
   saving?: boolean;
   onClose: () => void;
   onSave: (save: SsSchemeDialogSave) => void;
@@ -92,6 +104,7 @@ export default function SsSchemeDialog({
   schemes,
   blocks,
   accounts,
+  preset,
   saving,
   onClose,
   onSave,
@@ -125,15 +138,27 @@ export default function SsSchemeDialog({
   const [taxYearStartMonth, setTaxYearStartMonth] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
+  // A preset only applies on create — an attached scheme always wins, so
+  // reopening the cog on a configured block never re-seeds from a catalogue.
+  const seed = attached ? undefined : preset;
+
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setAccountCode(niBlock?.accountCode ?? "");
-    setIncludeBaseSalary(attached?.includeBaseSalary ?? true);
-    setIncludeVacation(attached?.includeVacation ?? true);
+    setAccountCode(niBlock?.accountCode ?? seed?.defaultAccountCode ?? "");
+    setIncludeBaseSalary(
+      attached?.includeBaseSalary ?? seed?.scheme.includeBaseSalary ?? true
+    );
+    setIncludeVacation(
+      attached?.includeVacation ?? seed?.scheme.includeVacation ?? true
+    );
     setBaseComponentIds(attached?.baseComponentIds ? [...attached.baseComponentIds] : []);
-    setAccumulationMode(attached?.accumulationMode ?? "CUMULATIVE");
-    setTaxYearStartMonth(attached?.taxYearStartMonth ?? 1);
+    setAccumulationMode(
+      attached?.accumulationMode ?? seed?.scheme.accumulationMode ?? "CUMULATIVE"
+    );
+    setTaxYearStartMonth(
+      attached?.taxYearStartMonth ?? seed?.scheme.taxYearStartMonth ?? 1
+    );
     if (attached) {
       setLabel(attached.label);
       setBands(
@@ -144,13 +169,25 @@ export default function SsSchemeDialog({
       );
       setMonthlyCap(attached.monthlyCap === null ? "" : String(attached.monthlyCap));
       setYearlyCap(attached.yearlyCap === null ? "" : String(attached.yearlyCap));
+    } else if (seed) {
+      setLabel(seed.scheme.label);
+      // The catalogue stores rates as fractions; this dialog is the only place
+      // that speaks percent, in both directions.
+      setBands(
+        seed.scheme.brackets.map((bracket) => ({
+          upTo: bracket.upTo === null ? "" : String(bracket.upTo),
+          rate: String(bracket.rate * 100),
+        }))
+      );
+      setMonthlyCap(seed.scheme.monthlyCap === null ? "" : String(seed.scheme.monthlyCap));
+      setYearlyCap(seed.scheme.yearlyCap === null ? "" : String(seed.scheme.yearlyCap));
     } else {
       setLabel(niBlock?.label && niBlock.label !== "National Insurance" ? niBlock.label : "National Insurance");
       setBands([{ upTo: "", rate: "0" }]);
       setMonthlyCap("");
       setYearlyCap("");
     }
-  }, [open, attached, niBlock]);
+  }, [open, attached, niBlock, seed]);
 
   const toggleBaseComponent = (costDefId: string, checked: boolean) =>
     setBaseComponentIds((ids) =>
@@ -208,6 +245,13 @@ export default function SsSchemeDialog({
       </DialogTitle>
       <DialogContent>
         <Stack spacing={2.5} sx={{ mt: 1 }}>
+          {seed && (
+            <Alert severity="warning">
+              <strong>{seed.flag} {seed.country}</strong> — {SS_PRESET_DISCLAIMER}
+              {" "}
+              {seed.blurb}
+            </Alert>
+          )}
           <Typography variant="body2" color="text.secondary">
             Contributions are worked out as progressive rate bands over the
             contributory base. A 0% first band is a tax-free allowance; leave the

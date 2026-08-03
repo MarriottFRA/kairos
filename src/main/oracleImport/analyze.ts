@@ -234,10 +234,15 @@ export function deriveAnnualSalary(salary: number, weeklyHours: number): number 
 // Context and plan
 // ---------------------------------------------------------------------------
 
-/** The five posting accounts a new row inherits from its department. */
+/**
+ * The posting accounts a new row inherits from its department.
+ *
+ * Four, not five: the headcount account left this template in seed v26, when it
+ * became a calculated column fixed by Classification. Copying a department's
+ * modal answer for it would be both pointless and impossible to store.
+ */
 export interface DepartmentAccountTemplate {
   salaryAccountCode: string;
-  headCountAccount: string;
   workingHoursAccount: string;
   accrualAccount: string;
   benefitsAccountCode: string;
@@ -245,7 +250,6 @@ export interface DepartmentAccountTemplate {
 
 export const ACCOUNT_TEMPLATE_KEYS: Array<keyof DepartmentAccountTemplate> = [
   "salaryAccountCode",
-  "headCountAccount",
   "workingHoursAccount",
   "accrualAccount",
   "benefitsAccountCode",
@@ -253,7 +257,6 @@ export const ACCOUNT_TEMPLATE_KEYS: Array<keyof DepartmentAccountTemplate> = [
 
 export const EMPTY_ACCOUNT_TEMPLATE: DepartmentAccountTemplate = {
   salaryAccountCode: "",
-  headCountAccount: "",
   workingHoursAccount: "",
   accrualAccount: "",
   benefitsAccountCode: "",
@@ -863,7 +866,6 @@ export function analyzeOracleReport(
       vacationDays: derived.vacationDays,
       vacationMonthlyWeights: Array<number>(MONTHS).fill(1 / MONTHS),
       salaryAccountCode: template.salaryAccountCode,
-      headCountAccount: template.headCountAccount,
       workingHoursAccount: template.workingHoursAccount,
       accrualAccount: template.accrualAccount,
       benefitsAccountCode: template.benefitsAccountCode,

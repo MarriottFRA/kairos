@@ -87,7 +87,14 @@ export interface AccountFilter {
  *  code. `filter` narrows which accounts it offers (see AccountFilter); omit it
  *  to offer every account. */
 export type DropdownSource =
-  | { kind: "static"; options: Array<{ value: string | number; label: string }> }
+  // `group` is optional and only read by the type-ahead editors: a long static
+  // list (Standard Title) renders section headers from it, a short one ignores
+  // it. Options carrying a group must be emitted group-contiguously — see the
+  // note on STANDARD_JOB_TITLE_GROUPS.
+  | {
+      kind: "static";
+      options: Array<{ value: string | number; label: string; group?: string }>;
+    }
   | { kind: "months" }
   | { kind: "accounts"; filter?: AccountFilter | null }
   | { kind: "departments"; codeField?: string }

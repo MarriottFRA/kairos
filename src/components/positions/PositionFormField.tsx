@@ -43,6 +43,7 @@ import {
   displayValue,
   editValue,
   optionsOf,
+  ORPHAN_GROUP,
   rawEditText,
 } from "./gridValueBridge";
 
@@ -230,15 +231,27 @@ export default function PositionFormField({
   // ── Closed lists ────────────────────────────────────────────────────
   if (options) {
     if (options.length > SEARCHABLE_OPTION_THRESHOLD) {
-      const current = options.find((option) => option.value === value) ?? null;
+      const known = options.find((option) => option.value === value) ?? null;
+      // Same orphan contract as the grid's edit cell and the department picker
+      // above: a stored value the list no longer offers (a title retired in a
+      // later seed) is injected as its own option. Without it the box renders
+      // empty over a row that plainly shows the value, and opening the field
+      // would quietly clear it.
+      const orphan =
+        !known && value !== null && value !== undefined && value !== ""
+          ? { value, label: String(value), group: ORPHAN_GROUP }
+          : null;
+      const selectable = orphan ? [orphan, ...options] : options;
+      const grouped = selectable.some((option) => option.group);
       return (
         <FieldRow {...rowProps}>
           <Autocomplete
-            options={options}
-            value={current}
+            options={selectable}
+            value={known ?? orphan}
             openOnFocus
             autoHighlight
             getOptionLabel={(option) => option.label}
+            groupBy={grouped ? (option) => option.group ?? "" : undefined}
             isOptionEqualToValue={(option, picked) => option.value === picked.value}
             onChange={(_event, picked) => commit(picked?.value ?? null)}
             slotProps={{ paper: { sx: { minWidth: 300 } } }}

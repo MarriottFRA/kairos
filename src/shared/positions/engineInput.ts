@@ -29,7 +29,10 @@ import {
 } from "../engine/types";
 import { FullTimeReference } from "../positionDefaults";
 import { ACCOUNT_FIELD_KEYS } from "./fields";
-import { POSITION_COUNT_ACCOUNT } from "./systemAccounts";
+import {
+  POSITION_COUNT_ACCOUNT,
+  headcountAccountForJobType,
+} from "./systemAccounts";
 
 /**
  * The bank-holiday premium is configured on the calendar (per hotel-year).
@@ -419,8 +422,9 @@ export function resolveBlockValues(
 export interface PositionAccounts {
   /** Base salary, net of vacation taken. */
   salary?: string;
-  /** The per-row headcount stat (distinct from the pinned position-count head,
-   *  which always posts to POSITION_COUNT_ACCOUNT whatever this says). */
+  /** The per-row headcount stat, derived from the row's Classification
+   *  (distinct from the pinned position-count head, which always posts to
+   *  POSITION_COUNT_ACCOUNT whatever this says). */
   headcount?: string;
   /** Hours worked stat. */
   hours?: string;
@@ -442,13 +446,21 @@ function accountValue(source: Record<string, unknown>, key: string): string {
  * One reader for both engine-input assemblies: that is what stops the persisted
  * run and the grid's live sim from reading different fields (liveSimParity pins
  * them, but only behaviour they actually share can be pinned).
+ *
+ * Four of the five come out of the bag. The headcount account does NOT: it is a
+ * calculated column since seed v26, fixed by the row's Classification, so it is
+ * derived here and the stored key is ignored outright — which is what makes any
+ * value written before v26 inert rather than lingering as a stale override.
  */
 export function readPositionAccounts(
-  source: Record<string, unknown>
+  source: Record<string, unknown>,
+  /** The row's Classification — passed separately because it is an ENGINE
+   *  scalar, so the main path's `extraValues` bag does not carry it. */
+  jobTypeCode: string
 ): PositionAccounts {
   return {
     salary: accountValue(source, ACCOUNT_FIELD_KEYS.salary),
-    headcount: accountValue(source, ACCOUNT_FIELD_KEYS.headcount),
+    headcount: headcountAccountForJobType(jobTypeCode),
     hours: accountValue(source, ACCOUNT_FIELD_KEYS.hours),
     accrual: accountValue(source, ACCOUNT_FIELD_KEYS.accrual),
     benefits: accountValue(source, ACCOUNT_FIELD_KEYS.benefits),

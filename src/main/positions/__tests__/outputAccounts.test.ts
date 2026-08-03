@@ -18,7 +18,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
 import { compile, simulate } from "../../../shared/engine/simulate";
-import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts";
+import {
+  headcountAccountForJobType,
+  HEADCOUNT_ACCOUNT_BY_JOB_TYPE,
+  POSITION_COUNT_ACCOUNT,
+} from "../../../shared/positions/systemAccounts";
 import { applyStructureColumns } from "../../blocks/schema";
 import { ensureSystemDefs } from "../../blocks/repo";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
@@ -49,13 +53,18 @@ const CALENDAR = buildDefaultCalendar(SCOPE.ou, YEAR, DEFAULT_WEEKEND_MASK);
 /** A level carried the way the BST reads one: loaded in January, unchanged after. */
 const janOnly = (value: number) => [value, ...new Array(11).fill(0)];
 
+/** The four accounts a position stores. The headcount account is not one of
+ *  them since seed v26 — it is derived from the Classification below. */
 const ACCOUNTS = {
   salaryAccountCode: "A511000",
-  headCountAccount: "A972100",
   workingHoursAccount: "A972200",
   accrualAccount: "A512000",
   benefitsAccountCode: "A513000",
 };
+
+/** The grade every position here carries, and the headcount account it fixes. */
+const JOB_TYPE = "Manager";
+const HEADCOUNT_ACCOUNT = headcountAccountForJobType(JOB_TYPE);
 
 let structureDb: Db;
 let valuesDb: Db;
@@ -86,7 +95,7 @@ function writePosition(fields: Record<string, unknown>): void {
           id: "pos-1",
           fields: {
             departmentCode: "0410",
-            jobTypeCode: "MGR",
+            jobTypeCode: JOB_TYPE,
             payType: "SALARIED",
             headcount: 2,
             monthlyBaseSalary: 3000,
@@ -148,7 +157,7 @@ describe("Recalculate → Results rows", () => {
         ACCOUNTS.salaryAccountCode,
         ACCOUNTS.accrualAccount,
         ACCOUNTS.benefitsAccountCode,
-        ACCOUNTS.headCountAccount,
+        HEADCOUNT_ACCOUNT,
         ACCOUNTS.workingHoursAccount,
         POSITION_COUNT_ACCOUNT,
       ].sort()
@@ -159,7 +168,9 @@ describe("Recalculate → Results rows", () => {
   });
 
   it("reproduces the reported bug's shape when no account is picked", async () => {
-    writePosition({});
+    // Associate books no headcount account either, so this row picks nothing at
+    // all — the one case where a single output row is the right answer.
+    writePosition({ jobTypeCode: "Associate" });
     const { outputs, projection } = await recalculate();
 
     // One row, the pinned head — exactly what the user saw. Correct behaviour
@@ -187,7 +198,7 @@ describe("Recalculate → Results rows", () => {
     // startsWith("9") test classified as a COST, so the Statistics tab was empty.
     expect(stats.sort()).toEqual(
       [
-        ACCOUNTS.headCountAccount,
+        HEADCOUNT_ACCOUNT,
         ACCOUNTS.workingHoursAccount,
         POSITION_COUNT_ACCOUNT,
       ].sort()
@@ -212,7 +223,7 @@ describe("Recalculate → Results rows", () => {
     // a LEVEL, so it is loaded once in January: the BST reads such a statistic
     // as the running sum of its months, and repeating 2 twelve times would
     // report 24 heads by December.
-    expect(row(ACCOUNTS.headCountAccount).months).toEqual(janOnly(2));
+    expect(row(HEADCOUNT_ACCOUNT).months).toEqual(janOnly(2));
     expect(row(POSITION_COUNT_ACCOUNT).months).toEqual(janOnly(2));
     // Hours are NOT a level — they genuinely accrue month by month.
     expect(row(ACCOUNTS.workingHoursAccount).months.filter((m) => m > 0).length).toBe(12);
@@ -284,8 +295,8 @@ describe("Recalculate → Results rows", () => {
     expect(salary.total).toBeLessThan(2 * 3000 * 12);
   });
 
-  it("does not double-count heads if the Headcount account is the pinned one", async () => {
-    writePosition({ ...ACCOUNTS, headCountAccount: POSITION_COUNT_ACCOUNT });
+  it("does not double-count heads on the pinned account", async () => {
+    writePosition(ACCOUNTS);
     const { outputs } = await recalculate();
 
     const pinned = outputs.rows.filter(
@@ -293,8 +304,15 @@ describe("Recalculate → Results rows", () => {
     );
     expect(pinned).toHaveLength(1);
     // Count 2 — NOT 4. readOutputs sums lines sharing a dept|account key, so
-    // letting both heads post here would silently double the reported heads.
+    // both heads posting to one account would silently double the reported heads.
     expect(pinned[0].months).toEqual(janOnly(2));
+
+    // applyPositionAccounts drops a per-row headcount account that collides with
+    // the pinned head (pinned in positionAccounts.test.ts). This is the upstream
+    // half of that guard: no grade may create the collision in the first place.
+    for (const account of Object.values(HEADCOUNT_ACCOUNT_BY_JOB_TYPE)) {
+      expect(account).not.toBe(POSITION_COUNT_ACCOUNT);
+    }
   });
 
   it("recalculates a hotel that never opened the Blocks page", async () => {

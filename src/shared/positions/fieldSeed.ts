@@ -12,6 +12,7 @@
 
 import { MONTH_LABELS } from "../calendar";
 import {
+  ACCOUNT_FIELD_KEYS,
   ANNUAL_DIVISOR_KEY,
   BASIC_SALARY_ANNUAL_KEY,
   FieldCatalog,
@@ -23,7 +24,7 @@ import {
   VectorName,
   vectorKey,
 } from "./fields";
-import { POSITION_COUNT_ACCOUNT, STATS_ACCOUNT_FILTER } from "./systemAccounts";
+import { POSITION_COUNT_ACCOUNT, STAFFING_ACCOUNT_FILTER } from "./systemAccounts";
 
 // v2: dropped the redundant "CONTRACT - " label prefixes — the column group
 // header already names the section, so the prefix only ate the width that
@@ -201,17 +202,80 @@ import { POSITION_COUNT_ACCOUNT, STATS_ACCOUNT_FILTER } from "./systemAccounts";
 //     not express an even year at all (1/12 = 8.3333…% ≠ 8.33%), and the 100%
 //     cue actively pushed users into unequal months, which the holiday accrual
 //     then reported as permanent monthly noise.
-export const SEED_VERSION = 25;
+// v26: the Headcount account stopped being a pick and became a CALCULATED
+//     column, derived from Classification (see HEADCOUNT_ACCOUNT_BY_JOB_TYPE):
+//     Manager → A988101, Manager (Non Exempt) → A988113, Supervisor → A988102,
+//     and nothing at all for Associate / Casual / Buyout Labour. The grade
+//     decides the account with no judgement left over, so offering the whole A9…
+//     range only invited two hotels to answer the same question differently.
+//     Same shape as Manhours Paid (v9) and FTE (v24): storage POSITION_EXTRA →
+//     COMPUTED, so the column is read-only, the dropdown is gone and NOTHING is
+//     stored — both engine paths derive it in readPositionAccounts, which reads
+//     the Classification and never the stored key, so values written before v26
+//     are inert wherever they still sit in extra_values. A grade with no account
+//     posts no per-row headcount line (the pinned HC Stats head still books the
+//     heads), which is exactly what a blank account has always meant.
+// v27: the Working Hours account gets the same treatment one step softer. Its
+//     picker narrows from the whole stats range (A9…) to the staffing family
+//     (A988…, STAFFING_ACCOUNT_FILTER), and the Classification now DEFAULTS it:
+//     both manager grades → A988308, Supervisor / Associate / Casual → A988699,
+//     Buyout Labour → none. Deliberately a default and not a derivation, unlike
+//     the Headcount account: the field stays POSITION_EXTRA and editable, so a
+//     post that books somewhere special keeps the account the user picked. The
+//     default is (re)applied by sanitizeRow when the grade changes, and only
+//     when the same edit did not also set the account by hand — so a pasted row
+//     carrying both keeps its own. The bump is what re-applies the narrowed
+//     dropdown_source (stored per OU, refreshed only when seed_version climbs);
+//     stored accounts outside A988 survive untouched and still post — the filter
+//     scopes the PICKER, never the engine.
+// v28: the two A5… cost accounts a new row nearly always books to now arrive
+//     filled in — Salary → A520001, Vacation Benefits → A560303. Both stay
+//     ordinary editable picks over the same A5 range; the only change is what an
+//     untouched new row starts at. A blank account posts NO line, so a row added
+//     and left alone used to drop its salary and vacation cost out of Results
+//     silently, and the most common right answer is one code in each case. This
+//     is a plain catalog `defaultValue`, applied by newDraftRow, so it touches
+//     NEW rows only: rows already stored keep whatever they hold, blank included.
+//     The Accrual account beside Benefits is deliberately left blank — there it
+//     is the on/off switch for booking the holiday accrual at all (see v12), so
+//     a default there would start generating a liability nobody asked for.
+// v29: the Standard Title list is curated and the picker grouped. It had grown
+//     to 98 entries encoding three axes at once — role, seniority tier and
+//     outlet — when the row already carries the other two: Classification is the
+//     grade and Department is the outlet, so "Assistant Restaurant Manager",
+//     "Restaurant Manager" and "Banquet Manager" were three ways to file one
+//     post. It is now ~75 entries at one-per-role, by the four rules in the
+//     docblock over STANDARD_JOB_TITLE_GROUPS, plus the roles a group-wide list
+//     was missing (Cost Controller, Duty Manager, Night Manager, IT Technician,
+//     Sales Coordinator, Spa Receptionist, Trainee / Apprentice, Intern). Each
+//     option now also carries a `group`, which the type-ahead editors render as
+//     section headers — the length that matters is the group's, not the list's.
+//     Removing titles is safe by construction: a stored value the list no longer
+//     offers is re-injected as its own option, so no column is blanked and no
+//     migration is needed, and nothing derives from this field anyway (the only
+//     reader is the Results display-name fallback, which takes the string as
+//     it stands). The bump is what re-applies dropdown_source per OU.
+export const SEED_VERSION = 29;
 
-/** base_account prefixes each account field books to — a first, broad pass the
- *  user will narrow later. The stats side is the shared STATS_ACCOUNT_FILTER, so
- *  the accounts these pickers offer and the accounts Results counts as
- *  statistics are by construction the same set. The A5 cost prefixes are a
- *  picker-scoped narrowing only — a cost is any non-stats account. */
-const HEADCOUNT_ACCOUNT_FILTER = STATS_ACCOUNT_FILTER;
-const HOURS_ACCOUNT_FILTER = STATS_ACCOUNT_FILTER;
+/** base_account prefixes each account field books to. The A5 cost prefixes are a
+ *  picker-scoped narrowing only — a cost is any non-stats account (the split
+ *  itself is STATS_ACCOUNT_FILTER, which is what Results toggles on).
+ *  The Headcount account has no filter since v26: it is derived from
+ *  Classification, not picked. Working Hours narrowed to the staffing family in
+ *  v27 — still stats accounts, just the part of the range staffing books to. */
+const HOURS_ACCOUNT_FILTER = STAFFING_ACCOUNT_FILTER;
 const SALARY_ACCOUNT_FILTER = { startsWith: ["A5"] };
 const VACATION_ACCOUNT_FILTER = { startsWith: ["A5"] };
+
+/** What a NEW row's two A5 accounts start at (v28). Starting points, not rules:
+ *  no classification or department narrows them the way the staffing accounts
+ *  are narrowed, so there is nothing to derive — but "the usual one, change it if
+ *  yours differs" beats a blank that quietly posts nothing. Exported so the seed
+ *  and the tests that pin it agree on the code rather than both spelling it out.
+ *  Both sit inside the A5 range their own picker offers, so a defaulted account
+ *  is always one the user could have chosen by hand. */
+export const DEFAULT_SALARY_ACCOUNT = "A520001";
+export const DEFAULT_BENEFITS_ACCOUNT = "A560303";
 
 export const SECTIONS: SectionDef[] = [
   // The row gutter: select / active / row actions. Unlabelled on purpose —
@@ -252,120 +316,183 @@ export const JOB_TYPE_OPTIONS = [
  * worked around. This list is what that post rolls up AS, so it is deliberately
  * short and generic — one entry per recognisable role, not per hotel's wording.
  *
+ * What keeps it short is that the row already carries the other axes, so a
+ * title must not restate them (v29):
+ *  1. No entry differing from another only by a seniority prefix (Assistant /
+ *     Deputy / Junior) — Classification is the grade, and the local title keeps
+ *     the exact wording. "Assistant Restaurant Manager" is Outlet Manager +
+ *     Manager, and the contract wording survives in `title`.
+ *  2. No entry differing only by outlet — Department carries that. A banquet
+ *     waiter and a restaurant waiter are one title in two departments.
+ *  3. No entry finer than what a group would actually count across hotels: the
+ *     trades roll up as Technician, the finance clerks as Accounts Clerk.
+ *  4. "Director of X" only where an "X Manager" genuinely coexists with it in
+ *     one hotel (Rooms, F&B, Sales, Engineering, Finance). Where they are two
+ *     brandings of the same post (HR, Security), there is one entry.
+ *
+ * Retired in v29, and where each now belongs. Shortening the list never blanks
+ * a filled column — a stored value the list no longer offers is re-injected as
+ * its own option (see OptionEditCell) — so these live on as typed-in history
+ * rather than needing a remap:
+ *   Assistant Director of Finance / Assistant Front Office Manager /
+ *   Assistant Executive Housekeeper / Assistant Restaurant Manager /
+ *   Assistant Chief Engineer .................. parent title + Classification
+ *   Executive Sous Chef, Demi Chef de Partie .. Sous Chef / Chef de Partie
+ *   Director of Operations .................... Hotel Manager
+ *   Financial Analyst ......................... Accountant
+ *   Accounts Payable Clerk, Accounts Receivable
+ *     Clerk, General Cashier .................. Accounts Clerk
+ *   Paymaster ................................. Payroll Officer
+ *   Receiving Clerk ........................... Storekeeper
+ *   Director of Human Resources ............... Human Resources Manager
+ *   Director of Security ...................... Security Manager
+ *   Guest Relations Manager ................... Front Office Manager
+ *   Doorperson ................................ Bell Attendant
+ *   Linen Attendant, Tailor ................... Laundry Attendant
+ *   Restaurant / Bar / Banquet Manager ........ Outlet Manager
+ *   Restaurant / Banquet Supervisor ........... Outlet Supervisor
+ *   Banquet Server, Room Service Attendant .... Waiter / Waitress
+ *   Butcher, Baker ............................ Chef de Partie / Pastry Chef
+ *   Electrician, Plumber, Painter, Carpenter .. Technician
+ *   Director of Sales ......................... Director of Sales & Marketing
+ *   Director of Revenue Management ............ Revenue Manager
+ *
  * Static for now, like Classification. When titles need to differ per group or
  * be edited without a release they become a reference table (the departments /
  * accounts pattern) and this constant is the seed for it — the field key and its
  * stored values are unaffected by that move, since the column stores the title
  * string itself.
  */
-const STANDARD_JOB_TITLE_OPTIONS = [
-  // Executive / admin
-  "General Manager",
-  "Hotel Manager",
-  "Executive Assistant",
-  "Director of Operations",
-  "Director of Finance",
-  "Assistant Director of Finance",
-  "Financial Analyst",
-  "Accountant",
-  "Accounts Payable Clerk",
-  "Accounts Receivable Clerk",
-  "Income Auditor",
-  "Paymaster",
-  "General Cashier",
-  "Purchasing Manager",
-  "Receiving Clerk",
-  "Storekeeper",
-  "IT Manager",
-  "Director of Human Resources",
-  "Human Resources Manager",
-  "Human Resources Coordinator",
-  "Training Manager",
-  // Rooms — front office
-  "Director of Rooms",
-  "Front Office Manager",
-  "Assistant Front Office Manager",
-  "Front Desk Supervisor",
-  "Front Desk Agent",
-  "Guest Relations Manager",
-  "Guest Relations Agent",
-  "Concierge",
-  "Night Auditor",
-  "Reservations Manager",
-  "Reservations Agent",
-  "Bell Attendant",
-  "Doorperson",
-  "Driver",
-  // Rooms — housekeeping
-  "Executive Housekeeper",
-  "Assistant Executive Housekeeper",
-  "Housekeeping Supervisor",
-  "Room Attendant",
-  "Public Area Attendant",
-  "Houseperson",
-  "Laundry Attendant",
-  "Linen Attendant",
-  "Tailor",
-  // Food & beverage
-  "Director of Food & Beverage",
-  "Food & Beverage Manager",
-  "Restaurant Manager",
-  "Assistant Restaurant Manager",
-  "Restaurant Supervisor",
-  "Host / Hostess",
-  "Waiter / Waitress",
-  "Busser",
-  "Bar Manager",
-  "Bartender",
-  "Banquet Manager",
-  "Banquet Supervisor",
-  "Banquet Server",
-  "Room Service Attendant",
-  // Kitchen
-  "Executive Chef",
-  "Executive Sous Chef",
-  "Sous Chef",
-  "Chef de Partie",
-  "Demi Chef de Partie",
-  "Commis Chef",
-  "Pastry Chef",
-  "Butcher",
-  "Baker",
-  "Kitchen Steward",
-  "Chief Steward",
-  // Sales, marketing & events
-  "Director of Sales & Marketing",
-  "Director of Sales",
-  "Sales Manager",
-  "Sales Executive",
-  "Director of Revenue Management",
-  "Revenue Manager",
-  "Marketing Manager",
-  "Events Manager",
-  "Events Executive",
-  // Engineering & security
-  "Director of Engineering",
-  "Chief Engineer",
-  "Assistant Chief Engineer",
-  "Engineering Supervisor",
-  "Technician",
-  "Electrician",
-  "Plumber",
-  "Painter",
-  "Carpenter",
-  "Gardener",
-  "Director of Security",
-  "Security Manager",
-  "Security Supervisor",
-  "Security Officer",
-  // Spa, recreation & wellness
-  "Spa Manager",
-  "Spa Therapist",
-  "Spa Attendant",
-  "Fitness Instructor",
-  "Lifeguard",
-  "Recreation Attendant",
-].map((value) => ({ value, label: value }));
+const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
+  {
+    group: "Executive",
+    titles: ["General Manager", "Hotel Manager", "Duty Manager", "Executive Assistant"],
+  },
+  {
+    group: "Finance & Purchasing",
+    titles: [
+      "Director of Finance",
+      "Cost Controller",
+      "Accountant",
+      "Accounts Clerk",
+      "Income Auditor",
+      "Payroll Officer",
+      "Purchasing Manager",
+      "Storekeeper",
+    ],
+  },
+  {
+    group: "Human Resources",
+    titles: [
+      "Human Resources Manager",
+      "Human Resources Coordinator",
+      "Training Manager",
+    ],
+  },
+  { group: "IT", titles: ["IT Manager", "IT Technician"] },
+  {
+    group: "Front Office",
+    titles: [
+      "Director of Rooms",
+      "Front Office Manager",
+      "Night Manager",
+      "Front Desk Supervisor",
+      "Front Desk Agent",
+      "Guest Relations Agent",
+      "Concierge",
+      "Night Auditor",
+      "Reservations Manager",
+      "Reservations Agent",
+      "Bell Attendant",
+      "Driver",
+    ],
+  },
+  {
+    group: "Housekeeping",
+    titles: [
+      "Executive Housekeeper",
+      "Housekeeping Supervisor",
+      "Room Attendant",
+      "Public Area Attendant",
+      "Houseperson",
+      "Laundry Attendant",
+    ],
+  },
+  {
+    group: "Food & Beverage",
+    titles: [
+      "Director of Food & Beverage",
+      "Food & Beverage Manager",
+      "Outlet Manager",
+      "Outlet Supervisor",
+      "Host / Hostess",
+      "Waiter / Waitress",
+      "Busser",
+      "Bartender",
+    ],
+  },
+  {
+    group: "Kitchen",
+    titles: [
+      "Executive Chef",
+      "Sous Chef",
+      "Chef de Partie",
+      "Commis Chef",
+      "Pastry Chef",
+      "Chief Steward",
+      "Kitchen Steward",
+    ],
+  },
+  {
+    group: "Sales, Marketing & Events",
+    titles: [
+      "Director of Sales & Marketing",
+      "Sales Manager",
+      "Sales Executive",
+      "Sales Coordinator",
+      "Revenue Manager",
+      "Marketing Manager",
+      "Events Manager",
+      "Events Executive",
+    ],
+  },
+  {
+    group: "Engineering",
+    titles: [
+      "Director of Engineering",
+      "Chief Engineer",
+      "Engineering Supervisor",
+      "Technician",
+      "Gardener",
+    ],
+  },
+  {
+    group: "Security",
+    titles: ["Security Manager", "Security Supervisor", "Security Officer"],
+  },
+  {
+    group: "Spa & Recreation",
+    titles: [
+      "Spa Manager",
+      "Spa Therapist",
+      "Spa Receptionist",
+      "Spa Attendant",
+      "Fitness Instructor",
+      "Lifeguard",
+      "Recreation Attendant",
+    ],
+  },
+  // Not a department: these are budgeted anywhere and have no role of their own.
+  { group: "General", titles: ["Trainee / Apprentice", "Intern"] },
+];
+
+/** Flattened for the picker. The order matters: the editor renders a section
+ *  header every time `group` changes, so a title emitted away from its own
+ *  group would print that header twice. Group-contiguous by construction here,
+ *  and pinned by standardTitleList.test.ts. */
+const STANDARD_JOB_TITLE_OPTIONS = STANDARD_JOB_TITLE_GROUPS.flatMap(
+  ({ group, titles }) => titles.map((value) => ({ value, label: value, group }))
+);
 
 const PAY_TYPE_OPTIONS = [
   { value: "SALARIED", label: "Salaried (30/360)" },
@@ -558,11 +685,13 @@ const SEED: FieldDef[] = [
   }),
   // The account the headcount books to — sits right beside Count so the number
   // and the account it posts under read as one pair (moved out of Basic Salary
-  // in v13). POSITION_EXTRA, so relocating it only changes its band + order.
-  sys("employee", "ACCOUNT_CODE", "POSITION_EXTRA", {
-    key: "headCountAccount",
+  // in v13). Calculated from Classification since v26, not picked: the grade
+  // fixes the account (HEADCOUNT_ACCOUNT_BY_JOB_TYPE), and the grades that book
+  // none leave the cell empty, which posts no per-row headcount line.
+  sys("employee", "ACCOUNT_CODE", "COMPUTED", {
+    key: ACCOUNT_FIELD_KEYS.headcount,
     defaultLabel: "Headcount",
-    dropdownSource: { kind: "accounts", filter: HEADCOUNT_ACCOUNT_FILTER },
+    locked: true,
   }),
   // The universal position-count head (VBA §21), surfaced as the account it
   // books to. Read-only and pinned: whatever the per-row Headcount account above
@@ -759,6 +888,7 @@ const SEED: FieldDef[] = [
     key: "salaryAccountCode",
     defaultLabel: "Salary",
     dropdownSource: { kind: "accounts", filter: SALARY_ACCOUNT_FILTER },
+    defaultValue: DEFAULT_SALARY_ACCOUNT,
   }),
   sys("basicSalary", "NUMBER", "COMPUTED", {
     key: "budgetYearBasicSalary",
@@ -785,6 +915,9 @@ const SEED: FieldDef[] = [
     locked: true,
     computeKey: "accrualDaysPerMonth",
   }),
+  // No defaultValue, unlike the two accounts around it (v28): blank here means
+  // "do not book the accrual at all", so filling it in would start every new row
+  // generating a liability nobody asked for.
   sys("vacation", "ACCOUNT_CODE", "POSITION_EXTRA", {
     key: "accrualAccount",
     defaultLabel: "Accrual",
@@ -820,6 +953,7 @@ const SEED: FieldDef[] = [
     key: "benefitsAccountCode",
     defaultLabel: "Benefits",
     dropdownSource: { kind: "accounts", filter: VACATION_ACCOUNT_FILTER },
+    defaultValue: DEFAULT_BENEFITS_ACCOUNT,
   }),
   sys("vacation", "NUMBER", "COMPUTED", {
     key: "vacationEstimate",

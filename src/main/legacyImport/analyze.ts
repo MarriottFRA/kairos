@@ -85,7 +85,7 @@ const COL = {
   manualYearlyIncrease: "AT",
   increaseMonth: "AU",
   workingHoursAccount: "AV",
-  headCountAccount: "AW",
+  // AW (headcount account) is not read — Kairos derives it from Classification.
   salaryAccount: "AY",
   /** Budget Year Basic Salary — the salary series every percentage band cites. */
   budgetYearSalary: "AZ",
@@ -1119,7 +1119,10 @@ function planPositions(
       // Posting accounts are instructions, not arithmetic, so they come across
       // by value even where the workbook derived them from the pay class.
       workingHoursAccount: toAccountCode(row.cells[COL.workingHoursAccount]),
-      headCountAccount: toAccountCode(row.cells[COL.headCountAccount]),
+      // The headcount account (column AW) is deliberately NOT imported: Kairos
+      // derives it from the Classification carried above (seed v26), and writing
+      // it would throw, the field being COMPUTED. The workbook derived it from
+      // the pay class too, so the imported rows land on the same accounts.
       salaryAccountCode: toAccountCode(row.cells[COL.salaryAccount]),
       accrualAccount: toAccountCode(row.cells[COL.accrualAccount]),
       benefitsAccountCode: toAccountCode(row.cells[COL.benefitsAccount]),

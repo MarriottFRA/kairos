@@ -172,7 +172,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       // Managers draw one-and-a-half shares of the pot. Nothing is stored per
       // row for it, so the weight only lands if BOTH sides read it off the
       // block config — which is exactly what this test is for.
-      poolJobTypeWeights: { MGR: 1.5 },
+      poolJobTypeWeights: { Manager: 1.5 },
     },
     NOW
   );
@@ -204,7 +204,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         {
           id: "pos-1",
           fields: {
-            departmentCode: "0410", jobTypeCode: "MGR", cluster: "Rooms",
+            departmentCode: "0410", jobTypeCode: "Manager", cluster: "Rooms",
             payType: "SALARIED", headcount: 2, monthlyBaseSalary: 3200,
             seasonality: [1, 1, 1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1],
             vacationMonthlyWeights: [0, 0, 0.5, 0, 0, 0.25, 0, 0, 0.25, 0, 0, 0],
@@ -214,7 +214,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
             ...FULL_TIME_CONTRACT,
             vacationDays: 21, yearlyHoursWorked: 1900,
             meritIncreasePct: 0.06, increaseMonth: 7,
-            salaryAccountCode: "A511000", headCountAccount: "A972100",
+            salaryAccountCode: "A511000",
             workingHoursAccount: "A972200", accrualAccount: "A512000",
             benefitsAccountCode: "A513000",
           },
@@ -222,7 +222,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         {
           id: "pos-2",
           fields: {
-            departmentCode: "1310", jobTypeCode: "ASC", cluster: "F&B",
+            departmentCode: "1310", jobTypeCode: "Associate", cluster: "F&B",
             payType: "HOURLY", headcount: 1, hourlyRate: 21.5,
             seasonality: new Array(12).fill(1),
             vacationMonthlyWeights: new Array(12).fill(1 / 12),
@@ -416,7 +416,7 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
           // end-to-end (seed v15 column + ENGINE_SCALAR_COLUMNS mapping).
           id: "pos-1",
           fields: {
-            departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
+            departmentCode: "0410", jobTypeCode: "Manager", cluster: clusterId,
             payType: "SALARIED", headcount: 1, monthlyBaseSalary: 3000,
             seasonality: new Array(12).fill(1),
             vacationMonthlyWeights: new Array(12).fill(1 / 12),
@@ -430,7 +430,7 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
           // A multi-member cluster must IGNORE the stored override.
           id: "pos-2",
           fields: {
-            departmentCode: "0410", jobTypeCode: "MGR", cluster: clusterId,
+            departmentCode: "0410", jobTypeCode: "Manager", cluster: clusterId,
             clusterMultiplierOverride: 0.9,
             payType: "SALARIED", headcount: 1, monthlyBaseSalary: 3000,
             seasonality: new Array(12).fill(1),

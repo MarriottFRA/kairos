@@ -436,6 +436,9 @@ export const BLOCKS_CHANNELS = {
   list: "blocks:list",
   /** Create or update a block (recompiles its definitions); returns the list. */
   save: "blocks:save",
+  /** Create every block a "Ready-made" preset describes; returns the list. The
+   *  request carries only the preset id — the catalogue lives in main. */
+  applyPreset: "blocks:apply-preset",
   /** Soft-delete a block (refused while another block uses it as a base). */
   delete: "blocks:delete",
   /** Restore a soft-deleted block. */

@@ -199,7 +199,13 @@ export function runLiveSim(args: {
     new Map(
       rows
         .filter((row) => row.active !== false)
-        .map((row) => [row.id, readPositionAccounts(row)] as const)
+        .map(
+          (row) =>
+            [
+              row.id,
+              readPositionAccounts(row, String(row.jobTypeCode ?? "")),
+            ] as const
+        )
     )
   );
 

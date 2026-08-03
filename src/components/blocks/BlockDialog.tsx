@@ -6,6 +6,13 @@
  * (the type is fixed once created — the stored inputs depend on it). The
  * language is finance-director-first: "Same account for every row", "Apply
  * merit increase", "Calculation only — not included in output".
+ *
+ * Step one has two tabs. "Build your own" is the type palette. "Ready-made" is
+ * a catalogue of named starting points (Pension, Overtime, the country social
+ * security schemes) that insert ORDINARY blocks with the fiddly parts already
+ * chosen — nothing about them is special once inserted, which is why the pane's
+ * copy leads with that. Statutory rows are the exception to one-click insert:
+ * they open the scheme dialog pre-filled so someone reads the rates first.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -23,16 +30,33 @@ import ListSubheader from "@mui/material/ListSubheader";
 import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
+import Tab from "@mui/material/Tab";
+import Tabs from "@mui/material/Tabs";
 import TextField from "@mui/material/TextField";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Typography from "@mui/material/Typography";
+import { alpha, Theme } from "@mui/material/styles";
 import CalendarMonthOutlinedIcon from "@mui/icons-material/CalendarMonthOutlined";
 import Grid3x3OutlinedIcon from "@mui/icons-material/Grid3x3Outlined";
 import PercentOutlinedIcon from "@mui/icons-material/PercentOutlined";
 import PaidOutlinedIcon from "@mui/icons-material/PaidOutlined";
 import AccountBalanceOutlinedIcon from "@mui/icons-material/AccountBalanceOutlined";
 import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
+import FunctionsOutlinedIcon from "@mui/icons-material/FunctionsOutlined";
+import CalculateOutlinedIcon from "@mui/icons-material/CalculateOutlined";
+import SavingsOutlinedIcon from "@mui/icons-material/SavingsOutlined";
+import MoreTimeOutlinedIcon from "@mui/icons-material/MoreTimeOutlined";
+import RedeemOutlinedIcon from "@mui/icons-material/RedeemOutlined";
+import CardGiftcardOutlinedIcon from "@mui/icons-material/CardGiftcardOutlined";
+import BadgeOutlinedIcon from "@mui/icons-material/BadgeOutlined";
+import HomeOutlinedIcon from "@mui/icons-material/HomeOutlined";
+import DirectionsBusOutlinedIcon from "@mui/icons-material/DirectionsBusOutlined";
+import RestaurantOutlinedIcon from "@mui/icons-material/RestaurantOutlined";
+import CheckroomOutlinedIcon from "@mui/icons-material/CheckroomOutlined";
+import LocalHospitalOutlinedIcon from "@mui/icons-material/LocalHospitalOutlined";
+import AccountBalanceWalletOutlinedIcon from "@mui/icons-material/AccountBalanceWalletOutlined";
+import SchoolOutlinedIcon from "@mui/icons-material/SchoolOutlined";
 import Autocomplete from "@mui/material/Autocomplete";
 import Chip from "@mui/material/Chip";
 import {
@@ -53,6 +77,18 @@ import {
   PoolSource,
   PoolSpreadBase,
 } from "../../shared/blocks/ipc";
+import {
+  BLOCK_PRESETS,
+  BLOCK_PRESET_GROUP_LABELS,
+  BlockPreset,
+  BlockPresetGroup,
+  BlockPresetStep,
+} from "../../shared/blocks/presets";
+import {
+  SS_COUNTRY_PRESETS,
+  SS_PRESET_DISCLAIMER,
+  SsCountryPreset,
+} from "../../shared/socialSecurity/presets";
 import { JOB_TYPE_OPTIONS } from "../../shared/positions/fieldSeed";
 import {
   AccountOption,
@@ -78,8 +114,11 @@ export interface BlockDialogProps {
   /** Edit mode only — soft delete (page shows the undo snackbar). */
   onDelete?: (block: BlockDto) => void;
   /** Palette picked "Social Security / NI" — the parent opens the scheme dialog
-   *  (rich brackets/caps/base config) instead of the generic block form. */
-  onPickSocialSecurity?: () => void;
+   *  (rich brackets/caps/base config) instead of the generic block form. A
+   *  country preset seeds that dialog's bands, caps and account. */
+  onPickSocialSecurity?: (preset?: SsCountryPreset) => void;
+  /** Ready-made tab picked a block preset — the parent inserts its blocks. */
+  onApplyPreset?: (presetId: string) => void;
 }
 
 /** COUNT_RATE spread options, grouped for the dropdown's subheaders. */
@@ -138,6 +177,45 @@ const TYPE_TILES: Array<{
   },
 ];
 
+/** Short type wording for a preset step that is not a multiplier. */
+const TYPE_SHAPE: Record<BlockType, string> = {
+  MULTIPLIER: "Multiplier",
+  FLAT_MONTHLY: "One amount each month",
+  COUNT_RATE: "Count × rate",
+  CUSTOM_MONTHLY: "Twelve monthly amounts",
+  SOCIAL_SECURITY: "Rate bands",
+  POOL_SPREAD: "Shared pot",
+};
+
+/**
+ * One icon per preset. Keyed by id rather than group so the list scans as a
+ * set of recognizable things rather than four repeated glyphs.
+ */
+const PRESET_ICONS: Record<string, React.ReactNode> = {
+  pension: <SavingsOutlinedIcon />,
+  overtime: <MoreTimeOutlinedIcon />,
+  bonus: <RedeemOutlinedIcon />,
+  thirteenthMonth: <CardGiftcardOutlinedIcon />,
+  servicePool: <GroupsOutlinedIcon />,
+  agencyLabour: <BadgeOutlinedIcon />,
+  housing: <HomeOutlinedIcon />,
+  transport: <DirectionsBusOutlinedIcon />,
+  dutyMeals: <RestaurantOutlinedIcon />,
+  uniform: <CheckroomOutlinedIcon />,
+  medical: <LocalHospitalOutlinedIcon />,
+  eosGratuity: <AccountBalanceWalletOutlinedIcon />,
+  trainingLevy: <SchoolOutlinedIcon />,
+  costPerHour: <CalculateOutlinedIcon />,
+};
+
+/** The order the Ready-made tab's sections appear in. */
+const PRESET_GROUP_ORDER: readonly BlockPresetGroup[] = [
+  "PAY",
+  "ALLOWANCE",
+  "STATUTORY",
+  "RATIO",
+];
+
 const MONTH_LABELS = Array.from({ length: POOL_MONTHS }, (_unused, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "short" })
 );
@@ -174,6 +252,527 @@ function isIncompleteCombine(base: BlockBaseRef | undefined): boolean {
   return base?.kind === "COMBINE" && (!base.left || !base.right);
 }
 
+const CALENDAR_LABELS: Record<
+  Extract<BlockBaseRef, { kind: "CALENDAR" }>["series"],
+  string
+> = {
+  PAY_DAYS: "Working days",
+  REAL_DAYS: "Productive days",
+  HOLIDAY_DAYS: "Public holidays",
+};
+
+const STAT_LABELS: Record<
+  Extract<BlockBaseRef, { kind: "STAT" }>["stat"],
+  string
+> = {
+  HOURS: "Hours worked",
+  HOURS_PAID: "Hours paid",
+  HEADCOUNT: "Headcount",
+  FTE: "FTE",
+};
+
+/**
+ * The plain base options, in menu order. One source for the main picker, the
+ * compound's two side pickers, and the closed field's read-out — the three
+ * would otherwise drift apart every time a base kind is added.
+ */
+const SALARY_BASES: Array<{ base: BlockBaseRef; label: string }> = [
+  { base: { kind: "BASE_SALARY" }, label: "Basic salary (gross)" },
+  { base: { kind: "VACATION" }, label: "Vacation cost" },
+];
+
+const DAY_HOUR_BASES: Array<{ base: BlockBaseRef; label: string }> = [
+  { base: { kind: "CALENDAR", series: "PAY_DAYS" }, label: "Working days in month" },
+  { base: { kind: "CALENDAR", series: "REAL_DAYS" }, label: "Productive days in month" },
+  { base: { kind: "CALENDAR", series: "HOLIDAY_DAYS" }, label: "Public holidays in month" },
+  { base: { kind: "STAT", stat: "HOURS" }, label: "Hours worked" },
+  { base: { kind: "STAT", stat: "HOURS_PAID" }, label: "Hours paid" },
+  { base: { kind: "STAT", stat: "FTE" }, label: "FTE" },
+];
+
+/** Encoded value -> the menu's own wording, for the closed field. */
+const SIMPLE_BASE_LABELS = new Map(
+  [...SALARY_BASES, ...DAY_HOUR_BASES].map(
+    (option) => [JSON.stringify(option.base), option.label] as const
+  )
+);
+
+interface BaseNames {
+  blocks: Map<string, string>;
+  kpis: Map<string, string>;
+}
+
+/**
+ * Short human wording for a base ref. The two builder bases have no fixed
+ * label — what they mean is whatever the user assembled — so this is what the
+ * closed dropdown and the builders' formula line both read out.
+ */
+function describeBase(base: BlockBaseRef | undefined, names: BaseNames): string {
+  if (!base) return "…";
+  switch (base.kind) {
+    case "BASE_SALARY":
+      return "Basic salary";
+    case "VACATION":
+      return "Vacation cost";
+    case "CALENDAR":
+      return CALENDAR_LABELS[base.series];
+    case "STAT":
+      return STAT_LABELS[base.stat];
+    case "BLOCK":
+      return names.blocks.get(base.blockId) ?? "a block";
+    case "KPI":
+      return names.kpis.get(base.kpiDriverId) ?? "a KPI";
+    case "COMPOSITE": {
+      const parts = [
+        ...(base.includeBaseSalary ? ["Basic salary"] : []),
+        ...base.blockIds.map((id) => names.blocks.get(id) ?? "a block"),
+      ];
+      return parts.length > 0 ? parts.join(" + ") : "nothing ticked yet";
+    }
+    case "COMBINE":
+      return `${describeBase(base.left, names)} ${
+        BLOCK_COMBINE_OP_META[base.op].symbol
+      } ${describeBase(base.right, names)}`;
+  }
+}
+
+/**
+ * The composite/compound rows are a different kind of answer from the rest of
+ * the base menu: every other option IS the base, these two open a builder that
+ * makes one. They lead the menu as cards — tinted, bordered, two lines, with
+ * the shape of the formula they produce — so it reads as "build a base, or pick
+ * a ready-made one" rather than as eleven equal-weight lines.
+ */
+const builderItemSx = {
+  mx: 1,
+  my: 0.5,
+  px: 1.25,
+  py: 1,
+  borderRadius: 1.5,
+  alignItems: "flex-start",
+  whiteSpace: "normal",
+  border: (theme: Theme) => `1px solid ${alpha(theme.palette.primary.main, 0.35)}`,
+  bgcolor: (theme: Theme) => alpha(theme.palette.primary.main, 0.05),
+  "&:hover": {
+    bgcolor: (theme: Theme) => alpha(theme.palette.primary.main, 0.12),
+    borderColor: "primary.main",
+  },
+  "&.Mui-selected, &.Mui-selected:hover": {
+    bgcolor: (theme: Theme) => alpha(theme.palette.primary.main, 0.16),
+    borderColor: "primary.main",
+  },
+} as const;
+
+const FORMULA_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+function BuilderItemBody({
+  icon,
+  title,
+  shape,
+  blurb,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  shape: string;
+  blurb: string;
+}) {
+  return (
+    <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start" }}>
+      <Box sx={{ display: "flex", color: "primary.main", mt: 0.25 }}>{icon}</Box>
+      {/* A menu's paper is sized to its widest item's max-content, so an
+          unbounded blurb would stretch the whole dropdown and leave every
+          short option swimming in white space. Capping the text column wraps
+          it to two or three lines and keeps the popup at the field's width. */}
+      <Box sx={{ minWidth: 0, maxWidth: { xs: 232, sm: 336 } }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
+          <Typography variant="subtitle2">{title}</Typography>
+          <Chip
+            label={shape}
+            size="small"
+            color="primary"
+            variant="outlined"
+            sx={{
+              height: 18,
+              fontFamily: FORMULA_FONT,
+              "& .MuiChip-label": { px: 0.75, fontSize: 10.5 },
+            }}
+          />
+        </Stack>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", lineHeight: 1.4 }}
+        >
+          {blurb}
+        </Typography>
+      </Box>
+    </Stack>
+  );
+}
+
+/** The tinted, accented frame the two builders' editors sit in. */
+const builderPanelSx = {
+  p: 1.75,
+  borderRadius: 1.5,
+  border: (theme: Theme) => `1px solid ${alpha(theme.palette.primary.main, 0.3)}`,
+  borderLeft: (theme: Theme) => `3px solid ${theme.palette.primary.main}`,
+  bgcolor: (theme: Theme) => alpha(theme.palette.primary.main, 0.04),
+} as const;
+
+/** "= multiplier × (Basic salary ÷ Hours worked)" — what the builder built. */
+function FormulaLine({ text, error }: { text: string; error?: boolean }) {
+  return (
+    <Box
+      sx={{
+        px: 1.25,
+        py: 0.75,
+        borderRadius: 1,
+        bgcolor: "background.paper",
+        border: (theme) =>
+          `1px solid ${error ? theme.palette.error.main : theme.palette.divider}`,
+        fontFamily: FORMULA_FONT,
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        color: error ? "error.main" : "text.primary",
+        overflowX: "auto",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <Box component="span" sx={{ color: "text.disabled", mr: 1 }}>
+        =
+      </Box>
+      {text}
+    </Box>
+  );
+}
+
+/**
+ * A preset's steps reference each other as `$key`, so the describeBase lookup
+ * is keyed the same way — the card reads "Overtime Hours × Overtime Hourly
+ * Rate" rather than "$otHours × $otRate".
+ */
+function presetBaseNames(preset: BlockPreset): BaseNames {
+  return {
+    blocks: new Map(
+      preset.steps.map((step) => [`$${step.key}`, step.block.label] as const)
+    ),
+    kpis: new Map(),
+  };
+}
+
+/** What a single preset step will produce, in the base picker's own wording. */
+function describeStep(step: BlockPresetStep, names: BaseNames): string {
+  return step.block.blockType === "MULTIPLIER"
+    ? describeBase(step.block.base, names)
+    : TYPE_SHAPE[step.block.blockType];
+}
+
+/** The account chip on a preset row, or the honest absence of one. */
+function AccountTag({ code }: { code: string }) {
+  return code ? (
+    <Chip
+      label={code}
+      size="small"
+      variant="outlined"
+      sx={{
+        height: 18,
+        fontFamily: FORMULA_FONT,
+        "& .MuiChip-label": { px: 0.75, fontSize: 10.5 },
+      }}
+    />
+  ) : (
+    <Typography variant="caption" color="text.disabled" sx={{ fontSize: 10.5 }}>
+      no account
+    </Typography>
+  );
+}
+
+/** The shared frame for every row in the Ready-made tab. */
+const presetCardSx = {
+  width: "100%",
+  p: 1.75,
+  borderRadius: 2,
+  border: (theme: Theme) => `1px solid ${theme.palette.divider}`,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "stretch",
+  textAlign: "left",
+  gap: 0.75,
+  "&:hover": {
+    borderColor: "primary.main",
+    bgcolor: (theme: Theme) => theme.palette.action.hover,
+  },
+  "&.Mui-disabled": { opacity: 0.5 },
+} as const;
+
+/**
+ * One ready-made block preset. Every block it will create is listed, with its
+ * shape and its account — a three-block Overtime should never arrive as a
+ * surprise, since clicking inserts it there and then.
+ */
+function BlockPresetCard({
+  preset,
+  disabled,
+  onPick,
+}: {
+  preset: BlockPreset;
+  disabled?: boolean;
+  onPick: () => void;
+}) {
+  const names = presetBaseNames(preset);
+  const multi = preset.steps.length > 1;
+  return (
+    <ButtonBase disabled={disabled} onClick={onPick} sx={presetCardSx}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+        <Box sx={{ color: "primary.main", display: "flex" }}>
+          {PRESET_ICONS[preset.id] ?? <FunctionsOutlinedIcon />}
+        </Box>
+        <Typography variant="subtitle2">{preset.title}</Typography>
+        <Box sx={{ flex: 1 }} />
+        {multi && (
+          <Chip
+            label={`${preset.steps.length} blocks`}
+            size="small"
+            color="primary"
+            variant="outlined"
+            sx={{ height: 18, "& .MuiChip-label": { px: 0.75, fontSize: 10.5 } }}
+          />
+        )}
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.4 }}>
+        {preset.blurb}
+      </Typography>
+      <Stack spacing={0.25} sx={{ mt: 0.25 }}>
+        {preset.steps.map((step, index) => (
+          <Stack
+            key={step.key}
+            direction="row"
+            spacing={1}
+            sx={{ alignItems: "center", minWidth: 0 }}
+          >
+            {multi && (
+              <Typography
+                variant="caption"
+                color="text.disabled"
+                sx={{ fontFamily: FORMULA_FONT, fontSize: 10.5 }}
+              >
+                {index + 1}.
+              </Typography>
+            )}
+            <Typography
+              variant="caption"
+              sx={{
+                fontFamily: FORMULA_FONT,
+                fontSize: 11,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {multi ? `${step.block.label} — ` : ""}
+              {describeStep(step, names)}
+            </Typography>
+            <Box sx={{ flex: 1 }} />
+            <AccountTag code={step.block.accountCode} />
+          </Stack>
+        ))}
+      </Stack>
+    </ButtonBase>
+  );
+}
+
+/**
+ * One statutory scheme. Unlike a block preset this does NOT insert on click —
+ * it opens the scheme dialog pre-filled, because the rates are jurisdiction and
+ * year specific and somebody has to look at them before they reach a budget.
+ */
+function SsPresetCard({
+  preset,
+  disabled,
+  onPick,
+}: {
+  preset: SsCountryPreset;
+  disabled?: boolean;
+  onPick: () => void;
+}) {
+  const top = preset.scheme.brackets[preset.scheme.brackets.length - 1];
+  return (
+    <ButtonBase disabled={disabled} onClick={onPick} sx={presetCardSx}>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+        <Box sx={{ display: "flex", fontSize: 18, lineHeight: 1 }}>
+          {preset.flag}
+        </Box>
+        <Typography variant="subtitle2">{preset.title}</Typography>
+        <Box sx={{ flex: 1 }} />
+        <Chip
+          label={`${(top.rate * 100).toFixed(2).replace(/\.?0+$/, "")}%`}
+          size="small"
+          color="primary"
+          variant="outlined"
+          sx={{
+            height: 18,
+            fontFamily: FORMULA_FONT,
+            "& .MuiChip-label": { px: 0.75, fontSize: 10.5 },
+          }}
+        />
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.4 }}>
+        {preset.blurb}
+      </Typography>
+      <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+        <Typography
+          variant="caption"
+          sx={{ fontFamily: FORMULA_FONT, fontSize: 11, color: "text.disabled" }}
+        >
+          Opens the scheme settings — check the rates, then save.
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <AccountTag code={preset.defaultAccountCode} />
+      </Stack>
+    </ButtonBase>
+  );
+}
+
+/**
+ * The "Build your own" tab — one tile per block type. Social Security is the
+ * odd one out: it hands off to the scheme dialog rather than the generic form,
+ * because its config is brackets and caps rather than a base and a rate.
+ */
+function TypePalette({
+  onPickType,
+  onPickSocialSecurity,
+}: {
+  onPickType: (type: BlockType) => void;
+  onPickSocialSecurity?: (preset?: SsCountryPreset) => void;
+}) {
+  return (
+    <>
+      <Typography variant="body2" color="text.secondary">
+        A block adds a set of columns to the positions grid and generates a cost
+        or statistics line for every position.
+      </Typography>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+          gap: 1.5,
+        }}
+      >
+        {TYPE_TILES.map((tile) => (
+          <ButtonBase
+            key={tile.type}
+            onClick={() =>
+              tile.type === "SOCIAL_SECURITY"
+                ? onPickSocialSecurity?.()
+                : onPickType(tile.type)
+            }
+            sx={{
+              p: 1.75,
+              borderRadius: 2,
+              border: (theme) => `1px solid ${theme.palette.divider}`,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-start",
+              textAlign: "left",
+              gap: 0.75,
+              "&:hover": {
+                borderColor: "primary.main",
+                bgcolor: (theme) => theme.palette.action.hover,
+              },
+            }}
+          >
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+              <Box sx={{ color: "primary.main", display: "flex" }}>{tile.icon}</Box>
+              <Typography variant="subtitle2">{tile.title}</Typography>
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              {tile.blurb}
+            </Typography>
+          </ButtonBase>
+        ))}
+      </Box>
+    </>
+  );
+}
+
+/** Section heading inside the Ready-made tab. */
+function PresetSectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <Typography
+      variant="overline"
+      color="text.secondary"
+      sx={{ display: "block", lineHeight: 2, letterSpacing: 0.8 }}
+    >
+      {children}
+    </Typography>
+  );
+}
+
+/**
+ * The "Ready-made" tab. Block presets insert on click; the statutory rows hand
+ * off to the scheme dialog instead. Grouped so the list reads as a small
+ * catalogue rather than eighteen equal-weight rows.
+ */
+function ReadyMadePane({
+  disabled,
+  onApplyPreset,
+  onPickSocialSecurity,
+}: {
+  disabled?: boolean;
+  onApplyPreset?: (presetId: string) => void;
+  onPickSocialSecurity?: (preset?: SsCountryPreset) => void;
+}) {
+  return (
+    <Stack spacing={1.5}>
+      <Typography variant="body2" color="text.secondary">
+        These create ordinary blocks with the fiddly parts already chosen. Change
+        the name, the account or anything else with the cog afterwards — and type
+        each position&apos;s own figures into the columns they add.
+      </Typography>
+
+      {PRESET_GROUP_ORDER.map((group) => {
+        const presets = BLOCK_PRESETS.filter((preset) => preset.group === group);
+        const statutory = group === "STATUTORY";
+        if (presets.length === 0 && !statutory) return null;
+        return (
+          <Stack key={group} spacing={0.75}>
+            <PresetSectionTitle>
+              {BLOCK_PRESET_GROUP_LABELS[group]}
+            </PresetSectionTitle>
+            {presets.map((preset) => (
+              <BlockPresetCard
+                key={preset.id}
+                preset={preset}
+                disabled={disabled}
+                onPick={() => onApplyPreset?.(preset.id)}
+              />
+            ))}
+            {statutory && (
+              <>
+                <Typography
+                  variant="caption"
+                  color="warning.main"
+                  sx={{ display: "block", lineHeight: 1.4, pt: 0.5 }}
+                >
+                  {SS_PRESET_DISCLAIMER}
+                </Typography>
+                {SS_COUNTRY_PRESETS.map((preset) => (
+                  <SsPresetCard
+                    key={preset.id}
+                    preset={preset}
+                    disabled={disabled}
+                    onPick={() => onPickSocialSecurity?.(preset)}
+                  />
+                ))}
+              </>
+            )}
+          </Stack>
+        );
+      })}
+    </Stack>
+  );
+}
+
 /**
  * One side of a compound base. Deliberately a narrower menu than the top-level
  * base picker: no KPI (it compiles to a different engine path and cannot act as
@@ -202,27 +801,17 @@ function CombineSideSelect({
       fullWidth
     >
       <ListSubheader>Salary</ListSubheader>
-      <MenuItem value={JSON.stringify({ kind: "BASE_SALARY" })}>
-        Basic salary (gross)
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "VACATION" })}>Vacation cost</MenuItem>
+      {SALARY_BASES.map((option) => (
+        <MenuItem key={option.label} value={JSON.stringify(option.base)}>
+          {option.label}
+        </MenuItem>
+      ))}
       <ListSubheader>Days &amp; hours</ListSubheader>
-      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "PAY_DAYS" })}>
-        Working days in month
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "REAL_DAYS" })}>
-        Productive days in month
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "CALENDAR", series: "HOLIDAY_DAYS" })}>
-        Public holidays in month
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "HOURS" })}>
-        Hours worked
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "HOURS_PAID" })}>
-        Hours paid
-      </MenuItem>
-      <MenuItem value={JSON.stringify({ kind: "STAT", stat: "FTE" })}>FTE</MenuItem>
+      {DAY_HOUR_BASES.map((option) => (
+        <MenuItem key={option.label} value={JSON.stringify(option.base)}>
+          {option.label}
+        </MenuItem>
+      ))}
       {blockOptions.length > 0 && <ListSubheader>Your blocks</ListSubheader>}
       {blockOptions.map((candidate) => (
         <MenuItem
@@ -248,9 +837,12 @@ export default function BlockDialog({
   onSave,
   onDelete,
   onPickSocialSecurity,
+  onApplyPreset,
 }: BlockDialogProps) {
   const isEdit = !!block;
   const [type, setType] = useState<BlockType | null>(null);
+  // Step one only: 0 = the type palette, 1 = the ready-made catalogue.
+  const [paletteTab, setPaletteTab] = useState(0);
   const [label, setLabel] = useState("");
   const [accountCode, setAccountCode] = useState("");
   const [accountLocked, setAccountLocked] = useState(true);
@@ -283,6 +875,7 @@ export default function BlockDialog({
   useEffect(() => {
     if (!open) return;
     setType(block?.blockType ?? null);
+    setPaletteTab(0);
     setLabel(block?.label ?? "");
     setAccountCode(block?.accountCode ?? "");
     setAccountLocked(block?.accountLocked ?? true);
@@ -322,6 +915,16 @@ export default function BlockDialog({
     const blockOptions = blocks.filter((candidate) => candidate.id !== block?.id);
     return { blockOptions, kpiDrivers };
   }, [blocks, block, kpiDrivers]);
+
+  // Lookup for describeBase — the closed dropdown and the builders' formula
+  // line read block/KPI names out of here.
+  const baseNames = useMemo<BaseNames>(
+    () => ({
+      blocks: new Map(blocks.map((candidate) => [candidate.id, candidate.label])),
+      kpis: new Map(kpiDrivers.map((driver) => [driver.id, driver.label])),
+    }),
+    [blocks, kpiDrivers]
+  );
 
   const departmentNameByCode = useMemo(
     () => new Map(departments.map((dept) => [dept.code, dept.name])),
@@ -442,50 +1045,26 @@ export default function BlockDialog({
         {!type ? (
           // ── Step 1: the palette ──
           <Stack spacing={1.5} sx={{ mt: 1 }}>
-            <Typography variant="body2" color="text.secondary">
-              A block adds a set of columns to the positions grid and generates a
-              cost or statistics line for every position.
-            </Typography>
-            <Box
-              sx={{
-                display: "grid",
-                gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
-                gap: 1.5,
-              }}
+            <Tabs
+              value={paletteTab}
+              onChange={(_event, next: number) => setPaletteTab(next)}
+              sx={{ mt: -1, borderBottom: 1, borderColor: "divider" }}
             >
-              {TYPE_TILES.map((tile) => (
-                <ButtonBase
-                  key={tile.type}
-                  onClick={() =>
-                    tile.type === "SOCIAL_SECURITY"
-                      ? onPickSocialSecurity?.()
-                      : setType(tile.type)
-                  }
-                  sx={{
-                    p: 1.75,
-                    borderRadius: 2,
-                    border: (theme) => `1px solid ${theme.palette.divider}`,
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-start",
-                    textAlign: "left",
-                    gap: 0.75,
-                    "&:hover": {
-                      borderColor: "primary.main",
-                      bgcolor: (theme) => theme.palette.action.hover,
-                    },
-                  }}
-                >
-                  <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                    <Box sx={{ color: "primary.main", display: "flex" }}>{tile.icon}</Box>
-                    <Typography variant="subtitle2">{tile.title}</Typography>
-                  </Stack>
-                  <Typography variant="caption" color="text.secondary">
-                    {tile.blurb}
-                  </Typography>
-                </ButtonBase>
-              ))}
-            </Box>
+              <Tab label="Build your own" />
+              <Tab label="Ready-made" />
+            </Tabs>
+            {paletteTab === 1 ? (
+              <ReadyMadePane
+                disabled={saving}
+                onApplyPreset={onApplyPreset}
+                onPickSocialSecurity={onPickSocialSecurity}
+              />
+            ) : (
+              <TypePalette
+                onPickType={setType}
+                onPickSocialSecurity={onPickSocialSecurity}
+              />
+            )}
           </Stack>
         ) : (
           // ── Step 2: the config form ──
@@ -536,40 +1115,86 @@ export default function BlockDialog({
                 size="small"
                 fullWidth
                 helperText="Each row's multiplier is applied to this value, month by month. Plain number: 0.1 = 10%, 2 = double."
+                slotProps={{
+                  select: {
+                    // Without this the closed field would show a builder card's
+                    // whole two-line body — and, worse, would say "Composite"
+                    // without saying composite of what. "" keeps the untouched
+                    // field empty so the label still sits inside it.
+                    renderValue: (value) => {
+                      const picked = value as string;
+                      if (!picked) return "";
+                      if (picked === COMPOSITE_OPTION || picked === COMBINE_OPTION) {
+                        return (
+                          <Stack
+                            direction="row"
+                            spacing={0.75}
+                            sx={{ alignItems: "center", minWidth: 0 }}
+                          >
+                            {picked === COMPOSITE_OPTION ? (
+                              <FunctionsOutlinedIcon
+                                fontSize="small"
+                                sx={{ color: "primary.main" }}
+                              />
+                            ) : (
+                              <CalculateOutlinedIcon
+                                fontSize="small"
+                                sx={{ color: "primary.main" }}
+                              />
+                            )}
+                            <Box
+                              component="span"
+                              sx={{
+                                fontFamily: FORMULA_FONT,
+                                fontSize: 13,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                              }}
+                            >
+                              {describeBase(base, baseNames)}
+                            </Box>
+                          </Stack>
+                        );
+                      }
+                      // A plain base reads back in the menu's own words; only
+                      // blocks and KPIs need naming from the lookup.
+                      return (
+                        SIMPLE_BASE_LABELS.get(picked) ??
+                        describeBase(JSON.parse(picked) as BlockBaseRef, baseNames)
+                      );
+                    },
+                  },
+                }}
               >
+                <ListSubheader>Build a base</ListSubheader>
+                <MenuItem value={COMPOSITE_OPTION} sx={builderItemSx}>
+                  <BuilderItemBody
+                    icon={<FunctionsOutlinedIcon fontSize="small" />}
+                    title="Composite"
+                    shape="a + b + c"
+                    blurb="Add any number of bases together, then multiply the total — “% of salary + allowances”."
+                  />
+                </MenuItem>
+                <MenuItem value={COMBINE_OPTION} sx={builderItemSx}>
+                  <BuilderItemBody
+                    icon={<CalculateOutlinedIcon fontSize="small" />}
+                    title="Compound"
+                    shape="a ÷ b"
+                    blurb="Two bases either side of + − × ÷ — a difference, a product, or a rate like salary ÷ hours."
+                  />
+                </MenuItem>
                 <ListSubheader>Salary</ListSubheader>
-                <MenuItem value={baseValue({ kind: "BASE_SALARY" })}>
-                  Basic salary (gross)
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "VACATION" })}>
-                  Vacation cost
-                </MenuItem>
-                <ListSubheader>Combine several things</ListSubheader>
-                <MenuItem value={COMPOSITE_OPTION}>
-                  Composite — several things added together…
-                </MenuItem>
-                <MenuItem value={COMBINE_OPTION}>
-                  Compound — one thing +&nbsp;−&nbsp;×&nbsp;÷ another…
-                </MenuItem>
+                {SALARY_BASES.map((option) => (
+                  <MenuItem key={option.label} value={baseValue(option.base)}>
+                    {option.label}
+                  </MenuItem>
+                ))}
                 <ListSubheader>Days &amp; hours</ListSubheader>
-                <MenuItem value={baseValue({ kind: "CALENDAR", series: "PAY_DAYS" })}>
-                  Working days in month
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "CALENDAR", series: "REAL_DAYS" })}>
-                  Productive days in month
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "CALENDAR", series: "HOLIDAY_DAYS" })}>
-                  Public holidays in month
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "STAT", stat: "HOURS" })}>
-                  Hours worked
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "STAT", stat: "HOURS_PAID" })}>
-                  Hours paid
-                </MenuItem>
-                <MenuItem value={baseValue({ kind: "STAT", stat: "FTE" })}>
-                  FTE
-                </MenuItem>
+                {DAY_HOUR_BASES.map((option) => (
+                  <MenuItem key={option.label} value={baseValue(option.base)}>
+                    {option.label}
+                  </MenuItem>
+                ))}
                 {baseOptions.blockOptions.length > 0 && (
                   <ListSubheader>Your blocks</ListSubheader>
                 )}
@@ -594,15 +1219,20 @@ export default function BlockDialog({
             )}
 
             {type === "MULTIPLIER" && base?.kind === "COMPOSITE" && (
-              <Stack
-                spacing={0.25}
-                sx={{
-                  p: 1.5,
-                  borderRadius: 1,
-                  border: (theme) => `1px solid ${theme.palette.divider}`,
-                }}
-              >
-                <Typography variant="subtitle2">Add up</Typography>
+              <Stack spacing={0.25} sx={builderPanelSx}>
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: "center", pb: 0.5 }}
+                >
+                  <FunctionsOutlinedIcon
+                    fontSize="small"
+                    sx={{ color: "primary.main" }}
+                  />
+                  <Typography variant="subtitle2">
+                    Composite base — add up
+                  </Typography>
+                </Stack>
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -635,7 +1265,13 @@ export default function BlockDialog({
                     label={candidate.label}
                   />
                 ))}
-                <Typography variant="caption" color="text.secondary" sx={{ pt: 0.5 }}>
+                <Box sx={{ pt: 1 }}>
+                  <FormulaLine
+                    error={baseError}
+                    text={`multiplier × (${describeBase(base, baseNames)})`}
+                  />
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ pt: 0.75 }}>
                   {baseError
                     ? "Tick at least one thing to multiply against."
                     : "The multiplier applies to the sum of everything ticked, month by month."}
@@ -644,15 +1280,16 @@ export default function BlockDialog({
             )}
 
             {type === "MULTIPLIER" && base?.kind === "COMBINE" && (
-              <Stack
-                spacing={1.5}
-                sx={{
-                  p: 1.5,
-                  borderRadius: 1,
-                  border: (theme) => `1px solid ${theme.palette.divider}`,
-                }}
-              >
-                <Typography variant="subtitle2">Combine</Typography>
+              <Stack spacing={1.5} sx={builderPanelSx}>
+                <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                  <CalculateOutlinedIcon
+                    fontSize="small"
+                    sx={{ color: "primary.main" }}
+                  />
+                  <Typography variant="subtitle2">
+                    Compound base — combine two
+                  </Typography>
+                </Stack>
                 <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
                   <CombineSideSelect
                     label="First"
@@ -708,6 +1345,13 @@ export default function BlockDialog({
                     />
                   }
                   label="This is a ratio — don't multiply by headcount"
+                />
+                <FormulaLine
+                  error={isIncompleteCombine(base)}
+                  text={`${useRowRate ? "multiplier × " : ""}(${describeBase(
+                    base,
+                    baseNames
+                  )})`}
                 />
                 <Typography variant="caption" color="text.secondary">
                   {base.op === "DIV"

@@ -33,8 +33,22 @@ import {
   ScenarioInput,
 } from "../../engine/types";
 import { makeCalendarContext } from "../../engine/calendarContext";
-import { applyPositionAccounts, readPositionAccounts } from "../engineInput";
-import { POSITION_COUNT_ACCOUNT } from "../systemAccounts";
+import {
+  applyPositionAccounts,
+  PositionAccounts,
+  readPositionAccounts,
+} from "../engineInput";
+import {
+  BUILTIN_CATALOG,
+  DEFAULT_BENEFITS_ACCOUNT,
+  DEFAULT_SALARY_ACCOUNT,
+} from "../fieldSeed";
+import { ACCOUNT_FIELD_KEYS, accountAllowed } from "../fields";
+import { newDraftRow, sanitizeRow } from "../rowModel";
+import {
+  headcountAccountForJobType,
+  POSITION_COUNT_ACCOUNT,
+} from "../systemAccounts";
 
 const OU = "0410";
 const SCENARIO = "scn-1" as ScenarioId;
@@ -43,21 +57,26 @@ const SYNC: { updatedAt: string; deletedAt: string | null } = {
   deletedAt: null,
 };
 
-/** The five accounts as the grid stores them, all filled in. */
+/** The four STORED accounts as the grid holds them, all filled in. The fifth —
+ *  headcount — is not among them since seed v26: it is derived from the row's
+ *  Classification, so it arrives through `position()`'s jobTypeCode instead. */
 const FILLED = {
   salaryAccountCode: "A511000",
-  headCountAccount: "A972100",
   workingHoursAccount: "A972200",
   accrualAccount: "A512000",
   benefitsAccountCode: "A513000",
 };
+
+/** A grade that books a headcount account, and the account it books to. */
+const JOB_TYPE = "Manager";
+const HEADCOUNT_ACCOUNT = headcountAccountForJobType(JOB_TYPE);
 
 function position(id: string, overrides: Partial<Position> = {}): Position {
   return {
     id: id as PositionId,
     scenarioId: SCENARIO,
     departmentCode: "1010",
-    jobTypeCode: "Associate",
+    jobTypeCode: JOB_TYPE,
     cluster: "Rooms",
     hotelClusterWeight: 1,
     payType: "SALARIED",
@@ -147,8 +166,19 @@ function systemDefs(): ScenarioInput["definitions"] {
  * per emitted line, with the blank-account drop applied exactly as the recalc
  * handler applies it.
  */
-function run(extraValues: Record<string, unknown>, overrides: Partial<Position> = {}) {
+function run(
+  extraValues: Record<string, unknown>,
+  overrides: Partial<Position> = {},
+  /** Forced onto the accounts the row resolves to — the only way to reach the
+   *  pinned-head guard now that the headcount account is derived from a fixed
+   *  table of grades and can no longer be typed into a collision. */
+  accountsOverride: Partial<PositionAccounts> = {}
+) {
   const pos = position("p1", overrides);
+  const accounts = {
+    ...readPositionAccounts(extraValues, pos.jobTypeCode),
+    ...accountsOverride,
+  };
   const input: ScenarioInput = {
     scenario: { id: SCENARIO, ou: OU, year: 2027, label: "B", ...SYNC },
     calendar: makeCalendarContext(new Array(MONTHS).fill(20)),
@@ -158,7 +188,7 @@ function run(extraValues: Record<string, unknown>, overrides: Partial<Position> 
     componentValues: applyPositionAccounts(
       OU,
       [],
-      new Map([[pos.id as string, readPositionAccounts(extraValues)]])
+      new Map([[pos.id as string, accounts]])
     ),
     buyouts: [],
   };
@@ -182,13 +212,14 @@ describe("per-position posting accounts reach the engine", () => {
     const { posted } = run(FILLED);
 
     const byAccount = new Map(posted.map((line) => [line.account, line]));
-    // The four user-picked accounts, plus the pinned head. This is the assertion
-    // whose absence let the bug ship: before the fix this set was {A972540}.
+    // The four picked accounts, the grade's headcount account, and the pinned
+    // head. This is the assertion whose absence let the bug ship: before the fix
+    // this set was {A972540}.
     expect([...byAccount.keys()].sort()).toEqual([
       FILLED.salaryAccountCode,
       FILLED.accrualAccount,
       FILLED.benefitsAccountCode,
-      FILLED.headCountAccount,
+      HEADCOUNT_ACCOUNT,
       FILLED.workingHoursAccount,
       POSITION_COUNT_ACCOUNT,
     ].sort());
@@ -208,8 +239,45 @@ describe("per-position posting accounts reach the engine", () => {
     expect(accountOf("Vacation Cost")).toBe(FILLED.benefitsAccountCode);
     expect(accountOf("Vacation Accrual")).toBe(FILLED.accrualAccount);
     expect(accountOf("Hours Worked")).toBe(FILLED.workingHoursAccount);
-    expect(accountOf("Headcount")).toBe(FILLED.headCountAccount);
+    expect(accountOf("Headcount")).toBe(HEADCOUNT_ACCOUNT);
     expect(accountOf("Position Count")).toBe(POSITION_COUNT_ACCOUNT);
+  });
+
+  it("books the headcount to the account the Classification fixes", () => {
+    // The grade IS the account (seed v26) — nothing on the row can say otherwise,
+    // which is the point: two hotels cannot book the same grade differently.
+    const byGrade = (jobTypeCode: string) =>
+      run(FILLED, { jobTypeCode }).posted.find((line) => line.label === "Headcount")
+        ?.account;
+
+    expect(byGrade("Manager")).toBe("A988101");
+    expect(byGrade("Manager (Non Exempt)")).toBe("A988113");
+    expect(byGrade("Supervisor")).toBe("A988102");
+  });
+
+  it("posts no headcount line for a grade that books no account", () => {
+    // Associate / Casual / Buyout Labour have no headcount account, and a blank
+    // account has always meant "calculate, don't post". The heads still reach
+    // Results through the pinned position-count head.
+    for (const jobTypeCode of ["Associate", "Casual", "Buyout Labour", ""]) {
+      const { all, posted } = run(FILLED, { jobTypeCode });
+
+      const headcount = all.find((line) => line.label === "Headcount")!;
+      expect(headcount.account).toBe("");
+      expect(headcount.total).toBe(3 * MONTHS); // still calculated: Count 3 × 12
+      expect(posted.some((line) => line.label === "Headcount")).toBe(false);
+      expect(posted.some((line) => line.account === POSITION_COUNT_ACCOUNT)).toBe(true);
+    }
+  });
+
+  it("ignores a headcount account left in storage by a pre-v26 row", () => {
+    // The column is COMPUTED now, so the stale extra value must not resurface as
+    // an override — the grade alone decides.
+    const accounts = readPositionAccounts(
+      { ...FILLED, headCountAccount: "A972100" },
+      "Associate"
+    );
+    expect(accounts.headcount).toBe("");
   });
 
   it("calculates a blank-account line but excludes it from the output", () => {
@@ -224,7 +292,7 @@ describe("per-position posting accounts reach the engine", () => {
   });
 
   it("still posts the pinned head when every user account is blank", () => {
-    const { posted } = run({});
+    const { posted } = run({}, { jobTypeCode: "Associate" });
     expect(posted).toHaveLength(1);
     expect(posted[0].account).toBe(POSITION_COUNT_ACCOUNT);
   });
@@ -232,8 +300,10 @@ describe("per-position posting accounts reach the engine", () => {
   it("does not double-count heads when the Headcount account is the pinned one", () => {
     // Both heads are STAT/HEADCOUNT emitting the same Count, so sharing an
     // account would make the outputs read (which SUMS lines per dept|account)
-    // report twice the heads. The override is dropped instead.
-    const { posted } = run({ ...FILLED, headCountAccount: POSITION_COUNT_ACCOUNT });
+    // report twice the heads. The override is dropped instead. No grade maps to
+    // the pinned account today, so the collision is forced — the guard has to
+    // survive whatever HEADCOUNT_ACCOUNT_BY_JOB_TYPE later says.
+    const { posted } = run(FILLED, {}, { headcount: POSITION_COUNT_ACCOUNT });
 
     const pinned = posted.filter((line) => line.account === POSITION_COUNT_ACCOUNT);
     expect(pinned).toHaveLength(1);
@@ -243,10 +313,11 @@ describe("per-position posting accounts reach the engine", () => {
   });
 
   it("matches the account case-insensitively when guarding the pinned head", () => {
-    const { posted } = run({
-      ...FILLED,
-      headCountAccount: POSITION_COUNT_ACCOUNT.toLowerCase(),
-    });
+    const { posted } = run(
+      FILLED,
+      {},
+      { headcount: POSITION_COUNT_ACCOUNT.toLowerCase() }
+    );
     expect(posted.filter((line) => line.account === POSITION_COUNT_ACCOUNT)).toHaveLength(1);
   });
 
@@ -263,13 +334,15 @@ describe("per-position posting accounts reach the engine", () => {
   });
 
   it("trims whitespace and treats a blank string as no account", () => {
-    expect(readPositionAccounts({ salaryAccountCode: "  A511000  " }).salary).toBe(
-      "A511000"
-    );
-    expect(readPositionAccounts({ salaryAccountCode: "   " }).salary).toBe("");
-    expect(readPositionAccounts({}).salary).toBe("");
+    const read = (source: Record<string, unknown>) =>
+      readPositionAccounts(source, JOB_TYPE);
+    expect(read({ salaryAccountCode: "  A511000  " }).salary).toBe("A511000");
+    expect(read({ salaryAccountCode: "   " }).salary).toBe("");
+    expect(read({}).salary).toBe("");
     // Non-strings (a stale numeric value, null) must not leak into an account.
-    expect(readPositionAccounts({ salaryAccountCode: 511000 }).salary).toBe("");
+    expect(read({ salaryAccountCode: 511000 }).salary).toBe("");
+    // Same for the derived one: an unrecognised grade invents no account.
+    expect(readPositionAccounts({}, "Chief Wizard").headcount).toBe("");
   });
 
   it("merges onto an existing stored value instead of duplicating it", () => {
@@ -286,7 +359,7 @@ describe("per-position posting accounts reach the engine", () => {
     const out = applyPositionAccounts(
       OU,
       existing,
-      new Map([["p1", readPositionAccounts(FILLED)]])
+      new Map([["p1", readPositionAccounts(FILLED, JOB_TYPE)]])
     );
 
     const forBase = out.filter(
@@ -309,7 +382,7 @@ describe("per-position posting accounts reach the engine", () => {
     const out = applyPositionAccounts(
       OU,
       [blockValue],
-      new Map([["p1", readPositionAccounts(FILLED)]])
+      new Map([["p1", readPositionAccounts(FILLED, JOB_TYPE)]])
     );
     expect(out).toContain(blockValue);
   });
@@ -323,5 +396,77 @@ describe("per-position posting accounts reach the engine", () => {
       },
     ];
     expect(applyPositionAccounts(OU, values, new Map())).toBe(values);
+  });
+});
+
+/**
+ * The other half of the same problem. Everything above is about an account that
+ * IS set reaching a line; this is about the account a row starts with — because
+ * the guard that drops a blank-account line (tested above) is exactly what made
+ * an untouched new row post no salary and no vacation cost at all.
+ */
+describe("a new row's A5 accounts start filled in (seed v28)", () => {
+  const draft = () => newDraftRow(BUILTIN_CATALOG);
+
+  it("seeds the Salary and Benefits accounts", () => {
+    expect(draft()[ACCOUNT_FIELD_KEYS.salary]).toBe(DEFAULT_SALARY_ACCOUNT);
+    expect(draft()[ACCOUNT_FIELD_KEYS.benefits]).toBe(DEFAULT_BENEFITS_ACCOUNT);
+  });
+
+  it("defaults to accounts its own picker would offer", () => {
+    // A starting point the user could not have picked by hand would be a trap:
+    // clearing the cell and reopening the dropdown would not find it again.
+    for (const key of [ACCOUNT_FIELD_KEYS.salary, ACCOUNT_FIELD_KEYS.benefits]) {
+      const def = BUILTIN_CATALOG.fields.find((field) => field.key === key)!;
+      const source = def.dropdownSource;
+      expect(source?.kind).toBe("accounts");
+      const filter = source?.kind === "accounts" ? source.filter : null;
+      expect(accountAllowed(String(def.defaultValue), filter)).toBe(true);
+    }
+  });
+
+  it("keeps both columns ordinary editable picks", () => {
+    // The default is a starting value, NOT the derivation the Headcount account
+    // is — the whole point is that a hotel booking somewhere else just types it.
+    for (const key of [ACCOUNT_FIELD_KEYS.salary, ACCOUNT_FIELD_KEYS.benefits]) {
+      const def = BUILTIN_CATALOG.fields.find((field) => field.key === key)!;
+      expect(def.storage).toBe("POSITION_EXTRA");
+      expect(def.editable).toBe(true);
+    }
+    // ...and the seeded value is a normal stored one, so an edit replaces it and
+    // clearing it back to blank sticks (blank = calculate, do not post).
+    const cleared = sanitizeRow(
+      { ...draft(), [ACCOUNT_FIELD_KEYS.salary]: "" },
+      draft(),
+      BUILTIN_CATALOG
+    );
+    expect(readPositionAccounts(cleared, JOB_TYPE).salary).toBe("");
+  });
+
+  it("leaves the Accrual account blank", () => {
+    // Blank there is the switch that decides whether the holiday accrual is
+    // booked at all, so it is the one A5 account a new row must NOT arrive with.
+    expect(draft()[ACCOUNT_FIELD_KEYS.accrual]).toBeNull();
+  });
+
+  it("yields to an account supplied by the caller", () => {
+    // Import and paste paths pass their own fields as `init`; the row they built
+    // already answered the question.
+    const seeded = newDraftRow(BUILTIN_CATALOG, {
+      [ACCOUNT_FIELD_KEYS.salary]: "A511000",
+    });
+    expect(seeded[ACCOUNT_FIELD_KEYS.salary]).toBe("A511000");
+  });
+
+  it("posts both defaulted accounts on an otherwise untouched row", () => {
+    // The end of the path: a row added and left alone now reaches Results with a
+    // salary and a vacation cost line, which is the behaviour this seed buys.
+    const { posted } = run(draft());
+    const accountOf = (label: string) =>
+      posted.find((line) => line.label === label)?.account;
+
+    expect(accountOf("Base Salary")).toBe(DEFAULT_SALARY_ACCOUNT);
+    expect(accountOf("Vacation Cost")).toBe(DEFAULT_BENEFITS_ACCOUNT);
+    expect(posted.some((line) => line.label === "Vacation Accrual")).toBe(false);
   });
 });

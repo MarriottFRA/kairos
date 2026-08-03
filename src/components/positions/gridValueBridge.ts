@@ -35,7 +35,15 @@ type CellFn = (value: unknown, row: PositionRow) => unknown;
 interface SelectOption {
   value: unknown;
   label: string;
+  /** Section header for the long type-ahead lists (Standard Title). */
+  group?: string;
 }
+
+/** Section header the grid editor and the form both file a stored-but-retired
+ *  value under, so a value the list no longer offers is visibly the row's own
+ *  rather than folded into whichever section happens to come first. Lives here
+ *  because both editors read their options through optionsOf. */
+export const ORPHAN_GROUP = "Current value";
 
 /** A column's static option list, when it has one (singleSelect columns). */
 export function optionsOf(column: Col): SelectOption[] | null {

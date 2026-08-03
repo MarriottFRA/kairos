@@ -31,6 +31,7 @@ import {
   ScenarioId,
 } from "../engine/types";
 import {
+  ACCOUNT_FIELD_KEYS,
   ANNUAL_DIVISOR_KEY,
   AnnualDivisorBasis,
   BASIC_SALARY_ANNUAL_KEY,
@@ -49,7 +50,11 @@ import {
   vectorKey,
 } from "./fields";
 import { CLUSTER_LINK_ROW_KEY } from "./clusterSync";
+import { workingHoursAccountForJobType } from "./systemAccounts";
 import { PiiRecord, PositionCreate, PositionRecord } from "./ipc";
+
+/** The Working Hours account — defaulted from the row's Classification. */
+const HOURS_ACCOUNT_KEY = ACCOUNT_FIELD_KEYS.hours;
 
 export interface PositionRow {
   id: string;
@@ -395,6 +400,23 @@ export function sanitizeRow(
     const num = toNumber(row[HOTEL_CLUSTER_MULT_KEY], Number.NaN);
     out[HOTEL_CLUSTER_MULT_KEY] =
       Number.isFinite(num) && num > 0 ? Math.min(num, 1) : null;
+  }
+
+  // Working Hours account follows the grade — a DEFAULT, not a derivation (that
+  // is the Headcount account beside it, which is COMPUTED and unarguable). The
+  // account a grade normally books to is the answer nine rows in ten, so picking
+  // a Classification fills it; a post that books somewhere special is one edit
+  // away, and every later edit leaves that choice alone.
+  //
+  // Skipped when the same commit also moved the account by hand — a paste
+  // carrying both a Classification and an account means both, and the default
+  // must not overwrite the more specific of the two.
+  if (
+    out.jobTypeCode !== oldRow.jobTypeCode &&
+    out[HOURS_ACCOUNT_KEY] === oldRow[HOURS_ACCOUNT_KEY]
+  ) {
+    // "" (a grade that books none) stores as null, like any cleared account.
+    out[HOURS_ACCOUNT_KEY] = workingHoursAccountForJobType(out.jobTypeCode) || null;
   }
 
   return out;

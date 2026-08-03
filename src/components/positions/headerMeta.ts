@@ -85,11 +85,13 @@ const OVERRIDES: Readonly<
     hint: "Number of identical positions on this line — every cost is multiplied by it.",
   },
   headCountAccount: {
-    unit: "A9… account",
+    unit: "= by grade",
     hint:
-      "Statistics account the Count posts to. Leave blank and the headcount is " +
-      "still calculated but not reported under an account of its own — the " +
-      "permanent HC Stats head still books it.",
+      "Statistics account the Count posts to — set by the Classification, not " +
+      "picked: Manager A988101, Manager (Non Exempt) A988113, Supervisor " +
+      "A988102. Associate, Casual and Buyout Labour book none, so the cell is " +
+      "empty and the headcount is still calculated but not reported under an " +
+      "account of its own — the permanent HC Stats head still books it.",
   },
   headcountStatsAccount: {
     short: "HC Stats",
@@ -126,10 +128,14 @@ const OVERRIDES: Readonly<
     hint: "Auto-calculated: (calendar productive days − vacation days) × daily hours. Feeds the payroll engine. Type a value to override.",
   },
   workingHoursAccount: {
-    unit: "A9… account",
+    unit: "A988… account",
     hint:
-      "Statistics account the worked hours post to. Blank means the hours are " +
-      "still calculated (and still usable as a block base) but are not reported.",
+      "Statistics account the worked hours post to. Filled in from the " +
+      "Classification — A988308 for both manager grades, A988699 for " +
+      "Supervisor, Associate and Casual, none for Buyout Labour — and changing " +
+      "the Classification refills it. Editable: pick another A988… account for " +
+      "a post that books somewhere special. Blank means the hours are still " +
+      "calculated (and still usable as a block base) but are not reported.",
   },
   fte: {
     unit: "= derived",

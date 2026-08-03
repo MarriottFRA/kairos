@@ -3,7 +3,7 @@
  * -----------------------------------------------------------
  */
 
-import { app, BrowserWindow, session, shell } from "electron";
+import { app, BrowserWindow, Menu, session, shell } from "electron";
 import { autoUpdater } from "electron";
 import { updateElectronApp } from "update-electron-app";
 import log from "electron-log";
@@ -113,6 +113,38 @@ let mainWindow: Nullable<BrowserWindow> = null;
 const WINDOW_ICON = app.isPackaged
   ? path.join(process.resourcesPath, "kairos_logo.png")
   : path.join(__dirname, "../../src/images/kairos_logo.png");
+
+/**
+ * Install an explicit application menu.
+ *
+ * When no menu is set, Electron installs a default one whose View submenu binds
+ * Ctrl+0 / Ctrl+- / Ctrl+= to the resetZoom / zoomOut / zoomIn roles. Those roles
+ * write webContents.zoomLevel directly, bypassing the UI-scale policy in
+ * ipc/handlers/window.ts — so a stray Ctrl+0 snaps the window back to 100% while
+ * the Settings slider still reads the saved factor. autoHideMenuBar hides the bar
+ * but leaves the accelerators live, so there is no visual hint it happened.
+ *
+ * This menu drops the zoom roles and keeps the ones the app relies on: reload, and
+ * toggleDevTools (which is where Ctrl+Shift+I / F12 come from — see ready-to-show).
+ * The bar itself stays hidden, so this is invisible to users; only the
+ * accelerators change.
+ */
+function installApplicationMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "View",
+        submenu: [
+          { role: "reload" },
+          { role: "forceReload" },
+          { role: "toggleDevTools" },
+          { type: "separator" },
+          { role: "togglefullscreen" },
+        ],
+      },
+    ])
+  );
+}
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -349,6 +381,10 @@ app.on("ready", async () => {
       logger,
       devServerUrl: MAIN_WINDOW_VITE_DEV_SERVER_URL ?? null,
     });
+
+    // Replace Electron's default menu (and its zoom accelerators) before any
+    // window exists, so the window is never briefly under the default menu.
+    installApplicationMenu();
 
     createMainWindow();
 

@@ -21,6 +21,7 @@ import {
   restoreBlock,
   saveBlock,
 } from "../../main/blocks/repo";
+import { applyBlockPreset } from "../../main/blocks/presets";
 import {
   getComponentDefinitions,
   getSsSchemes,
@@ -109,6 +110,29 @@ export function createBlocksHandlers(): Record<string, IpcHandler> {
     }
   };
 
+  /**
+   * Create every block a "Ready-made" preset describes, in one transaction.
+   * The renderer sends a preset id, never a block graph — the catalogue is
+   * server-authoritative, and a multi-block preset needs the ids saveBlock
+   * hands back to wire its later steps to its earlier ones.
+   */
+  const applyPreset: IpcHandler<any, IpcResult<BlocksListResponse>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      const presetId = String(request?.presetId ?? "");
+      if (!presetId) throw new Error("Missing presetId.");
+      const db = localDbHandle();
+      applyBlockPreset(db, scope, presetId, { now: new Date().toISOString() });
+      return ok(readModel(db, scope));
+    } catch (error) {
+      console.error("Blocks preset apply failed:", error);
+      return fail(error, EMPTY);
+    }
+  };
+
   /** Soft-delete a block (refused while it is another block's base). */
   const del: IpcHandler<any, IpcResult<BlocksListResponse>> = async (
     _event,
@@ -168,6 +192,7 @@ export function createBlocksHandlers(): Record<string, IpcHandler> {
   return {
     [BLOCKS_CHANNELS.list]: list,
     [BLOCKS_CHANNELS.save]: save,
+    [BLOCKS_CHANNELS.applyPreset]: applyPreset,
     [BLOCKS_CHANNELS.delete]: del,
     [BLOCKS_CHANNELS.restore]: restore,
     [BLOCKS_CHANNELS.reorder]: reorder,

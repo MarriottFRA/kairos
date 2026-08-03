@@ -42,6 +42,21 @@ export async function saveBlock(
   return (response.data as BlocksListResponse) ?? EMPTY;
 }
 
+/**
+ * Apply a "Ready-made" preset — creates every block it describes in one
+ * transaction. Only the preset id travels; main owns the catalogue.
+ */
+export async function applyBlockPreset(
+  ou: string,
+  presetId: string
+): Promise<BlocksListResponse> {
+  const response = await ipc().sendIpcRequest(BLOCKS_CHANNELS.applyPreset, {
+    ou,
+    presetId,
+  });
+  return (response.data as BlocksListResponse) ?? EMPTY;
+}
+
 /** Soft-delete a block (refused while it is another block's base). */
 export async function deleteBlock(
   ou: string,

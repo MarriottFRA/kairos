@@ -56,11 +56,14 @@ import {
 } from "../../shared/positions/blockRows";
 import { runLiveSim } from "../../shared/positions/liveSim";
 import {
+  applyBlockPreset as applyBlockPresetService,
   deleteBlock as deleteBlockService,
   listBlocks,
   restoreBlock as restoreBlockService,
   saveBlock as saveBlockService,
 } from "../../services/blocksService";
+import { findBlockPreset } from "../../shared/blocks/presets";
+import { SsCountryPreset } from "../../shared/socialSecurity/presets";
 import { listKpiDrivers } from "../../services/kpiDriversService";
 import { KpiDriverWithSeries } from "../../shared/kpiDrivers/ipc";
 import { listClusters as listHotelClusters } from "../../services/hotelClustersService";
@@ -308,8 +311,13 @@ export default function Positions() {
   const [blockBusy, setBlockBusy] = useState(false);
   const [undoBlock, setUndoBlock] = useState<BlockDto | null>(null);
   /** The NI/SS configurator: closed (null), editing a block, or adding a new
-   *  scheme (block: null). Opened from an SS block's cog or the block palette. */
-  const [niDialog, setNiDialog] = useState<{ block: BlockDto | null } | null>(null);
+   *  scheme (block: null). Opened from an SS block's cog or the block palette.
+   *  `preset` is set only when the Ready-made tab picked a country scheme — it
+   *  seeds the form; nothing is written until the user reviews and saves. */
+  const [niDialog, setNiDialog] = useState<{
+    block: BlockDto | null;
+    preset?: SsCountryPreset;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1297,6 +1305,35 @@ export default function Positions() {
     [selectedHotelOu]
   );
 
+  // A "Ready-made" preset — one round-trip that creates every block it
+  // describes, because a multi-block preset wires its later steps to the ids of
+  // its earlier ones and only main can see those.
+  const handleApplyPreset = useCallback(
+    (presetId: string) => {
+      if (!selectedHotelOu) return;
+      const preset = findBlockPreset(presetId);
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          await queueRef.current?.flushNow();
+          const response = await applyBlockPresetService(selectedHotelOu, presetId);
+          setBlocksModel(response);
+          setBlockDialog(null);
+          const count = preset?.steps.length ?? 0;
+          setToast(
+            `Added ${preset?.title ?? "blocks"}${count > 1 ? ` (${count} blocks)` : ""}`
+          );
+        } catch (err) {
+          console.error("Failed to apply block preset:", err);
+          setError(err instanceof Error ? err.message : "Could not add those blocks");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [selectedHotelOu]
+  );
+
   const handleDeleteBlock = useCallback(
     (block: BlockDto) => {
       if (!selectedHotelOu) return;
@@ -1612,15 +1649,17 @@ export default function Positions() {
         onClose={() => setBlockDialog(null)}
         onSave={handleSaveBlock}
         onDelete={handleDeleteBlock}
-        onPickSocialSecurity={() => {
+        onApplyPreset={handleApplyPreset}
+        onPickSocialSecurity={(preset) => {
           setBlockDialog(null);
-          setNiDialog({ block: null });
+          setNiDialog({ block: null, preset });
         }}
       />
 
       <SsSchemeDialog
         open={!!niDialog}
         niBlock={niDialog?.block ?? null}
+        preset={niDialog?.preset}
         schemes={blocksModel?.ssSchemes ?? []}
         blocks={blocksModel?.blocks ?? []}
         accounts={accounts}

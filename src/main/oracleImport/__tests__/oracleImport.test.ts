@@ -611,7 +611,7 @@ describe("account inheritance", () => {
     {
       departmentCode: "D0400",
       updatedAt: "2026-01-01",
-      extraValues: { salaryAccountCode: "A520001", headCountAccount: "A972540" },
+      extraValues: { salaryAccountCode: "A520001", workingHoursAccount: "A972200" },
     },
     {
       departmentCode: "D0400",
@@ -637,7 +637,10 @@ describe("account inheritance", () => {
       accountTemplateByDepartment: buildAccountTemplates(rows),
     });
     expect(plan.positions[0].fields.salaryAccountCode).toBe("A520001");
-    expect(plan.positions[0].fields.headCountAccount).toBe("A972540");
+    expect(plan.positions[0].fields.workingHoursAccount).toBe("A972200");
+    // Not the headcount account: it is calculated from Classification (seed
+    // v26), so it is neither inherited nor written.
+    expect(plan.positions[0].fields.headCountAccount).toBeUndefined();
     expect(
       plan.preview.sourcedFields.find((f) => f.label === "Posting accounts")?.source
     ).toBe("department");
