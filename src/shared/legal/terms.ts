@@ -71,14 +71,6 @@ export const TERMS_SECTIONS: TermsSection[] = [
       "through Help & Support with enough detail to reproduce it. Issues that are " +
       "not reported cannot be corrected.",
   },
-  {
-    heading: "6. Limitation of liability",
-    body:
-      "To the fullest extent permitted by law, no liability is accepted for any " +
-      "loss, cost, damage or decision arising from the use of, or reliance on, " +
-      "Kairos output that has not been independently reviewed and verified by " +
-      "the user.",
-  },
 ];
 
 export const TERMS_ACKNOWLEDGEMENT =

@@ -10,9 +10,8 @@ import {
   FormControlLabel,
   Radio,
   Divider,
-  Select,
-  MenuItem,
-  InputLabel,
+  Autocomplete,
+  createFilterOptions,
   Alert,
   CircularProgress,
   Button,
@@ -44,6 +43,13 @@ import LegacyImportCard from "../../components/settings/LegacyImportCard";
 import OracleImportCard from "../../components/settings/OracleImportCard";
 import StorageCleanupCard from "../../components/settings/StorageCleanupCard";
 import TermsCard from "../../components/settings/TermsCard";
+
+// Admins carry far more hotels than they can scroll. Match on everything shown
+// in the row (name, OU, city, country) so any of them is a usable search term.
+const hotelFilter = createFilterOptions<Hotel>({
+  stringify: (h) =>
+    [h.hotel_name, h.ou, h.city, h.country].filter(Boolean).join(" "),
+});
 
 export default function Settings() {
   const themeMode = useSettingsStore((s) => s.themeMode);
@@ -195,8 +201,7 @@ export default function Settings() {
     await setThemeMode(mode);
   };
 
-  const handleHotelChange = async (event: any) => {
-    const ou = event.target.value;
+  const handleHotelChange = async (ou: string) => {
     await setSelectedHotelOu(ou);
   };
 
@@ -205,566 +210,582 @@ export default function Settings() {
       <Typography variant="h4" sx={{ mb: 3, fontWeight: 600 }}>
         Settings
       </Typography>
-      {/* Everything in this card is owned by the Atlas portal: a desktop
-          session that has not verified a device cannot reach the access API at
-          all, so none of it can be built in-app. */}
-      <Card variant="outlined" sx={{ mb: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-        <CardContent>
-          <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
-            Account &amp; access
-          </Typography>
-          <Divider sx={{ mb: 2 }} />
-          <Typography variant="body2" sx={{ mb: 2, color: "text.secondary" }}>
-            Your account details, access requests, device approvals and
-            permissions are managed on the Atlas portal.
-          </Typography>
-          <AccountPortalActions label="Open Atlas portal" />
-        </CardContent>
-      </Card>
 
-      <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-        <CardContent>
-          <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
-            Appearance
-          </Typography>
-          <Divider sx={{ mb: 3 }} />
-
-          <FormControl component="fieldset">
-            <FormLabel component="legend" sx={{ mb: 2 }}>
-              Theme
-            </FormLabel>
-            <RadioGroup value={themeMode} onChange={handleThemeChange}>
-              <FormControlLabel
-                value="light"
-                control={<Radio />}
-                label={
-                  <Box>
-                    <Typography variant="body1">Light</Typography>
-                    <Typography variant="body2" sx={{
-                      color: "text.secondary"
-                    }}>
-                      Clean and bright interface
-                    </Typography>
-                  </Box>
-                }
-                sx={{ mb: 1 }}
-              />
-              <FormControlLabel
-                value="dark"
-                control={<Radio />}
-                label={
-                  <Box>
-                    <Typography variant="body1">Dark</Typography>
-                    <Typography variant="body2" sx={{
-                      color: "text.secondary"
-                    }}>
-                      Easy on the eyes in low light
-                    </Typography>
-                  </Box>
-                }
-              />
-            </RadioGroup>
-          </FormControl>
-
-          <Divider sx={{ my: 3 }} />
-
-          <FormControl component="fieldset" sx={{ width: "100%" }}>
-            <FormLabel component="legend" sx={{ mb: 1 }}>
-              Display Scale
-            </FormLabel>
-            <Stack
-              direction="row"
-              sx={{
-                alignItems: "center",
-                justifyContent: "space-between",
-                mb: 1
-              }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={uiScaleMode === "auto"}
-                    onChange={(e) =>
-                      e.target.checked ? resetUiScaleToAuto() : setUiScale(uiScale || 1)
-                    }
-                  />
-                }
-                label="Auto (fit to window size)"
-              />
-              <Button
-                size="small"
-                onClick={() => resetUiScaleToAuto()}
-                disabled={uiScaleMode === "auto"}
-                sx={{ textTransform: "none" }}
-              >
-                Reset to Auto
-              </Button>
-            </Stack>
-            <Box sx={{ px: 1 }}>
-              <Slider
-                value={Math.round((uiScale || 1) * 100)}
-                min={50}
-                max={100}
-                step={5}
-                marks={[
-                  { value: 50, label: "50%" },
-                  { value: 75, label: "75%" },
-                  { value: 100, label: "100%" },
-                ]}
-                valueLabelDisplay="auto"
-                valueLabelFormat={(v) => `${v}%`}
-                disabled={uiScaleMode === "auto"}
-                onChange={(_, v) => setUiScale((v as number) / 100)}
-              />
-              <Stack
-                direction="row"
-                spacing={1}
-                sx={{
-                  alignItems: "center",
-                  justifyContent: "space-between"
-                }}>
-                <Typography variant="caption" sx={{
-                  color: "text.secondary"
-                }}>
-                  {uiScaleMode === "auto"
-                    ? "Automatically sized to the app window — larger windows show the UI at full size, smaller windows scale it down."
-                    : `Manual scale: ${Math.round((uiScale || 1) * 100)}%`}
-                </Typography>
-                <Button
-                  size="small"
-                  startIcon={<RefreshIcon />}
-                  onClick={() => window.location.reload()}
-                  sx={{ textTransform: "none", flexShrink: 0 }}
-                >
-                  Reload to apply
-                </Button>
-              </Stack>
-            </Box>
-          </FormControl>
-        </CardContent>
-      </Card>
-      <Card variant="outlined" sx={{ mt: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-        <CardContent>
-          <Stack
-            direction="row"
-            sx={{
-              justifyContent: "space-between",
-              alignItems: "center",
-              mb: 2
-            }}>
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              Hotel Settings
-            </Typography>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<RefreshIcon />}
-              onClick={handleRefreshHotels}
-              disabled={isRefreshing}
-              sx={{
-                borderRadius: 1,
-                textTransform: "none",
-                minWidth: "auto",
-                px: 2,
-              }}
-            >
-              {isRefreshing ? "Refreshing..." : "Refresh"}
-            </Button>
-          </Stack>
-          <Divider sx={{ mb: 3 }} />
-
-          {hotelsError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {hotelsError}
-            </Alert>
-          )}
-
-          <FormControl fullWidth>
-            <InputLabel id="hotel-select-label">Select Hotel OU</InputLabel>
-            <Select
-              labelId="hotel-select-label"
-              id="hotel-select"
-              value={selectedHotelOu || ""}
-              label="Select Hotel OU"
-              onChange={handleHotelChange}
-              disabled={loadingHotels}
-            >
-              <MenuItem value="">
-                <em>None</em>
-              </MenuItem>
-              {hotels.map((hotel) => (
-                <MenuItem key={hotel.ou} value={hotel.ou}>
-                  <Box>
-                    <Typography variant="body1">
-                      {hotel.hotel_name} ({hotel.ou})
-                    </Typography>
-                    <Typography variant="caption" sx={{
-                      color: "text.secondary"
-                    }}>
-                      {hotel.room_count} rooms
-                      {hotel.city && hotel.country && ` • ${hotel.city}, ${hotel.country}`}
-                      {hotel.currency && ` • ${hotel.currency}`}
-                    </Typography>
-                  </Box>
-                </MenuItem>
-              ))}
-            </Select>
-            {loadingHotels && (
-              <Box sx={{ display: "flex", justifyContent: "center", mt: 2 }}>
-                <CircularProgress size={20} />
-              </Box>
-            )}
-          </FormControl>
-
-          {selectedHotelOu && hotels.find((h) => h.ou === selectedHotelOu) && (
-            <>
-              <Divider sx={{ my: 3 }} />
-              <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
-                Hotel Details
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12, sm: 6 }}>
-                  <TextField
-                    fullWidth
-                    label="Currency"
-                    value={hotels.find((h) => h.ou === selectedHotelOu)?.currency || ""}
-                    slotProps={{ input: { readOnly: true } }}
-                    variant="outlined"
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, sm: 6 }}>
-                  <TextField
-                    fullWidth
-                    label="Country"
-                    value={hotels.find((h) => h.ou === selectedHotelOu)?.country || ""}
-                    slotProps={{ input: { readOnly: true } }}
-                    variant="outlined"
-                  />
-                </Grid>
-                <Grid size={{ xs: 12, sm: 6 }}>
-                  <TextField
-                    fullWidth
-                    label="City"
-                    value={hotels.find((h) => h.ou === selectedHotelOu)?.city || ""}
-                    slotProps={{ input: { readOnly: true } }}
-                    variant="outlined"
-                  />
-                </Grid>
-              </Grid>
-            </>
-          )}
-        </CardContent>
-      </Card>
-      <Card variant="outlined" sx={{ mt: 2, borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
-        <CardContent>
-          <Stack
-            direction="row"
-            sx={{
-              justifyContent: "space-between",
-              alignItems: "center",
-              mb: 2,
-            }}
-          >
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              Mapping Tables
-            </Typography>
-            <Button
-              variant="outlined"
-              size="small"
-              color="warning"
-              startIcon={
-                isRebuilding ? <CircularProgress size={16} /> : <RefreshIcon />
-              }
-              onClick={handleRebuildMappingTables}
-              disabled={isRebuilding}
-              sx={{
-                borderRadius: 1,
-                textTransform: "none",
-                minWidth: "auto",
-                px: 2,
-              }}
-            >
-              {isRebuilding ? "Rebuilding..." : "Clear & Rebuild"}
-            </Button>
-          </Stack>
-          <Divider sx={{ mb: 2 }} />
-
-          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-            Cached account and department maps plus their valid combinations.
-            These sync automatically when the server publishes a new version;
-            use Clear &amp; Rebuild to force a fresh download.
-          </Typography>
-
-          {mappingMessage && (
-            <Alert severity={mappingMessage.severity} sx={{ mb: 2 }}>
-              {mappingMessage.text}
-            </Alert>
-          )}
-
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <TextField
-                fullWidth
-                label="Account maps"
-                value={mappingStatus?.counts.accountMaps ?? 0}
-                slotProps={{ input: { readOnly: true } }}
-                variant="outlined"
-                size="small"
-              />
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <TextField
-                fullWidth
-                label="Department maps"
-                value={mappingStatus?.counts.departmentMaps ?? 0}
-                slotProps={{ input: { readOnly: true } }}
-                variant="outlined"
-                size="small"
-              />
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <TextField
-                fullWidth
-                label="Combos"
-                value={mappingStatus?.counts.combos ?? 0}
-                slotProps={{ input: { readOnly: true } }}
-                variant="outlined"
-                size="small"
-              />
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <TextField
-                fullWidth
-                label="Version"
-                value={mappingStatus?.version ?? "—"}
-                slotProps={{ input: { readOnly: true } }}
-                variant="outlined"
-                size="small"
-              />
-            </Grid>
-          </Grid>
-
-          {mappingStatus?.lastSyncedAt && (
-            <Typography variant="caption" sx={{ color: "text.secondary", mt: 2, display: "block" }}>
-              Last synced {new Date(mappingStatus.lastSyncedAt).toLocaleString()}
-            </Typography>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* One-shot migration off the Excel tool. Self-contained: everything it
-          needs lives under components/settings + main/legacyImport. */}
-      <LegacyImportCard
-        ou={selectedHotelOu ?? ""}
-        scenarioId={planningScenarioId}
-      />
-
-      {/* Append the associates an Oracle HR export lists to the selected plan
-          (the port of the Excel tool's Add_New_Rows_Oracle macro). Unlike the
-          legacy import this one runs into a plan that already has positions.
-          Self-contained: components/settings + main/oracleImport. */}
-      <OracleImportCard
-        ou={selectedHotelOu ?? ""}
-        scenarioId={planningScenarioId}
-      />
-
-      {/* Purge soft-deleted rows from both stores (all hotels). Self-contained:
-          everything it needs lives in components/settings + main/maintenance. */}
-      <StorageCleanupCard />
-
-      {/* What was accepted on this device, and the text itself. The acceptance
-          is taken once by the shell's gate — this card only replays it. */}
-      <TermsCard />
-
-      <Card
-        variant="outlined"
-        sx={{
-          mt: 2,
-          borderRadius: 2,
-          borderColor: "error.main",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        }}
-      >
-        <CardContent>
-          <Stack
-            direction="row"
-            spacing={1}
-            sx={{ alignItems: "center", mb: 2 }}
-          >
-            <WarningAmberIcon color="error" />
-            <Typography variant="h6" sx={{ fontWeight: 600, color: "error.main" }}>
-              Danger Zone
-            </Typography>
-          </Stack>
-          <Divider sx={{ mb: 2 }} />
-
-          <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
-            Rebuild database
-          </Typography>
-          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-            Drops and recreates the local databases from the current schema. Use
-            this only if the app reports a database error that a restart does not
-            fix. This <strong>permanently deletes all planning data</strong> —
-            every scenario, position, cost component, calendar, budget import,
-            KPI driver, block, hotel cluster and any manual input. Your sign-in,
-            device, and app settings are kept. This cannot be undone.
-          </Typography>
-
-          <Button
-            variant="outlined"
-            color="error"
-            startIcon={<WarningAmberIcon />}
-            onClick={() => {
-              setRebuildDbError(null);
-              setRebuildDbOpen(true);
-            }}
-            sx={{ textTransform: "none" }}
-          >
-            Rebuild database…
-          </Button>
-
-          {rebuildDbError && (
-            <Alert severity="error" sx={{ mt: 2 }}>
-              {rebuildDbError}
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
-
-      <Dialog
-        open={rebuildDbOpen}
-        onClose={() => {
-          if (!isRebuildingDb) setRebuildDbOpen(false);
-        }}
-        maxWidth="xs"
-      >
-        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <WarningAmberIcon color="error" />
-          Rebuild database?
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            This permanently deletes <strong>all planning data</strong> in this
-            install — scenarios, positions, cost components, calendars, budget
-            imports, KPI drivers, blocks, hotel clusters and manual input. Your
-            sign-in and app settings are kept. This cannot be undone.
-          </DialogContentText>
-          <DialogContentText sx={{ mt: 2 }}>
-            The app will reload once the rebuild finishes.
-          </DialogContentText>
-          {rebuildDbError && (
-            <Alert severity="error" sx={{ mt: 2 }}>
-              {rebuildDbError}
-            </Alert>
-          )}
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button
-            onClick={() => setRebuildDbOpen(false)}
-            disabled={isRebuildingDb}
-            sx={{ textTransform: "none" }}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            color="error"
-            onClick={handleRebuildDatabase}
-            disabled={isRebuildingDb}
-            startIcon={
-              isRebuildingDb ? <CircularProgress size={16} color="inherit" /> : undefined
-            }
-            sx={{ textTransform: "none" }}
-          >
-            {isRebuildingDb ? "Rebuilding…" : "Delete everything & rebuild"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {import.meta.env.DEV && (
-        <Card
-          variant="outlined"
-          sx={{ mt: 2, borderRadius: 2, borderStyle: "dashed", opacity: 0.9 }}
-        >
+      {/* One gap rule for the whole page. Cards must NOT carry their own
+          mt/mb — the Stack owns the rhythm, so a new card can never land
+          flush against its neighbour. (Dialogs the cards render are
+          portalled, so they add no phantom gap here.) */}
+      <Stack spacing={2}>
+        {/* Everything in this card is owned by the Atlas portal: a desktop
+            session that has not verified a device cannot reach the access API
+            at all, so none of it can be built in-app. */}
+        <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
           <CardContent>
-            <Typography
-              variant="overline"
-              sx={{ color: "text.secondary", fontWeight: 700 }}
-            >
-              Developer · dev build only
-            </Typography>
-            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
-              Secure database key
+            <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+              Account &amp; access
             </Typography>
             <Divider sx={{ mb: 2 }} />
-
-            <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-              Reveals the derived key for <code>kairos_secure.db</code>, assembled
-              from this session's local + server halves. Feed it to{" "}
-              <code>db:browse</code>, which writes a throwaway SQLCipher copy you
-              can open in DB Browser for SQLite (the live store's ChaCha20 scheme
-              cannot be opened there directly). One-way and deleted on exit — no
-              plaintext ever hits disk. You must be signed in; this control does
-              not exist in packaged builds.
+            <Typography variant="body2" sx={{ mb: 2, color: "text.secondary" }}>
+              Your account details, access requests, device approvals and
+              permissions are managed on the Atlas portal.
             </Typography>
+            <AccountPortalActions label="Open Atlas portal" />
+          </CardContent>
+        </Card>
 
-            <Button
-              variant="outlined"
-              color="warning"
-              onClick={handleRevealDevKey}
-              sx={{ textTransform: "none" }}
-            >
-              {devKeyHex ? "Re-reveal key" : "Reveal secure DB key"}
-            </Button>
+        <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <CardContent>
+            <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+              Appearance
+            </Typography>
+            <Divider sx={{ mb: 3 }} />
 
-            {devKeyError && (
-              <Alert severity="error" sx={{ mt: 2 }}>
-                {devKeyError}
-              </Alert>
-            )}
+            <FormControl component="fieldset">
+              <FormLabel component="legend" sx={{ mb: 2 }}>
+                Theme
+              </FormLabel>
+              <RadioGroup value={themeMode} onChange={handleThemeChange}>
+                <FormControlLabel
+                  value="light"
+                  control={<Radio />}
+                  label={
+                    <Box>
+                      <Typography variant="body1">Light</Typography>
+                      <Typography variant="body2" sx={{
+                        color: "text.secondary"
+                      }}>
+                        Clean and bright interface
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{ mb: 1 }}
+                />
+                <FormControlLabel
+                  value="dark"
+                  control={<Radio />}
+                  label={
+                    <Box>
+                      <Typography variant="body1">Dark</Typography>
+                      <Typography variant="body2" sx={{
+                        color: "text.secondary"
+                      }}>
+                        Easy on the eyes in low light
+                      </Typography>
+                    </Box>
+                  }
+                />
+              </RadioGroup>
+            </FormControl>
 
-            {devKeyHex && (
-              <Box sx={{ mt: 2 }}>
+            <Divider sx={{ my: 3 }} />
+
+            <FormControl component="fieldset" sx={{ width: "100%" }}>
+              <FormLabel component="legend" sx={{ mb: 1 }}>
+                Display Scale
+              </FormLabel>
+              <Stack
+                direction="row"
+                sx={{
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  mb: 1
+                }}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={uiScaleMode === "auto"}
+                      onChange={(e) =>
+                        e.target.checked ? resetUiScaleToAuto() : setUiScale(uiScale || 1)
+                      }
+                    />
+                  }
+                  label="Auto (fit to window size)"
+                />
+                <Button
+                  size="small"
+                  onClick={() => resetUiScaleToAuto()}
+                  disabled={uiScaleMode === "auto"}
+                  sx={{ textTransform: "none" }}
+                >
+                  Reset to Auto
+                </Button>
+              </Stack>
+              <Box sx={{ px: 1 }}>
+                <Slider
+                  value={Math.round((uiScale || 1) * 100)}
+                  min={50}
+                  max={100}
+                  step={5}
+                  marks={[
+                    { value: 50, label: "50%" },
+                    { value: 75, label: "75%" },
+                    { value: 100, label: "100%" },
+                  ]}
+                  valueLabelDisplay="auto"
+                  valueLabelFormat={(v) => `${v}%`}
+                  disabled={uiScaleMode === "auto"}
+                  onChange={(_, v) => setUiScale((v as number) / 100)}
+                />
                 <Stack
                   direction="row"
                   spacing={1}
-                  sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}
-                >
-                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                    Run this from the repo root:
+                  sx={{
+                    alignItems: "center",
+                    justifyContent: "space-between"
+                  }}>
+                  <Typography variant="caption" sx={{
+                    color: "text.secondary"
+                  }}>
+                    {uiScaleMode === "auto"
+                      ? "Automatically sized to the app window — larger windows show the UI at full size, smaller windows scale it down."
+                      : `Manual scale: ${Math.round((uiScale || 1) * 100)}%`}
                   </Typography>
                   <Button
                     size="small"
-                    onClick={() =>
-                      void navigator.clipboard.writeText(
-                        `npm run db:browse -- --key ${devKeyHex}`
-                      )
-                    }
-                    sx={{ textTransform: "none" }}
+                    startIcon={<RefreshIcon />}
+                    onClick={() => window.location.reload()}
+                    sx={{ textTransform: "none", flexShrink: 0 }}
                   >
-                    Copy command
+                    Reload to apply
                   </Button>
                 </Stack>
-                <Box
-                  component="pre"
-                  sx={{
-                    fontFamily: "'IBM Plex Mono', monospace",
-                    fontSize: "0.8125rem",
-                    bgcolor: "action.hover",
-                    borderRadius: 1,
-                    p: 1.5,
-                    m: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-all",
-                    userSelect: "all",
-                  }}
-                >
-                  {`npm run db:browse -- --key ${devKeyHex}`}
-                </Box>
               </Box>
+            </FormControl>
+          </CardContent>
+        </Card>
+        <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <CardContent>
+            <Stack
+              direction="row"
+              sx={{
+                justifyContent: "space-between",
+                alignItems: "center",
+                mb: 2
+              }}>
+              <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                Hotel Settings
+              </Typography>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={handleRefreshHotels}
+                disabled={isRefreshing}
+                sx={{
+                  borderRadius: 1,
+                  textTransform: "none",
+                  minWidth: "auto",
+                  px: 2,
+                }}
+              >
+                {isRefreshing ? "Refreshing..." : "Refresh"}
+              </Button>
+            </Stack>
+            <Divider sx={{ mb: 3 }} />
+
+            {hotelsError && (
+              <Alert severity="error" sx={{ mb: 2 }}>
+                {hotelsError}
+              </Alert>
+            )}
+
+            <FormControl fullWidth>
+              <Autocomplete
+                id="hotel-select"
+                options={hotels}
+                value={hotels.find((h) => h.ou === selectedHotelOu) ?? null}
+                onChange={(_e, hotel) => handleHotelChange(hotel?.ou ?? "")}
+                disabled={loadingHotels}
+                loading={loadingHotels}
+                autoHighlight
+                filterOptions={hotelFilter}
+                getOptionLabel={(h) => `${h.hotel_name} (${h.ou})`}
+                isOptionEqualToValue={(a, b) => a.ou === b.ou}
+                noOptionsText="No matching hotel"
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Select Hotel OU"
+                    placeholder="Type to search name, OU, city or country"
+                  />
+                )}
+                renderOption={(props, hotel) => {
+                  const { key, ...liProps } = props as typeof props & { key: string };
+                  return (
+                    <Box component="li" key={key} {...liProps}>
+                      <Box>
+                        <Typography variant="body1">
+                          {hotel.hotel_name} ({hotel.ou})
+                        </Typography>
+                        <Typography variant="caption" sx={{
+                          color: "text.secondary"
+                        }}>
+                          {hotel.room_count} rooms
+                          {hotel.city && hotel.country && ` • ${hotel.city}, ${hotel.country}`}
+                          {hotel.currency && ` • ${hotel.currency}`}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  );
+                }}
+              />
+              {loadingHotels && (
+                <Box sx={{ display: "flex", justifyContent: "center", mt: 2 }}>
+                  <CircularProgress size={20} />
+                </Box>
+              )}
+            </FormControl>
+
+            {selectedHotelOu && hotels.find((h) => h.ou === selectedHotelOu) && (
+              <>
+                <Divider sx={{ my: 3 }} />
+                <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
+                  Hotel Details
+                </Typography>
+                <Grid container spacing={2}>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      fullWidth
+                      label="Currency"
+                      value={hotels.find((h) => h.ou === selectedHotelOu)?.currency || ""}
+                      slotProps={{ input: { readOnly: true } }}
+                      variant="outlined"
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      fullWidth
+                      label="Country"
+                      value={hotels.find((h) => h.ou === selectedHotelOu)?.country || ""}
+                      slotProps={{ input: { readOnly: true } }}
+                      variant="outlined"
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      fullWidth
+                      label="City"
+                      value={hotels.find((h) => h.ou === selectedHotelOu)?.city || ""}
+                      slotProps={{ input: { readOnly: true } }}
+                      variant="outlined"
+                    />
+                  </Grid>
+                </Grid>
+              </>
             )}
           </CardContent>
         </Card>
-      )}
+        <Card variant="outlined" sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}>
+          <CardContent>
+            <Stack
+              direction="row"
+              sx={{
+                justifyContent: "space-between",
+                alignItems: "center",
+                mb: 2,
+              }}
+            >
+              <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                Mapping Tables
+              </Typography>
+              <Button
+                variant="outlined"
+                size="small"
+                color="warning"
+                startIcon={
+                  isRebuilding ? <CircularProgress size={16} /> : <RefreshIcon />
+                }
+                onClick={handleRebuildMappingTables}
+                disabled={isRebuilding}
+                sx={{
+                  borderRadius: 1,
+                  textTransform: "none",
+                  minWidth: "auto",
+                  px: 2,
+                }}
+              >
+                {isRebuilding ? "Rebuilding..." : "Clear & Rebuild"}
+              </Button>
+            </Stack>
+            <Divider sx={{ mb: 2 }} />
+
+            <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+              Cached account and department maps plus their valid combinations.
+              These sync automatically when the server publishes a new version;
+              use Clear &amp; Rebuild to force a fresh download.
+            </Typography>
+
+            {mappingMessage && (
+              <Alert severity={mappingMessage.severity} sx={{ mb: 2 }}>
+                {mappingMessage.text}
+              </Alert>
+            )}
+
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 6, sm: 3 }}>
+                <TextField
+                  fullWidth
+                  label="Account maps"
+                  value={mappingStatus?.counts.accountMaps ?? 0}
+                  slotProps={{ input: { readOnly: true } }}
+                  variant="outlined"
+                  size="small"
+                />
+              </Grid>
+              <Grid size={{ xs: 6, sm: 3 }}>
+                <TextField
+                  fullWidth
+                  label="Department maps"
+                  value={mappingStatus?.counts.departmentMaps ?? 0}
+                  slotProps={{ input: { readOnly: true } }}
+                  variant="outlined"
+                  size="small"
+                />
+              </Grid>
+              <Grid size={{ xs: 6, sm: 3 }}>
+                <TextField
+                  fullWidth
+                  label="Combos"
+                  value={mappingStatus?.counts.combos ?? 0}
+                  slotProps={{ input: { readOnly: true } }}
+                  variant="outlined"
+                  size="small"
+                />
+              </Grid>
+              <Grid size={{ xs: 6, sm: 3 }}>
+                <TextField
+                  fullWidth
+                  label="Version"
+                  value={mappingStatus?.version ?? "—"}
+                  slotProps={{ input: { readOnly: true } }}
+                  variant="outlined"
+                  size="small"
+                />
+              </Grid>
+            </Grid>
+
+            {mappingStatus?.lastSyncedAt && (
+              <Typography variant="caption" sx={{ color: "text.secondary", mt: 2, display: "block" }}>
+                Last synced {new Date(mappingStatus.lastSyncedAt).toLocaleString()}
+              </Typography>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* One-shot migration off the Excel tool. Self-contained: everything it
+            needs lives under components/settings + main/legacyImport. */}
+        <LegacyImportCard
+          ou={selectedHotelOu ?? ""}
+          scenarioId={planningScenarioId}
+        />
+
+        {/* Append the associates an Oracle HR export lists to the selected plan
+            (the port of the Excel tool's Add_New_Rows_Oracle macro). Unlike the
+            legacy import this one runs into a plan that already has positions.
+            Self-contained: components/settings + main/oracleImport. */}
+        <OracleImportCard
+          ou={selectedHotelOu ?? ""}
+          scenarioId={planningScenarioId}
+        />
+
+        {/* Purge soft-deleted rows from both stores (all hotels). Self-contained:
+            everything it needs lives in components/settings + main/maintenance. */}
+        <StorageCleanupCard />
+
+        {/* What was accepted on this device, and the text itself. The acceptance
+            is taken once by the shell's gate — this card only replays it. */}
+        <TermsCard />
+
+        <Card
+          variant="outlined"
+          sx={{
+            borderRadius: 2,
+            borderColor: "error.main",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+          }}
+        >
+          <CardContent>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ alignItems: "center", mb: 2 }}
+            >
+              <WarningAmberIcon color="error" />
+              <Typography variant="h6" sx={{ fontWeight: 600, color: "error.main" }}>
+                Danger Zone
+              </Typography>
+            </Stack>
+            <Divider sx={{ mb: 2 }} />
+
+            <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
+              Rebuild database
+            </Typography>
+            <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+              Drops and recreates the local databases from the current schema. Use
+              this only if the app reports a database error that a restart does not
+              fix. This <strong>permanently deletes all planning data</strong> —
+              every scenario, position, cost component, calendar, budget import,
+              KPI driver, block, hotel cluster and any manual input. Your sign-in,
+              device, and app settings are kept. This cannot be undone.
+            </Typography>
+
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<WarningAmberIcon />}
+              onClick={() => {
+                setRebuildDbError(null);
+                setRebuildDbOpen(true);
+              }}
+              sx={{ textTransform: "none" }}
+            >
+              Rebuild database…
+            </Button>
+
+            {rebuildDbError && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {rebuildDbError}
+              </Alert>
+            )}
+          </CardContent>
+        </Card>
+
+        <Dialog
+          open={rebuildDbOpen}
+          onClose={() => {
+            if (!isRebuildingDb) setRebuildDbOpen(false);
+          }}
+          maxWidth="xs"
+        >
+          <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <WarningAmberIcon color="error" />
+            Rebuild database?
+          </DialogTitle>
+          <DialogContent>
+            <DialogContentText>
+              This permanently deletes <strong>all planning data</strong> in this
+              install — scenarios, positions, cost components, calendars, budget
+              imports, KPI drivers, blocks, hotel clusters and manual input. Your
+              sign-in and app settings are kept. This cannot be undone.
+            </DialogContentText>
+            <DialogContentText sx={{ mt: 2 }}>
+              The app will reload once the rebuild finishes.
+            </DialogContentText>
+            {rebuildDbError && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {rebuildDbError}
+              </Alert>
+            )}
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button
+              onClick={() => setRebuildDbOpen(false)}
+              disabled={isRebuildingDb}
+              sx={{ textTransform: "none" }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              color="error"
+              onClick={handleRebuildDatabase}
+              disabled={isRebuildingDb}
+              startIcon={
+                isRebuildingDb ? <CircularProgress size={16} color="inherit" /> : undefined
+              }
+              sx={{ textTransform: "none" }}
+            >
+              {isRebuildingDb ? "Rebuilding…" : "Delete everything & rebuild"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        {import.meta.env.DEV && (
+          <Card
+            variant="outlined"
+            sx={{ borderRadius: 2, borderStyle: "dashed", opacity: 0.9 }}
+          >
+            <CardContent>
+              <Typography
+                variant="overline"
+                sx={{ color: "text.secondary", fontWeight: 700 }}
+              >
+                Developer · dev build only
+              </Typography>
+              <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+                Secure database key
+              </Typography>
+              <Divider sx={{ mb: 2 }} />
+
+              <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+                Reveals the derived key for <code>kairos_secure.db</code>, assembled
+                from this session's local + server halves. Feed it to{" "}
+                <code>db:browse</code>, which writes a throwaway SQLCipher copy you
+                can open in DB Browser for SQLite (the live store's ChaCha20 scheme
+                cannot be opened there directly). One-way and deleted on exit — no
+                plaintext ever hits disk. You must be signed in; this control does
+                not exist in packaged builds.
+              </Typography>
+
+              <Button
+                variant="outlined"
+                color="warning"
+                onClick={handleRevealDevKey}
+                sx={{ textTransform: "none" }}
+              >
+                {devKeyHex ? "Re-reveal key" : "Reveal secure DB key"}
+              </Button>
+
+              {devKeyError && (
+                <Alert severity="error" sx={{ mt: 2 }}>
+                  {devKeyError}
+                </Alert>
+              )}
+
+              {devKeyHex && (
+                <Box sx={{ mt: 2 }}>
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}
+                  >
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      Run this from the repo root:
+                    </Typography>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        void navigator.clipboard.writeText(
+                          `npm run db:browse -- --key ${devKeyHex}`
+                        )
+                      }
+                      sx={{ textTransform: "none" }}
+                    >
+                      Copy command
+                    </Button>
+                  </Stack>
+                  <Box
+                    component="pre"
+                    sx={{
+                      fontFamily: "'IBM Plex Mono', monospace",
+                      fontSize: "0.8125rem",
+                      bgcolor: "action.hover",
+                      borderRadius: 1,
+                      p: 1.5,
+                      m: 0,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      userSelect: "all",
+                    }}
+                  >
+                    {`npm run db:browse -- --key ${devKeyHex}`}
+                  </Box>
+                </Box>
+              )}
+            </CardContent>
+          </Card>
+        )}
+      </Stack>
 
       <Box sx={{ mt: 4, textAlign: "center", pb: 2 }}>
         <Typography variant="caption" sx={{

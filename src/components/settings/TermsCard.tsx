@@ -67,7 +67,10 @@ export default function TermsCard() {
   }, []);
 
   return (
-    <Card sx={{ mb: 3 }}>
+    <Card
+      variant="outlined"
+      sx={{ borderRadius: 2, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }}
+    >
       <CardContent>
         <Stack
           direction="row"
