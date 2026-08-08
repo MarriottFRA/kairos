@@ -1,7 +1,8 @@
 /**
  * PositionsToolbar — the control band above the positions grid.
- * Add row · PII mask toggle · group-by-department · quick filter · CSV export,
- * plus the aggregate save-status chip fed by the write queue.
+ * Add row · PII mask toggle · group-by-department · quick filter · column
+ * filters · CSV export, plus the aggregate save-status chip fed by the write
+ * queue.
  */
 
 import { useState } from "react";
@@ -11,6 +12,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DashboardCustomizeOutlinedIcon from "@mui/icons-material/DashboardCustomizeOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import DownloadIcon from "@mui/icons-material/Download";
+import FilterAltOutlinedIcon from "@mui/icons-material/FilterAltOutlined";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
 import SearchIcon from "@mui/icons-material/Search";
 import VisibilityIcon from "@mui/icons-material/Visibility";
@@ -57,6 +59,9 @@ export interface PositionsToolbarProps {
   /** Checked rows — drives the whole bulk band. */
   selectedCount: number;
   quickFilter: string;
+  /** How many column filters are actually narrowing the grid — a half-built row
+   *  in the panel counts for nothing. Drives the badge and the Clear button. */
+  filterCount: number;
   queueState: QueueState;
   pendingRows: number;
   /** Append `count` blank positions (1 from the main button, N from its menu). */
@@ -68,8 +73,13 @@ export interface PositionsToolbarProps {
   onBulkActive: (active: boolean) => void;
   onBulkDuplicate: () => void;
   onBulkDelete: () => void;
-  onCopyFromYear: () => void;
+  /** Fill this empty scenario from another year — or another scenario. */
+  onCopyFrom: () => void;
   onQuickFilter: (value: string) => void;
+  /** Opens the grid's own filter panel — the same one a column's three-dots
+   *  menu opens, which MUI anchors to the grid rather than to this button. */
+  onOpenFilters: () => void;
+  onClearFilters: () => void;
   onExportCsv: () => void;
 }
 
@@ -138,6 +148,7 @@ export default function PositionsToolbar({
   showInactive,
   selectedCount,
   quickFilter,
+  filterCount,
   queueState,
   pendingRows,
   onAddPositions,
@@ -148,8 +159,10 @@ export default function PositionsToolbar({
   onBulkActive,
   onBulkDuplicate,
   onBulkDelete,
-  onCopyFromYear,
+  onCopyFrom,
   onQuickFilter,
+  onOpenFilters,
+  onClearFilters,
   onExportCsv,
 }: PositionsToolbarProps) {
   // Both menus and the custom-count prompt are the toolbar's own business —
@@ -419,6 +432,43 @@ export default function PositionsToolbar({
         </ToggleButton>
       </Tooltip>
 
+      {/* Column filters hide rows silently, so the count is the point of this
+          button — without it a forgotten filter reads as missing data. Clear
+          sits beside it rather than inside the panel, which the user has to
+          open before they can find out anything is filtered at all. */}
+      <ButtonGroup variant="outlined" sx={{ height: CONTROL_HEIGHT }}>
+        <Tooltip title="Filter rows by any column's value">
+          <span>
+            <Button
+              onClick={onOpenFilters}
+              disabled={disabled}
+              startIcon={<FilterAltOutlinedIcon />}
+              color={filterCount > 0 ? "primary" : "inherit"}
+              sx={{
+                height: CONTROL_HEIGHT,
+                px: 1.5,
+                fontWeight: filterCount > 0 ? 700 : 500,
+                borderColor: filterCount > 0 ? undefined : "divider",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {filterCount > 0 ? `Filters (${filterCount})` : "Filters"}
+            </Button>
+          </span>
+        </Tooltip>
+        {filterCount > 0 && (
+          <Tooltip title="Remove every column filter">
+            <Button
+              onClick={onClearFilters}
+              disabled={disabled}
+              sx={{ height: CONTROL_HEIGHT, px: 1.5 }}
+            >
+              Clear
+            </Button>
+          </Tooltip>
+        )}
+      </ButtonGroup>
+
       <TextField
         size="small"
         placeholder="Search positions…"
@@ -447,7 +497,7 @@ export default function PositionsToolbar({
           <Button
             variant="outlined"
             startIcon={<ContentCopyIcon />}
-            onClick={onCopyFromYear}
+            onClick={onCopyFrom}
             disabled={disabled}
             sx={{ height: CONTROL_HEIGHT, px: 2 }}
           >

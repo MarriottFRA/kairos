@@ -224,3 +224,25 @@ export function erasePii(
 export function fetchOuSettings(client: KairosClient, ou: string): Promise<OuSettings> {
   return client.get<OuSettings>(`/ou/${encodeURIComponent(ou)}/settings`);
 }
+
+/**
+ * Flip the kill switch. Administrators only — deliberately not the hotel's owner.
+ *
+ * The switch exists for jurisdictions that refuse server-side storage of employee
+ * details, so it is a compliance position taken by the organisation rather than a
+ * preference an owner can turn back on the afternoon after legal turned it off.
+ *
+ * Turning it off erases nothing. `erasePii` is the separate, deliberate act that
+ * destroys what is already there.
+ */
+export function putOuSettings(
+  client: KairosClient,
+  ou: string,
+  piiEnabled: boolean,
+  reason: string
+): Promise<OuSettings> {
+  return client.put<OuSettings>(`/ou/${encodeURIComponent(ou)}/settings`, {
+    piiEnabled,
+    reason,
+  });
+}

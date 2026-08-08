@@ -31,6 +31,7 @@ import Home from "./routes/nestedPages/home";
 import BudgetSync from "./routes/nestedPages/budgetSync";
 import Sync from "./routes/nestedPages/sync";
 import DelegationPage from "./routes/nestedPages/delegation";
+import AdminPage from "./routes/nestedPages/admin";
 import BstPush from "./routes/nestedPages/bstPush";
 import KpiDrivers from "./routes/nestedPages/kpiDrivers";
 import ManualInput from "./routes/nestedPages/manualInput";
@@ -124,6 +125,16 @@ const router = createHashRouter([
         path: "delegation",
         element: <DelegationPage />,
         handle: { title: "Delegation" },
+      },
+      {
+        // Also not in the nav. Reached from Settings → Support tools, which only
+        // unlocks after the server has confirmed the account is an
+        // administrator. The page refuses to render its own contents otherwise,
+        // and every request behind it 403s regardless — this route being
+        // reachable by URL gives nothing away.
+        path: "admin",
+        element: <AdminPage />,
+        handle: { title: "Estate administration" },
       },
       {
         path: "profile",

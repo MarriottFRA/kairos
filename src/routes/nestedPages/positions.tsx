@@ -23,8 +23,13 @@ import {
   Button,
   Snackbar,
 } from "@mui/material";
-import { GridInitialState, useGridApiRef } from "@mui/x-data-grid-premium";
 import {
+  GridFilterModel,
+  GridInitialState,
+  useGridApiRef,
+} from "@mui/x-data-grid-premium";
+import {
+  DEPARTMENT_CODE_KEY,
   FieldCatalog,
   FieldDataType,
   fieldLabel,
@@ -130,6 +135,7 @@ import DeleteClusterPositionDialog, {
   PendingPositionDelete,
 } from "../../components/positions/DeleteClusterPositionDialog";
 import PositionFormDialog from "../../components/positions/PositionFormDialog";
+import LockedDepartmentsBanner from "../../components/positions/LockedDepartmentsBanner";
 import { uuidv7 } from "../../shared/engine/ids";
 
 /**
@@ -229,6 +235,14 @@ const IDLE_SNAPSHOT: QueueSnapshot = {
 /** Shared empty list, so "no blocks yet" is one identity rather than a new one
  *  per render (see the `blocks` memo below). */
 const EMPTY_BLOCKS: BlockDto[] = [];
+
+/** "No column filters" as one identity — the grid diffs the filter model by
+ *  reference, so clearing back to a fresh object would cost a filter pass. */
+const EMPTY_FILTER: GridFilterModel = { items: [] };
+
+/** The only two operators MUI ships with `requiresFilterValue: false` — they
+ *  narrow the grid on their own, so the filter count has to include them. */
+const NO_VALUE_OPERATORS = new Set(["isEmpty", "isNotEmpty"]);
 
 function applyDeptCodeAutofill(
   row: PositionRow,
@@ -332,6 +346,12 @@ export default function Positions() {
   /** Bumped after a copy lands, to re-run the load effect. */
   const [reloadToken, setReloadToken] = useState(0);
   const [quickFilter, setQuickFilter] = useState("");
+  // The column filters built in the grid's filter panel. Held here, not in the
+  // grid, because adding or removing a column remounts it (see `gridEpoch`) and
+  // a filter that vanished on every new column would read as a bug. Deliberately
+  // not persisted with the layout either: reopening the app onto a silently
+  // filtered grid looks like missing data.
+  const [userFilter, setUserFilter] = useState<GridFilterModel>(EMPTY_FILTER);
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot>(IDLE_SNAPSHOT);
   /** The last deleted batch (a single row delete is a batch of one). */
   const [undoRows, setUndoRows] = useState<PositionRow[] | null>(null);
@@ -621,6 +641,52 @@ export default function Positions() {
   const planScope = usePlanScope(selectedHotelOu, scenario?.id ?? null);
 
   /**
+   * The one place a write is refused, and the reason it is refused.
+   *
+   * Held in a ref because the write paths below are deliberately dependency-free
+   * callbacks — they read `catalogRef` and `queueRef` the same way — and giving
+   * them a dependency on the scope would rebuild every handler each time the
+   * ownership answer arrives, which in turn rebuilds the grid's columns.
+   *
+   * `isCellEditable` already stops a delegated cell opening for edit. This is
+   * the backstop for everything that does NOT go through a cell: the row form,
+   * duplicate, delete, and the toolbar's bulk actions. Two enforcement points
+   * would be one too many if they could disagree, so both consult the same
+   * server-supplied set.
+   */
+  const writeScopeRef = useRef<{
+    writable: ReadonlySet<string> | undefined;
+    planLocked: boolean;
+    partial: boolean;
+  }>({ writable: undefined, planLocked: false, partial: false });
+  writeScopeRef.current = {
+    writable: planScope.writableDepartments,
+    planLocked: planScope.planLocked,
+    partial: planScope.scopeKind === "PARTIAL",
+  };
+
+  const rowWritable = useCallback((row: PositionRow): boolean => {
+    const scope = writeScopeRef.current;
+    if (scope.planLocked) return false;
+    if (!scope.writable) return true; // never published — the local file is it
+    const code =
+      typeof row[DEPARTMENT_CODE_KEY] === "string"
+        ? (row[DEPARTMENT_CODE_KEY] as string)
+        : "";
+    return code !== "" && scope.writable.has(code);
+  }, []);
+
+  /** Why a write was refused, in the words the Sync page would use. */
+  const refusalReason = useCallback((count: number): string => {
+    const scope = writeScopeRef.current;
+    const rows = count === 1 ? "That position is" : `${count} of those positions are`;
+    if (scope.planLocked) {
+      return `${rows} read-only: an administrator is holding this plan.`;
+    }
+    return `${rows} in a department somebody else is editing. Withdraw the delegation on the Sync page to take it back.`;
+  }, []);
+
+  /**
    * Tell the server there is unpublished work here, about once a minute.
    *
    * Advisory only, and never a lock — but it is what lets the owner be warned
@@ -807,6 +873,14 @@ export default function Positions() {
       const queue = queueRef.current;
       if (!currentCatalog || !queue) return oldRow;
 
+      // Every cell edit already passed `isCellEditable`, but the row form and
+      // any future caller land here directly. Refusing by returning `oldRow` is
+      // the grid's own idiom for "that edit did not happen".
+      if (!rowWritable(oldRow)) {
+        setToast(refusalReason(1));
+        return oldRow;
+      }
+
       const blocks = blocksRef.current;
       let sanitized = sanitizeRow(newRow, oldRow, currentCatalog);
       sanitized = sanitizeBlockInputs(sanitized, oldRow, blocks);
@@ -830,7 +904,7 @@ export default function Positions() {
       );
       return sanitized;
     },
-    []
+    [rowWritable, refusalReason]
   );
 
   const handleRowUpdateError = useCallback((err: unknown) => {
@@ -912,7 +986,16 @@ export default function Positions() {
         drafts.push(draft);
       }
       setRows((current) => [...current, ...drafts]);
-      if (drafts.length > 1) setToast(`${drafts.length} positions added`);
+      if (writeScopeRef.current.partial) {
+        // A new row has no department yet, and a row with no department is
+        // owner-only server-side. A delegate can create it but cannot type into
+        // it until it is one of theirs, which without this reads as a dead row.
+        setToast(
+          "Added. Set the department to one of yours before you can edit or publish these."
+        );
+      } else if (drafts.length > 1) {
+        setToast(`${drafts.length} positions added`);
+      }
 
       requestAnimationFrame(() => {
         try {
@@ -984,14 +1067,32 @@ export default function Positions() {
     if (copies.length > 1) setToast(`${copies.length} positions duplicated`);
   }, []);
 
+  /**
+   * Drop the rows this user may not write, and say how many went.
+   *
+   * Silently doing four of six is worse than doing none: the two that vanished
+   * are exactly the ones somebody would assume had worked. The count is always
+   * reported, and the action still proceeds for the rest — a delegate bulk-
+   * selecting across departments should not be stopped from acting on their own.
+   */
+  const allowedRows = useCallback(
+    (targets: readonly PositionRow[]): PositionRow[] => {
+      const allowed = targets.filter(rowWritable);
+      const skipped = targets.length - allowed.length;
+      if (skipped > 0) setToast(refusalReason(skipped));
+      return allowed;
+    },
+    [rowWritable, refusalReason]
+  );
+
   const handleDuplicate = useCallback(
-    (row: PositionRow) => duplicateRows([row]),
-    [duplicateRows]
+    (row: PositionRow) => duplicateRows(allowedRows([row])),
+    [duplicateRows, allowedRows]
   );
 
   const handleBulkDuplicate = useCallback(
-    () => duplicateRows(selectedRows()),
-    [duplicateRows, selectedRows]
+    () => duplicateRows(allowedRows(selectedRows())),
+    [duplicateRows, allowedRows, selectedRows]
   );
 
   // One batch, one Undo — the snackbar restores everything the action removed,
@@ -1028,13 +1129,13 @@ export default function Positions() {
   );
 
   const handleDelete = useCallback(
-    (row: PositionRow) => requestDelete([row]),
-    [requestDelete]
+    (row: PositionRow) => requestDelete(allowedRows([row])),
+    [requestDelete, allowedRows]
   );
 
   const handleBulkDelete = useCallback(
-    () => requestDelete(selectedRows()),
-    [requestDelete, selectedRows]
+    () => requestDelete(allowedRows(selectedRows())),
+    [requestDelete, allowedRows, selectedRows]
   );
 
   const handleUndoDelete = useCallback(() => {
@@ -1050,6 +1151,33 @@ export default function Positions() {
       fileName: `positions_${selectedHotelOu ?? "hotel"}_${scenario?.label ?? "scenario"}`,
     });
   }, [apiRef, selectedHotelOu, scenario]);
+
+  // ── Column filters ──
+  // The panel itself lives inside the grid (MUI anchors it to the headers), so
+  // the toolbar button only has to ask for it. A column's three-dots menu opens
+  // the same panel with a row for that column already in it.
+  const handleOpenFilters = useCallback(() => {
+    apiRef.current?.showFilterPanel();
+  }, [apiRef]);
+
+  const handleClearFilters = useCallback(() => {
+    setUserFilter(EMPTY_FILTER);
+    apiRef.current?.hideFilterPanel();
+  }, [apiRef]);
+
+  // Items the user has actually finished. A half-built row — a column picked but
+  // no value typed yet — filters nothing, so counting it would put a badge on
+  // the button before anything is hidden. Operators like `isEmpty` declare they
+  // need no value, and those do count.
+  const filterCount = useMemo(
+    () =>
+      userFilter.items.filter((item) => {
+        if (Array.isArray(item.value)) return item.value.length > 0;
+        if (item.value !== undefined && item.value !== "") return true;
+        return NO_VALUE_OPERATORS.has(item.operator);
+      }).length,
+    [userFilter]
+  );
 
   // ── Hotel-wide columns ──
   // Adding one is a single catalog row: no schema change, no backfill, and no
@@ -1250,21 +1378,33 @@ export default function Positions() {
       const queue = queueRef.current;
       if (!currentCatalog || !queue || selectedIds.length === 0) return;
 
-      const targets = new Set(selectedIds);
+      const selected = new Set(selectedIds);
+      let skipped = 0;
+      let changed = 0;
       setRows((current) =>
         current.map((row) => {
-          if (!targets.has(row.id) || row.active === active) return row;
+          if (!selected.has(row.id) || row.active === active) return row;
+          // Activating a position in somebody else's department is still a write
+          // to their department, and it would be rejected at publish as
+          // DEPARTMENT_OUT_OF_SCOPE. Skip it here, where it can be explained.
+          if (!rowWritable(row)) {
+            skipped += 1;
+            return row;
+          }
+          changed += 1;
           queue.enqueuePatch(row.id, { positionFields: { active }, piiFields: {} });
           return { ...row, active };
         })
       );
       setToast(
-        `${targets.size} position${targets.size === 1 ? "" : "s"} marked ${
-          active ? "active" : "inactive"
-        }`
+        skipped > 0
+          ? refusalReason(skipped)
+          : `${changed} position${changed === 1 ? "" : "s"} marked ${
+              active ? "active" : "inactive"
+            }`
       );
     },
-    [selectedIds]
+    [selectedIds, rowWritable, refusalReason]
   );
 
   // ── Blocks: add / edit / delete (with undo) ──
@@ -1491,6 +1631,15 @@ export default function Positions() {
         </Alert>
       )}
 
+      {/* Rows this user can see but not write. The grid tints them; this says
+          who has them and why, which is the half a lock icon cannot carry. */}
+      {gridReady && !planScope.unpublished && (
+        <LockedDepartmentsBanner
+          departments={planScope.lockedDepartments}
+          planLocked={planScope.planLocked}
+        />
+      )}
+
       {/* Structure problems (e.g. blocks referencing each other in a loop)
           pause the block totals; everything else keeps working. */}
       {liveSim.errors && liveSim.errors.length > 0 && (
@@ -1512,6 +1661,7 @@ export default function Positions() {
           showInactive={showInactive}
           selectedCount={selectedIds.length}
           quickFilter={quickFilter}
+          filterCount={filterCount}
           queueState={queueSnapshot.state}
           pendingRows={queueSnapshot.pendingRows}
           onAddPositions={addPositions}
@@ -1522,16 +1672,19 @@ export default function Positions() {
           onBulkActive={handleBulkActive}
           onBulkDuplicate={handleBulkDuplicate}
           onBulkDelete={handleBulkDelete}
-          onCopyFromYear={() => setCopyOpen(true)}
+          onCopyFrom={() => setCopyOpen(true)}
           onQuickFilter={setQuickFilter}
+          onOpenFilters={handleOpenFilters}
+          onClearFilters={handleClearFilters}
           onExportCsv={handleExportCsv}
         />
       </Box>
 
       <Box sx={{ flex: 1, minHeight: 0 }}>
         {/* A scenario with no positions is the January case: the year rolled
-            over and nothing has been carried across yet. Offer the copy rather
-            than an empty grid the user has to work out how to fill. */}
+            over and nothing has been carried across yet — or it is a fresh
+            what-if. Offer the copy rather than an empty grid the user has to
+            work out how to fill. */}
         {gridReady && rows.length === 0 && !loading ? (
           <Alert
             severity="info"
@@ -1542,7 +1695,7 @@ export default function Positions() {
             }
           >
             No positions in {budgetYear} — {scenario?.label}. Copy them from
-            another year instead of entering them again.
+            another year or scenario instead of entering them again.
           </Alert>
         ) : null}
         {gridReady && (
@@ -1567,6 +1720,8 @@ export default function Positions() {
             showInactive={showInactive}
             loading={loading}
             quickFilter={quickFilter}
+            filterModel={userFilter}
+            onFilterModelChange={setUserFilter}
             statusByRow={queueSnapshot.statusByRow}
             restoredState={layoutOverride ?? restoredState}
             apiRef={apiRef}
@@ -1703,6 +1858,8 @@ export default function Positions() {
           currentOu={selectedHotelOu}
           hotelNames={hotelNames}
           masked={masked}
+          writableDepartments={planScope.writableDepartments}
+          planLocked={planScope.planLocked}
           status={queueSnapshot.statusByRow.get(editRowId ?? "")}
           initialFocusField={editFocusField}
           index={editIndex}

@@ -8,7 +8,7 @@
  * closes typing AND paste in one place.
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import CircularProgress from "@mui/material/CircularProgress";
 import Tooltip from "@mui/material/Tooltip";
 import Box from "@mui/material/Box";
@@ -21,18 +21,22 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlined";
+import ViewColumnOutlinedIcon from "@mui/icons-material/ViewColumnOutlined";
 import {
   DataGridPremium,
+  gridVisibleRowsSelector,
   GridColumnMenu,
   GridColumnMenuProps,
   GridActionsCellItem,
   GridCellParams,
   GridColDef,
+  GridFilterModel,
   GridInitialState,
   GridRenderCellParams,
   GridRowClassNameParams,
   GridRowId,
   GridRowSelectionModel,
+  GRID_CHECKBOX_SELECTION_COL_DEF,
   MuiEvent,
   useGridApiRef,
 } from "@mui/x-data-grid-premium";
@@ -81,18 +85,29 @@ export const GROUP_HEADER_HEIGHT = 34;
 
 const NO_GROUPING: string[] = [];
 const DEPT_GROUPING = ["departmentCode"];
-const NO_FILTER_ITEMS: { field: string; operator: string; value: string }[] = [];
-// Inactive positions are hidden rather than removed — they stay in the store,
-// roll forward to next year, and come back with the toggle.
-const ACTIVE_ONLY_ITEMS = [
-  { field: "active", operator: "is", value: "true" },
-];
 const NO_QUICK_FILTER: string[] = [];
 
-function getRowClassName(params: GridRowClassNameParams): string {
-  return (params.row as PositionRow | undefined)?.active === false
-    ? "pos-row--inactive"
-    : "";
+/**
+ * Row classes: retained-but-inactive, and locked.
+ *
+ * `locked` is passed in rather than closed over because this function is called
+ * for every rendered row on every store update — building a new closure per
+ * render would defeat the grid's own memoisation of the prop.
+ */
+function rowClassNameFor(
+  locked: (row: PositionRow) => boolean
+): (params: GridRowClassNameParams) => string {
+  return (params) => {
+    const row = params.row as PositionRow | undefined;
+    if (!row) return "";
+    const classes: string[] = [];
+    if (row.active === false) classes.push("pos-row--inactive");
+    // Somebody else is editing this department. Without a visual cue the only
+    // signal is that double-click quietly does nothing, which reads as a broken
+    // grid rather than as a rule.
+    if (locked(row)) classes.push("pos-row--locked");
+    return classes.join(" ");
+  };
 }
 
 const GRID_SX: SxProps<Theme> = {
@@ -155,6 +170,15 @@ const GRID_SX: SxProps<Theme> = {
   "& .pos-row--inactive": {
     opacity: 0.55,
     fontStyle: "italic",
+  },
+  // Delegated to somebody else, or otherwise not this user's to write. Tinted
+  // rather than faded: these rows are current and correct, they are simply
+  // being maintained by another person, and dimming them would say the opposite.
+  "& .pos-row--locked": {
+    bgcolor: (theme) => alpha(theme.palette.text.disabled, 0.06),
+    "&:hover": {
+      bgcolor: (theme) => alpha(theme.palette.text.disabled, 0.09),
+    },
   },
   "& .pos-cell--masked": {
     fontFamily: "'IBM Plex Mono', monospace",
@@ -265,6 +289,17 @@ export interface PositionsGridProps {
   showInactive: boolean;
   loading: boolean;
   quickFilter: string;
+  /**
+   * The column filters the user built in the filter panel — owned by the page
+   * so they survive the remount an added column forces (see `gridEpoch`).
+   *
+   * This must be paired with `onFilterModelChange`: MUI registers `filter` as
+   * controlled state, and a controlled model with no change handler makes the
+   * prop win over every write the panel attempts — which silently breaks the
+   * whole panel, not just the filters we set ourselves.
+   */
+  filterModel: GridFilterModel;
+  onFilterModelChange: (model: GridFilterModel) => void;
   statusByRow: ReadonlyMap<string, RowSaveStatus>;
   restoredState: GridInitialState | null;
   apiRef: ReturnType<typeof useGridApiRef>;
@@ -316,6 +351,53 @@ function RemoveColumnMenuItem(props: {
   );
 }
 
+/** The gutter columns and MUI's own — status dot, row menu, checkbox, the row-
+ *  grouping column. None of them hold a value, and MUI's own range selection
+ *  refuses them too (hasClickedValidCellForRangeSelection), so neither the
+ *  keyboard shortcuts nor the menu item offer to select them. */
+function isDataColumn(field: string): boolean {
+  return (
+    field !== "_status" &&
+    field !== "_actions" &&
+    field !== GRID_CHECKBOX_SELECTION_COL_DEF.field &&
+    !field.startsWith("__")
+  );
+}
+
+/** "Select column" — the mouse route to what Ctrl+Space does from the keyboard.
+ *  Same prop shape as RemoveColumnMenuItem above: GridColumnMenu supplies
+ *  `colDef` and `hideMenu` to every menu item it renders. */
+function SelectColumnMenuItem(props: {
+  colDef: GridColDef;
+  hideMenu: (event: React.SyntheticEvent) => void;
+  onSelectColumn: (field: string) => void;
+}) {
+  const { colDef, hideMenu, onSelectColumn } = props;
+  if (!isDataColumn(colDef.field)) return null;
+  return (
+    <MenuItem
+      onClick={(event) => {
+        onSelectColumn(colDef.field);
+        hideMenu(event);
+      }}
+    >
+      <ListItemIcon>
+        <ViewColumnOutlinedIcon fontSize="small" />
+      </ListItemIcon>
+      <ListItemText>Select column (Ctrl+Space)</ListItemText>
+    </MenuItem>
+  );
+}
+
+/** Take a keystroke off both MUI and the browser. `defaultMuiPrevented` only
+ *  stops MUI's own handlers — and since MUI is the thing that would normally
+ *  have called preventDefault for an arrow or a space, suppressing it without
+ *  this leaves the virtual scroller free to scroll underneath the shortcut. */
+function claim(event: MuiEvent<React.KeyboardEvent>): void {
+  event.defaultMuiPrevented = true;
+  event.preventDefault();
+}
+
 function partition<T>(items: T[], predicate: (item: T) => boolean): [T[], T[]] {
   const yes: T[] = [];
   const no: T[] = [];
@@ -365,6 +447,8 @@ export default function PositionsGrid({
   showInactive,
   loading,
   quickFilter,
+  filterModel,
+  onFilterModelChange,
   statusByRow,
   restoredState,
   apiRef,
@@ -404,17 +488,113 @@ export default function PositionsGrid({
     [catalog]
   );
 
+  // ── Excel-style column navigation and selection ──
+  //
+  // MUI's keyboard navigation matches on `event.key` alone and never consults
+  // Ctrl, so Ctrl+Down moves one row exactly like Down does; and cellSelection
+  // only ever extends a range by a single cell per Shift+Arrow. Setting a merit
+  // increase down four hundred rows therefore meant four hundred keystrokes or
+  // a mouse drag the length of the plan. The modified arrows are free to claim:
+  // nothing in MUI or in this grid's own shortcuts uses them (Ctrl+C/V, Ctrl+D
+  // fill-down, Ctrl+R fill-right and Ctrl+A select-all-rows all stay put).
+  //
+  // All of it hangs off the onCellKeyDown handler that already exists and one
+  // ref, so the grid gains no listener, no memo and no prop: the cost is a few
+  // comparisons per keydown and nothing whatsoever per render.
+
+  /** Rows in the order the grid shows them, plus the id -> index map. This is
+   *  the very selector `selectCellRange` and `getRowIndexRelativeToVisibleRows`
+   *  read, so indices taken from it always line up; and it is the grid's own
+   *  memo, so reading it recomputes nothing. */
+  const visibleRows = useCallback(() => gridVisibleRowsSelector(apiRef), [apiRef]);
+
+  /** Group headers and the aggregation footer are real entries in that list but
+   *  are not cells anyone means to land on. */
+  const isLeafRow = useCallback(
+    (id: GridRowId) => apiRef.current?.getRowNode(id)?.type === "leaf",
+    [apiRef]
+  );
+
+  /** The first (up) or last (down) row the cursor can occupy. Walks inward from
+   *  the end rather than filtering the list — in practice it stops on the first
+   *  or second entry, so a thousand-row plan costs the same as a ten-row one. */
+  const edgeRowId = useCallback(
+    (direction: 1 | -1): GridRowId | null => {
+      const { rows } = visibleRows();
+      const from = direction === 1 ? rows.length - 1 : 0;
+      for (let i = from; i >= 0 && i < rows.length; i -= direction) {
+        if (isLeafRow(rows[i].id)) return rows[i].id;
+      }
+      return null;
+    },
+    [visibleRows, isLeafRow]
+  );
+
+  /** One row along from `fromId`, skipping group headers, or null at the end. */
+  const stepRowId = useCallback(
+    (fromId: GridRowId, direction: 1 | -1): GridRowId | null => {
+      const { rows, rowIdToIndexMap } = visibleRows();
+      const index = rowIdToIndexMap.get(fromId);
+      if (index === undefined) return null;
+      for (let i = index + direction; i >= 0 && i < rows.length; i += direction) {
+        if (isLeafRow(rows[i].id)) return rows[i].id;
+      }
+      return null;
+    },
+    [visibleRows, isLeafRow]
+  );
+
+  const scrollToRow = useCallback(
+    (id: GridRowId) => {
+      const index = visibleRows().rowIdToIndexMap.get(id);
+      if (index !== undefined) apiRef.current?.scrollToIndexes({ rowIndex: index });
+    },
+    [apiRef, visibleRows]
+  );
+
+  /** Every cell of one column. Shared by Ctrl+Space and the column menu item. */
+  const onSelectColumn = useCallback(
+    (field: string) => {
+      if (!isDataColumn(field)) return;
+      const top = edgeRowId(-1);
+      const bottom = edgeRowId(1);
+      if (top === null || bottom === null) return;
+      apiRef.current?.selectCellRange({ id: top, field }, { id: bottom, field });
+    },
+    [apiRef, edgeRowId]
+  );
+
+  // The moving end of a keyboard-built range. MUI tracks the same thing in a
+  // private ref (`cellWithVirtualFocus`) it never exposes, so the moment we
+  // handle any Shift+Arrow ourselves we have to own the whole vertical family —
+  // otherwise the two refs drift and the Shift+Up after a Ctrl+Shift+Down
+  // collapses the range instead of trimming it by one.
+  //
+  // MUI deliberately leaves DOM focus on the anchor while a range is being
+  // extended, so `params` still reports the anchor on every one of these
+  // keystrokes. That gives the staleness check for free: if params no longer
+  // matches, the user clicked or navigated away and this is a new range.
+  const rangeEnd = useRef<{ anchorId: GridRowId; anchorField: string; endId: GridRowId } | null>(
+    null
+  );
+
   const ColumnMenu = useCallback(
     (menuProps: GridColumnMenuProps) => (
       <GridColumnMenu
         {...menuProps}
-        slots={{ columnMenuUserItem: RemoveColumnMenuItem }}
+        slots={{
+          columnMenuSelectColumnItem: SelectColumnMenuItem,
+          columnMenuUserItem: RemoveColumnMenuItem,
+        }}
+        // MUI's own items claim 10 (Sort), 20 (Filter) and 30 (Columns) — ours
+        // sit between and after rather than colliding with Filter for a slot.
         slotProps={{
-          columnMenuUserItem: { displayOrder: 20, removableKeys, onRemoveField },
+          columnMenuSelectColumnItem: { displayOrder: 15, onSelectColumn },
+          columnMenuUserItem: { displayOrder: 40, removableKeys, onRemoveField },
         }}
       />
     ),
-    [removableKeys, onRemoveField]
+    [removableKeys, onRemoveField, onSelectColumn]
   );
 
   const maskableKeys = useMemo(
@@ -444,6 +624,11 @@ export default function PositionsGrid({
       return code !== "" && writableDepartments.has(code);
     },
     [writableDepartments, planLocked]
+  );
+
+  const getRowClassName = useMemo(
+    () => rowClassNameFor((row) => !rowWritable(row)),
+    [rowWritable]
   );
 
   const columns = useMemo<GridColDef<PositionRow>[]>(() => {
@@ -494,8 +679,9 @@ export default function PositionsGrid({
           <GridActionsCellItem
             key="edit"
             icon={<EditOutlinedIcon fontSize="small" />}
-            label="Edit position (Alt+Enter)"
+            label={writable ? "Edit position (Alt+Enter)" : "Edit position — not yours to edit"}
             onClick={() => onEditRow(params.row)}
+            disabled={!writable}
             showInMenu
           />,
           <GridActionsCellItem
@@ -658,6 +844,71 @@ export default function PositionsGrid({
         onEditRow(params.row as PositionRow, params.field);
         return;
       }
+
+      // ── Column navigation and selection ──
+      // Skipped wholesale inside an open editor (where the arrows belong to the
+      // input) and for Alt chords (Alt+Enter above, Alt+Up/Down in the form).
+      const vertical =
+        event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+      const ctrl = event.ctrlKey || event.metaKey;
+      if (
+        params.cellMode !== "edit" &&
+        !event.altKey &&
+        isDataColumn(params.field) &&
+        (vertical !== 0 || (ctrl && event.key === " "))
+      ) {
+        // Ctrl+Space — the whole column, from anywhere in it. Must be claimed:
+        // MUI counts space as a navigation key, so left alone it page-scrolls
+        // and clears the range.
+        if (vertical === 0) {
+          claim(event);
+          onSelectColumn(params.field);
+          rangeEnd.current = null;
+          return;
+        }
+
+        // Plain Ctrl+Arrow — jump to the far end of the column. Same three
+        // calls MUI makes for an unmodified arrow, only with a different target.
+        if (ctrl && !event.shiftKey) {
+          claim(event);
+          const target = edgeRowId(vertical);
+          if (target === null || target === params.id) return;
+          apiRef.current?.setCellSelectionModel({});
+          apiRef.current?.setCellFocus(target, params.field);
+          scrollToRow(target);
+          rangeEnd.current = null;
+          return;
+        }
+
+        // Shift+Arrow extends the range: to the far end with Ctrl, by one row
+        // without it. The unmodified case reproduces what MUI already does —
+        // taken over only so both directions read the same end from one ref.
+        if (event.shiftKey) {
+          claim(event);
+          const anchorField = params.field;
+          const anchorId = params.id;
+          const state = rangeEnd.current;
+          const from =
+            state && state.anchorId === anchorId && state.anchorField === anchorField
+              ? state.endId
+              : anchorId;
+          const target = ctrl ? edgeRowId(vertical) : stepRowId(from, vertical);
+          // Already against the edge — holding the chord down then costs
+          // nothing rather than rebuilding the same model on every repeat.
+          if (target === null || target === from) return;
+          apiRef.current?.selectCellRange(
+            { id: anchorId, field: anchorField },
+            { id: target, field: anchorField }
+          );
+          scrollToRow(target);
+          rangeEnd.current = { anchorId, anchorField, endId: target };
+          return;
+        }
+
+        // An unmodified arrow moves focus, which starts any next range afresh.
+        rangeEnd.current = null;
+      }
+
       const target = editRedirect.get(params.field);
       if (!target) return;
       // Leave shortcuts (Ctrl/⌘+C to copy the code, etc.) to the grid.
@@ -669,7 +920,63 @@ export default function PositionsGrid({
         openPicker(params.id, target);
       }
     },
-    [editRedirect, openPicker, onEditRow]
+    [
+      editRedirect,
+      openPicker,
+      onEditRow,
+      apiRef,
+      edgeRowId,
+      stepRowId,
+      scrollToRow,
+      onSelectColumn,
+    ]
+  );
+
+  // One copied row fills every row of the pasted-into range.
+  //
+  // MUI already does exactly this — but only in defaultPasteResolver's
+  // row-selection branch ("If only one row is pasted - paste it to all selected
+  // rows"). `cellSelection` sends a dragged range down the earlier cell branch
+  // instead, which indexes pastedData[rowIndex], so copying one row of a
+  // twelve-month family into a four-row range fills the first row and silently
+  // skips the rest. Repeating the row to the height of the range makes the two
+  // branches agree.
+  //
+  // Hooked here rather than on keydown because splitClipboardPastedText is the
+  // one supported seam ahead of the resolver, and it only runs on Ctrl+V —
+  // nothing is added to the render, scroll or typing paths.
+  const splitClipboardPastedText = useCallback(
+    (text: string, delimiter = "\t") => {
+      const rows = text
+        // Excel on Windows appends a trailing newline (MUI's own default does
+        // this too — this callback replaces that default wholesale).
+        .replace(/\r?\n$/, "")
+        .split(/\r\n|\n|\r/)
+        .map((row) => row.split(delimiter));
+      // A single cell already fills a whole range (isSingleValuePasted), and a
+      // genuine multi-row clipboard must keep mapping 1:1 — leave both alone.
+      if (rows.length !== 1 || rows[0].length < 2) return rows;
+      const selected = apiRef.current?.getSelectedCellsAsArray() ?? [];
+      const rowCount = new Set(selected.map((cell) => cell.id)).size;
+      if (rowCount < 2) return rows;
+      // Copies, not the same array n times: the resolver's other branch
+      // consumes rows with pastedData.shift().
+      return Array.from({ length: rowCount }, () => rows[0].slice());
+    },
+    [apiRef]
+  );
+
+  // Inactive positions are hidden rather than removed — they stay in the store,
+  // roll forward to next year, and come back with the toggle.
+  //
+  // Withheld from the grid rather than expressed as a filter item, because the
+  // filter model belongs to the user now: an item here would show up as an
+  // editable "Active is true" row that snaps back when deleted, and switching
+  // the panel's logic operator to OR would OR this rule in and bring the
+  // inactive rows straight back.
+  const gridRows = useMemo(
+    () => (showInactive ? rows : rows.filter((row) => row.active !== false)),
+    [rows, showInactive]
   );
 
   // v9 reports selection as {type, ids}: an "exclude" model means everything
@@ -678,11 +985,11 @@ export default function PositionsGrid({
     (model: GridRowSelectionModel) => {
       const ids =
         model.type === "exclude"
-          ? rows.map((row) => row.id).filter((id) => !model.ids.has(id))
+          ? gridRows.map((row) => row.id).filter((id) => !model.ids.has(id))
           : [...model.ids].map(String);
       onSelectionChange(ids);
     },
-    [rows, onSelectionChange]
+    [gridRows, onSelectionChange]
   );
 
   // Identity matters more than content for all four of these: the grid diffs
@@ -696,12 +1003,17 @@ export default function PositionsGrid({
     [groupByDept]
   );
 
-  const filterModel = useMemo(
+  // Two owners, one model: the toolbar's search box owns quickFilterValues, the
+  // filter panel owns items. Merged behind a memo so the grid still sees a
+  // stable reference (see the stable-prop note above); the search box stays the
+  // source of truth for its half either way, since this re-applies it over
+  // whatever the panel last sent up.
+  const gridFilterModel = useMemo(
     () => ({
-      items: showInactive ? NO_FILTER_ITEMS : ACTIVE_ONLY_ITEMS,
+      ...filterModel,
       quickFilterValues: quickFilter ? quickFilter.split(/\s+/) : NO_QUICK_FILTER,
     }),
-    [showInactive, quickFilter]
+    [filterModel, quickFilter]
   );
 
   const initialState = useMemo<GridInitialState>(() => {
@@ -746,7 +1058,7 @@ export default function PositionsGrid({
   return (
     <DataGridPremium
       apiRef={apiRef}
-      rows={rows}
+      rows={gridRows}
       columns={columns}
       loading={loading}
       columnGroupingModel={columnGroupingModel}
@@ -772,9 +1084,13 @@ export default function PositionsGrid({
       onProcessRowUpdateError={onRowUpdateError}
       onClipboardPasteStart={onPasteStart}
       onClipboardPasteEnd={onPasteEnd}
+      splitClipboardPastedText={splitClipboardPastedText}
       initialState={initialState}
       getRowClassName={getRowClassName}
-      filterModel={filterModel}
+      filterModel={gridFilterModel}
+      // Non-negotiable while filterModel is passed: without it MUI treats the
+      // model as controlled-with-no-owner and drops every write the panel makes.
+      onFilterModelChange={onFilterModelChange}
       sx={GRID_SX}
     />
   );

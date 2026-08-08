@@ -16,12 +16,25 @@
  *
  * ## Review, then apply
  *
- * Both directions preview first. A pull can overwrite unpublished local work and
- * a publish can carry a deletion nobody meant; neither is undone by pressing the
- * button again.
+ * Every direction previews first — publish, pull, and the hotel setup document.
+ * A pull can overwrite unpublished local work and a publish can carry a deletion
+ * nobody meant; neither is undone by pressing the button again.
+ *
+ * ## Attention first
+ *
+ * A hotel with eight scenarios used to get eight identical full-height cards.
+ * Plans that need nothing are collapsed to a line and sorted below the ones that
+ * do, so the page answers "what needs me?" before it answers "what exists?".
+ *
+ * ## Support tools
+ *
+ * Administrator controls appear only when the Settings switch is on and the
+ * server has confirmed the account. They are per-plan and live in an overflow
+ * menu — acting on a plan you are not looking at is how the wrong hotel gets
+ * locked.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
@@ -31,20 +44,35 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogContentText from "@mui/material/DialogContentText";
+import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
 import LinearProgress from "@mui/material/LinearProgress";
 import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import CloudSyncOutlinedIcon from "@mui/icons-material/CloudSyncOutlined";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useSelectedHotel } from "../../store/settings";
+import authService from "../../services/auth";
 import {
+  acquireLease as acquireLeaseCall,
+  adminBundle as adminBundleCall,
+  delegationCandidates as candidatesCall,
+  deletePlan as deletePlanCall,
+  extendLease as extendLeaseCall,
+  lease as leaseCall,
+  patchPlan as patchPlanCall,
   previewPublish as previewPublishCall,
   previewPull as previewPullCall,
   probe as probeCall,
   publish as publishCall,
+  publishOverServer as publishOverServerCall,
   pull as pullCall,
   previewStructure as previewStructureCall,
   pullStructure as pullStructureCall,
@@ -52,7 +80,9 @@ import {
   reconcile as reconcileCall,
   registerPlan as registerPlanCall,
   rebuildShadow as rebuildShadowCall,
+  releaseLease as releaseLeaseCall,
   syncStatus,
+  transferPlan as transferPlanCall,
 } from "../../services/kairosSyncService";
 import {
   PlanSyncStatus,
@@ -60,12 +90,39 @@ import {
   SyncStatusResponse,
   syncFailed,
 } from "../../shared/kairosSync/ipc";
-import PlanSyncCard from "../../components/sync/PlanSyncCard";
+import {
+  DelegationCandidate,
+  Lease,
+  LeaseCreate,
+} from "../../shared/kairosSync/protocol";
+import { planState } from "../../shared/kairosSync/planState";
+import { useAdminTools } from "../../hooks/useAdminTools";
+import PlanSyncCard, { PlanAdminActions } from "../../components/sync/PlanSyncCard";
 import PublishResultAlert from "../../components/sync/PublishResultAlert";
 import ReviewDialog from "../../components/sync/ReviewDialog";
+import LeaseBanner from "../../components/sync/LeaseBanner";
+import ClaimPlanDialog from "../../components/sync/ClaimPlanDialog";
+import {
+  AcquireLeaseDialog,
+  ReleaseLeaseDialog,
+} from "../../components/sync/LeaseDialog";
+import ScopeTraceDialog from "../../components/sync/ScopeTraceDialog";
+import TransferOwnershipDialog from "../../components/sync/TransferOwnershipDialog";
 
 /** Idle probe interval. Matches the cadence table in the API guide (§3.5). */
 const PROBE_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Plain-English names for the hotel-setup document's sections. */
+const STRUCTURE_LABELS: Record<string, string> = {
+  fieldCatalog: "Columns",
+  blockConfigs: "Blocks",
+  componentDefs: "Block components",
+  ssSchemes: "Social security schemes",
+  allocations: "Allocations",
+  kpiDrivers: "KPI drivers",
+  calendars: "Calendar",
+  positionDefaults: "Defaults for new positions",
+};
 
 type Toast = { severity: "success" | "error" | "info" | "warning"; message: string } | null;
 
@@ -88,11 +145,31 @@ interface PublishReview {
   unclassified: number;
 }
 
+interface StructureReview {
+  byType: Record<string, number>;
+  removedByType: Record<string, number>;
+  total: number;
+  removed: number;
+}
+
+/** Which per-plan dialog is open, and for which plan. */
+type PlanDialog =
+  | { kind: "acquireLease"; plan: PlanSyncStatus }
+  | { kind: "releaseLease"; plan: PlanSyncStatus }
+  | { kind: "transfer"; plan: PlanSyncStatus }
+  | { kind: "export"; plan: PlanSyncStatus }
+  | { kind: "delete"; plan: PlanSyncStatus }
+  | { kind: "scope"; plan: PlanSyncStatus }
+  | { kind: "claim"; plan: PlanSyncStatus }
+  | null;
+
 export default function Sync() {
   const ou = useSelectedHotel();
   const navigate = useNavigate();
+  const adminTools = useAdminTools();
 
   const [status, setStatus] = useState<SyncStatusResponse | null>(null);
+  const [leases, setLeases] = useState<Record<string, Lease | null>>({});
   const [loading, setLoading] = useState(false);
   const [busyPlan, setBusyPlan] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +178,31 @@ export default function Sync() {
   const [pullReview, setPullReview] = useState<PullReview | null>(null);
   const [publishReview, setPublishReview] = useState<PublishReview | null>(null);
   const [publishResult, setPublishResult] = useState<PublishResponse | null>(null);
-  const [structureChanges, setStructureChanges] = useState<number | null>(null);
+  const [structureReview, setStructureReview] = useState<StructureReview | null>(null);
+
+  const [dialog, setDialog] = useState<PlanDialog>(null);
+  const [candidates, setCandidates] = useState<DelegationCandidate[]>([]);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [transferIneligible, setTransferIneligible] =
+    useState<Record<string, unknown> | null>(null);
+  const [exportReason, setExportReason] = useState("");
+  /**
+   * The signed-in user's own id, for the scope debugger.
+   *
+   * The question that button asks is "why does the server give ME this
+   * relation", and `/admin/users/{id}/scope` is keyed by user. This client has
+   * no `/me` on the sync surface, so it comes from the auth service — which is
+   * also the only place the renderer learns anything about who is signed in.
+   */
+  const [myUserId, setMyUserId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!adminTools.visible || myUserId !== null) return;
+    void authService
+      .getCurrentUser()
+      .then((user) => setMyUserId(user.id))
+      .catch(() => setMyUserId(null));
+  }, [adminTools.visible, myUserId]);
 
   // Guards the probe timer against a component that has unmounted mid-flight.
   const alive = useRef(true);
@@ -132,6 +233,35 @@ export default function Sync() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /**
+   * Leases, for the published plans only.
+   *
+   * Read by the hotel and not only by support: an owner whose publish came back
+   * 423 needs the holder and the reference, or the failure is inexplicable and
+   * the obvious response is to keep pressing the button. One call per published
+   * plan, on a page that already has the plan list — not on any timer.
+   */
+  useEffect(() => {
+    if (!ou || !status) return;
+    const published = status.plans.filter((plan) => plan.published);
+    if (published.length === 0) return;
+
+    let cancelled = false;
+    void Promise.all(
+      published.map(async (plan) => {
+        const result = await leaseCall(ou, plan.planId);
+        return [plan.planId, syncFailed(result) ? null : result.data?.lease ?? null] as const;
+      })
+    ).then((entries) => {
+      if (cancelled) return;
+      setLeases(Object.fromEntries(entries));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ou, status]);
 
   /**
    * The probe: on mount, on focus, and every five minutes.
@@ -174,27 +304,11 @@ export default function Sync() {
     []
   );
 
-  const handleRegister = useCallback(
-    async (plan: PlanSyncStatus) => {
-      if (!ou) return;
-      await run(plan.planId, async () => {
-        const created = await registerPlanCall(ou, plan.planId);
-        if (syncFailed(created)) {
-          setToast({ severity: "error", message: created.error.message });
-          return;
-        }
-        // Registering only creates the plan row; the data still has to go up.
-        const published = await publishCall(ou, plan.planId);
-        if (syncFailed(published)) {
-          setToast({ severity: "error", message: published.error.message });
-          return;
-        }
-        setPublishResult(published.data);
-        await refresh();
-      });
-    },
-    [ou, refresh, run]
-  );
+  const fail = useCallback((message: string) => {
+    setToast({ severity: "error", message });
+  }, []);
+
+  // ------------------------------------------------------------- pull
 
   const handlePreviewPull = useCallback(
     async (plan: PlanSyncStatus) => {
@@ -202,7 +316,7 @@ export default function Sync() {
       await run(plan.planId, async () => {
         const result = await previewPullCall(ou, plan.planId);
         if (syncFailed(result)) {
-          setToast({ severity: "error", message: result.error.message });
+          fail(result.error.message);
           return;
         }
         setPullReview({
@@ -216,7 +330,7 @@ export default function Sync() {
         });
       });
     },
-    [ou, run]
+    [ou, run, fail]
   );
 
   const handleConfirmPull = useCallback(async () => {
@@ -224,17 +338,16 @@ export default function Sync() {
     await run(pullReview.planId, async () => {
       const result = await pullCall(ou, pullReview.planId);
       if (syncFailed(result)) {
-        setToast({ severity: "error", message: result.error.message });
+        fail(result.error.message);
         return;
       }
       setPullReview(null);
-      setToast({
-        severity: "success",
-        message: `Downloaded ${result.data.total} rows.`,
-      });
+      setToast({ severity: "success", message: `Downloaded ${result.data.total} rows.` });
       await refresh();
     });
-  }, [ou, pullReview, refresh, run]);
+  }, [ou, pullReview, refresh, run, fail]);
+
+  // ---------------------------------------------------------- publish
 
   const handlePreviewPublish = useCallback(
     async (plan: PlanSyncStatus) => {
@@ -242,7 +355,7 @@ export default function Sync() {
       await run(plan.planId, async () => {
         const result = await previewPublishCall(ou, plan.planId);
         if (syncFailed(result)) {
-          setToast({ severity: "error", message: result.error.message });
+          fail(result.error.message);
           return;
         }
         setPublishReview({
@@ -255,7 +368,37 @@ export default function Sync() {
         });
       });
     },
-    [ou, run]
+    [ou, run, fail]
+  );
+
+  /**
+   * Register the plan, then review the first publish like any other.
+   *
+   * It used to register and publish in one unattended step. That hid the two
+   * things a first publish most needs to say — how many rows are actually going,
+   * and how many are being withheld because of the caller's scope — behind a
+   * six-second toast. A first publish is the largest and least reversible one a
+   * plan ever has; it gets the same confirmation as the rest.
+   *
+   * `refresh()` runs whatever happened, including on failure: registering may
+   * well have succeeded and only the publish failed, and the card must not keep
+   * offering to register a plan the server already has.
+   */
+  const handleRegister = useCallback(
+    async (plan: PlanSyncStatus) => {
+      if (!ou) return;
+      await run(plan.planId, async () => {
+        const created = await registerPlanCall(ou, plan.planId);
+        await refresh();
+        if (syncFailed(created)) {
+          fail(created.error.message);
+          return;
+        }
+        // Registering only creates the plan row; the data still has to go up.
+        await handlePreviewPublish(plan);
+      });
+    },
+    [ou, refresh, run, fail, handlePreviewPublish]
   );
 
   const handleConfirmPublish = useCallback(async () => {
@@ -276,13 +419,38 @@ export default function Sync() {
     });
   }, [ou, publishReview, refresh, run]);
 
+  /**
+   * "Keep mine" from the claim dialog.
+   *
+   * Publishes over the server's copy by adopting its hashes first, which is the
+   * protocol's own two-step overwrite. Offered only as one of two named choices
+   * — never as a fallback when an ordinary publish conflicts, because that would
+   * turn an accident into a policy.
+   */
+  const handleKeepMine = useCallback(async () => {
+    if (!ou || dialog?.kind !== "claim") return;
+    const plan = dialog.plan;
+    await run(plan.planId, async () => {
+      const result = await publishOverServerCall(ou, plan.planId);
+      if (syncFailed(result)) {
+        fail(result.error.message);
+        return;
+      }
+      setDialog(null);
+      setPublishResult(result.data);
+      await refresh();
+    });
+  }, [ou, dialog, refresh, run, fail]);
+
+  // -------------------------------------------------------- recovery
+
   const handleReconcile = useCallback(
     async (plan: PlanSyncStatus) => {
       if (!ou) return;
       await run(plan.planId, async () => {
         const result = await reconcileCall(ou, plan.planId);
         if (syncFailed(result)) {
-          setToast({ severity: "error", message: result.error.message });
+          fail(result.error.message);
           return;
         }
         const { matched, needed, toPull, toPurge, suggestFullPull } = result.data;
@@ -297,7 +465,7 @@ export default function Sync() {
         await refresh();
       });
     },
-    [ou, refresh, run]
+    [ou, refresh, run, fail]
   );
 
   const handleRebuildShadow = useCallback(
@@ -319,18 +487,41 @@ export default function Sync() {
     [ou, refresh, run]
   );
 
+  // ------------------------------------------------------- structure
+
+  /**
+   * Preview the hotel setup before applying it.
+   *
+   * This used to apply straight away, unlike a plan pull, even though it can
+   * replace the columns and blocks every scenario at the property renders
+   * through. The diff already came back from the preview call; it just was not
+   * being shown.
+   */
   const handleStructurePreview = useCallback(async () => {
     if (!ou) return;
     const result = await previewStructureCall(ou);
     if (syncFailed(result)) {
-      setToast({ severity: "error", message: result.error.message });
+      fail(result.error.message);
       return;
     }
-    setStructureChanges(result.data.changes.length);
-    if (result.data.changes.length === 0) {
+    const changes = result.data.changes;
+    if (changes.length === 0) {
       setToast({ severity: "success", message: "Your setup matches the server." });
+      return;
     }
-  }, [ou]);
+    const byType: Record<string, number> = {};
+    const removedByType: Record<string, number> = {};
+    for (const change of changes) {
+      const bucket = change.kind === "removed" ? removedByType : byType;
+      bucket[change.section] = (bucket[change.section] ?? 0) + 1;
+    }
+    setStructureReview({
+      byType,
+      removedByType,
+      total: changes.length,
+      removed: changes.filter((change) => change.kind === "removed").length,
+    });
+  }, [ou, fail]);
 
   const handleStructurePull = useCallback(async () => {
     if (!ou) return;
@@ -343,7 +534,7 @@ export default function Sync() {
             message: `Applied ${result.data.changes.length} setup changes.`,
           }
     );
-    setStructureChanges(null);
+    setStructureReview(null);
     await refresh();
   }, [ou, refresh]);
 
@@ -364,6 +555,191 @@ export default function Sync() {
     await refresh();
   }, [ou, status, refresh]);
 
+  // -------------------------------------------------- transfer & admin
+
+  const searchCandidates = useCallback(
+    async (query: string, planId: string) => {
+      if (!ou) return;
+      setCandidatesLoading(true);
+      const result = await candidatesCall(ou, planId, query || undefined);
+      if (!syncFailed(result)) setCandidates(result.data.candidates);
+      setCandidatesLoading(false);
+    },
+    [ou]
+  );
+
+  useEffect(() => {
+    if (dialog?.kind === "transfer") void searchCandidates("", dialog.plan.planId);
+  }, [dialog, searchCandidates]);
+
+  const handleTransfer = useCallback(
+    async (newOwnerUserId: number, reason: string) => {
+      if (!ou || dialog?.kind !== "transfer") return;
+      const plan = dialog.plan;
+      await run(plan.planId, async () => {
+        const result = await transferPlanCall(ou, plan.planId, newOwnerUserId, reason);
+        if (syncFailed(result)) {
+          // The eligibility refusal carries the list of conditions the successor
+          // fails. Keep the dialog open and render it, rather than reducing it
+          // to a toast that says "no".
+          if (result.error.code === "kairos_owner_not_eligible") {
+            setTransferIneligible(result.error.context ?? {});
+            return;
+          }
+          fail(result.error.message);
+          return;
+        }
+        setDialog(null);
+        setTransferIneligible(null);
+        setToast({ severity: "success", message: "Ownership transferred." });
+        await refresh();
+      });
+    },
+    [ou, dialog, refresh, run, fail]
+  );
+
+  const handleAcquireLease = useCallback(
+    async (request: LeaseCreate) => {
+      if (!ou || dialog?.kind !== "acquireLease") return;
+      const plan = dialog.plan;
+      await run(plan.planId, async () => {
+        const result = await acquireLeaseCall(ou, plan.planId, request);
+        if (syncFailed(result)) {
+          fail(result.error.message);
+          return;
+        }
+        setDialog(null);
+        setLeases((current) => ({ ...current, [plan.planId]: result.data.lease }));
+        setToast({
+          severity: request.mode === "EXCLUSIVE" ? "warning" : "info",
+          message:
+            request.mode === "EXCLUSIVE"
+              ? "Lease taken. The hotel cannot edit this plan until you release it."
+              : "Read-only lease taken. Nobody else is affected.",
+        });
+        await refresh();
+      });
+    },
+    [ou, dialog, refresh, run, fail]
+  );
+
+  const handleExtendLease = useCallback(
+    async (plan: PlanSyncStatus) => {
+      if (!ou) return;
+      await run(plan.planId, async () => {
+        const result = await extendLeaseCall(ou, plan.planId, 60);
+        if (syncFailed(result)) {
+          fail(result.error.message);
+          return;
+        }
+        setLeases((current) => ({ ...current, [plan.planId]: result.data.lease }));
+        setToast({ severity: "success", message: "Extended by 60 minutes." });
+      });
+    },
+    [ou, run, fail]
+  );
+
+  const handleReleaseLease = useCallback(
+    async (summary: string) => {
+      if (!ou || dialog?.kind !== "releaseLease") return;
+      const plan = dialog.plan;
+      await run(plan.planId, async () => {
+        const result = await releaseLeaseCall(ou, plan.planId, summary);
+        if (syncFailed(result)) {
+          fail(result.error.message);
+          return;
+        }
+        setDialog(null);
+        setLeases((current) => ({ ...current, [plan.planId]: null }));
+        const moved = result.data.version - result.data.versionAtAcquire;
+        setToast({
+          severity: "success",
+          message:
+            moved > 0
+              ? `Released. The plan moved ${result.data.versionAtAcquire} → ${result.data.version}; everyone will re-download it.`
+              : "Released. Nothing changed while you held it, so nobody has to re-download.",
+        });
+        await refresh();
+      });
+    },
+    [ou, dialog, refresh, run, fail]
+  );
+
+  const handleArchive = useCallback(
+    async (plan: PlanSyncStatus) => {
+      if (!ou) return;
+      await run(plan.planId, async () => {
+        const result = await patchPlanCall(ou, plan.planId, { state: "ARCHIVED" });
+        setToast(
+          syncFailed(result)
+            ? { severity: "error", message: result.error.message }
+            : { severity: "success", message: "Plan archived." }
+        );
+        await refresh();
+      });
+    },
+    [ou, refresh, run]
+  );
+
+  const handleDelete = useCallback(async () => {
+    if (!ou || dialog?.kind !== "delete") return;
+    const plan = dialog.plan;
+    await run(plan.planId, async () => {
+      const result = await deletePlanCall(ou, plan.planId);
+      setDialog(null);
+      setToast(
+        syncFailed(result)
+          ? { severity: "error", message: result.error.message }
+          : {
+              severity: "success",
+              message: "Deleted from the server. The rows survive there and support can restore it.",
+            }
+      );
+      await refresh();
+    });
+  }, [ou, dialog, refresh, run]);
+
+  const handleExport = useCallback(async () => {
+    if (dialog?.kind !== "export") return;
+    const plan = dialog.plan;
+    await run(plan.planId, async () => {
+      const result = await adminBundleCall({
+        planId: plan.planId,
+        pii: "pseudonymize",
+        reason: exportReason.trim(),
+      });
+      setDialog(null);
+      setExportReason("");
+      setToast(
+        syncFailed(result)
+          ? { severity: "error", message: result.error.message }
+          : { severity: "success", message: `Saved to ${result.data.savedTo}` }
+      );
+    });
+  }, [dialog, exportReason, run]);
+
+  // ----------------------------------------------------------- render
+
+  /**
+   * Attention first, then by year.
+   *
+   * A plan that needs nothing is still listed — people look for the one they
+   * expect — but it does not get the same weight as one with unpublished work
+   * or a support lease on it.
+   */
+  const orderedPlans = useMemo(() => {
+    const plans = status?.plans ?? [];
+    return [...plans].sort((left, right) => {
+      const leftState = planState(left, leases[left.planId]);
+      const rightState = planState(right, leases[right.planId]);
+      if (leftState.needsAttention !== rightState.needsAttention) {
+        return leftState.needsAttention ? -1 : 1;
+      }
+      if (left.year !== right.year) return right.year - left.year;
+      return left.label.localeCompare(right.label);
+    });
+  }, [status, leases]);
+
   if (!ou) {
     return (
       <Box sx={{ p: 3 }}>
@@ -375,6 +751,20 @@ export default function Sync() {
   const anyOwner = status?.plans.some(
     (plan) => plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE"
   );
+  const attentionCount = orderedPlans.filter(
+    (plan) => planState(plan, leases[plan.planId]).needsAttention
+  ).length;
+
+  const adminActionsFor = (plan: PlanSyncStatus): PlanAdminActions => ({
+    onTakeLease: () => setDialog({ kind: "acquireLease", plan }),
+    onExtendLease: (): void => void handleExtendLease(plan),
+    onReleaseLease: () => setDialog({ kind: "releaseLease", plan }),
+    onTransfer: () => setDialog({ kind: "transfer", plan }),
+    onArchive: (): void => void handleArchive(plan),
+    onDelete: () => setDialog({ kind: "delete", plan }),
+    onExport: () => setDialog({ kind: "export", plan }),
+    onWhy: () => setDialog({ kind: "scope", plan }),
+  });
 
   return (
     <Box sx={{ p: 3 }}>
@@ -383,7 +773,16 @@ export default function Sync() {
         <Typography variant="h4" sx={{ fontWeight: 600, flexGrow: 1 }}>
           Sync
         </Typography>
-        {status?.upToDate && <Chip size="small" label="Up to date" color="success" />}
+        {status && attentionCount === 0 && status.upToDate && (
+          <Chip size="small" label="Up to date" color="success" />
+        )}
+        {attentionCount > 0 && (
+          <Chip
+            size="small"
+            color="warning"
+            label={`${attentionCount} ${attentionCount === 1 ? "plan needs" : "plans need"} attention`}
+          />
+        )}
         <Tooltip title="Check the server now">
           <span>
             <Button startIcon={<RefreshIcon />} onClick={() => void refresh()} disabled={loading}>
@@ -403,6 +802,13 @@ export default function Sync() {
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
+        </Alert>
+      )}
+
+      {adminTools.visible && (
+        <Alert severity="warning" variant="outlined" sx={{ mb: 2 }}>
+          Support tools are on. Every plan below has an administrator menu, and
+          the actions in it are recorded against your account.
         </Alert>
       )}
 
@@ -431,15 +837,20 @@ export default function Sync() {
         </Alert>
       )}
 
-      {status?.plans.map((plan) => (
+      {orderedPlans.map((plan) => (
         <PlanSyncCard
           key={plan.planId}
           plan={plan}
           busy={busyPlan === plan.planId}
+          lease={leases[plan.planId]}
+          adminTools={adminTools.visible}
+          admin={adminActionsFor(plan)}
           onRegister={() => void handleRegister(plan)}
           onPreviewPublish={() => void handlePreviewPublish(plan)}
           onPreviewPull={() => void handlePreviewPull(plan)}
+          onResolveDivergence={() => setDialog({ kind: "claim", plan })}
           onOpenDelegation={() => navigate(`/signed-in-landing/delegation?plan=${plan.planId}`)}
+          onTransfer={() => setDialog({ kind: "transfer", plan })}
         >
           {plan.revoked && (
             // The one deliberate break in denial opacity, and the reason it
@@ -453,6 +864,16 @@ export default function Sync() {
               work is still here and is not lost, but it cannot be published
               unless they delegate to you again.
             </Alert>
+          )}
+
+          {leases[plan.planId] && (
+            <LeaseBanner
+              lease={leases[plan.planId] as Lease}
+              mine={plan.relation === "ADMIN_LEASE"}
+              busy={busyPlan === plan.planId}
+              onExtend={() => void handleExtendLease(plan)}
+              onRelease={() => setDialog({ kind: "releaseLease", plan })}
+            />
           )}
 
           {plan.published && (
@@ -482,21 +903,9 @@ export default function Sync() {
               hotel, used by every scenario.
             </Typography>
 
-            {structureChanges !== null && structureChanges > 0 && (
-              <Alert severity="info" sx={{ mb: 2 }}>
-                {structureChanges} {structureChanges === 1 ? "change" : "changes"} to
-                apply. Nothing you have added locally will be removed.
-              </Alert>
-            )}
-
             <Divider sx={{ mb: 2 }} />
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-              <Button onClick={() => void handleStructurePreview()}>
-                Check for changes
-              </Button>
-              <Button onClick={() => void handleStructurePull()}>
-                Download setup
-              </Button>
+              <Button onClick={() => void handleStructurePreview()}>Check for changes</Button>
               {anyOwner && (
                 <Button variant="outlined" onClick={() => void handleStructurePush()}>
                   Publish setup
@@ -535,6 +944,142 @@ export default function Sync() {
         onConfirm={() => void handleConfirmPublish()}
         onClose={() => setPublishReview(null)}
       />
+
+      <ReviewDialog
+        open={structureReview !== null}
+        title="Download hotel setup"
+        direction="pull"
+        busy={false}
+        labels={STRUCTURE_LABELS}
+        byType={structureReview?.byType ?? {}}
+        deletedByType={structureReview?.removedByType ?? {}}
+        total={structureReview?.total ?? 0}
+        deleted={structureReview?.removed ?? 0}
+        onConfirm={() => void handleStructurePull()}
+        onClose={() => setStructureReview(null)}
+      />
+
+      <ClaimPlanDialog
+        open={dialog?.kind === "claim"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        localChanges={dialog?.plan.pendingChanges ?? 0}
+        serverChanges={
+          dialog ? Math.max(0, dialog.plan.serverVersion - dialog.plan.watermark) : 0
+        }
+        onTakeServer={() => {
+          const plan = dialog?.kind === "claim" ? dialog.plan : null;
+          setDialog(null);
+          if (plan) void handlePreviewPull(plan);
+        }}
+        onKeepMine={() => void handleKeepMine()}
+        onClose={() => setDialog(null)}
+      />
+
+      <AcquireLeaseDialog
+        open={dialog?.kind === "acquireLease"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        onSubmit={(request) => void handleAcquireLease(request)}
+        onClose={() => setDialog(null)}
+      />
+
+      <ReleaseLeaseDialog
+        open={dialog?.kind === "releaseLease"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        onSubmit={(summary) => void handleReleaseLease(summary)}
+        onClose={() => setDialog(null)}
+      />
+
+      <TransferOwnershipDialog
+        open={dialog?.kind === "transfer"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        candidates={candidates}
+        candidatesLoading={candidatesLoading}
+        ineligible={transferIneligible}
+        onSearch={(query) =>
+          dialog?.kind === "transfer" && void searchCandidates(query, dialog.plan.planId)
+        }
+        onSubmit={(userId, reason) => void handleTransfer(userId, reason)}
+        onClose={() => {
+          setDialog(null);
+          setTransferIneligible(null);
+        }}
+      />
+
+      <ScopeTraceDialog
+        open={dialog?.kind === "scope"}
+        userId={myUserId}
+        planId={dialog?.plan.planId ?? null}
+        onClose={() => setDialog(null)}
+      />
+
+      <Dialog
+        open={dialog?.kind === "export"}
+        onClose={() => setDialog(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Export a repro bundle</DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 2 }}>
+            Saves the whole of <strong>{dialog?.plan.label}</strong> to your
+            Downloads folder as a compressed file. Employee details are
+            pseudonymised.
+          </DialogContentText>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Recorded against your account with the reason below, visible to every
+            administrator, and limited to twenty exports a day across the estate.
+          </Alert>
+          <TextField
+            fullWidth
+            required
+            label="Reason"
+            value={exportReason}
+            onChange={(event) => setExportReason(event.target.value)}
+            helperText="A ticket reference or a sentence. This is the answer when the export is queried later."
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDialog(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="warning"
+            disabled={exportReason.trim().length < 3 || busyPlan !== null}
+            onClick={() => void handleExport()}
+          >
+            Export
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={dialog?.kind === "delete"} onClose={() => setDialog(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete this plan from the server?</DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 2 }}>
+            <strong>{dialog?.plan.label}</strong> will stop being listed and
+            nobody will be able to pull it. The copy on each person&rsquo;s own
+            machine is untouched.
+          </DialogContentText>
+          <Alert severity="warning">
+            The rows are kept server-side, so support can restore this — but
+            anybody working on it will lose the ability to publish until it is.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDialog(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="error"
+            disabled={busyPlan !== null}
+            onClick={() => void handleDelete()}
+          >
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={toast !== null}

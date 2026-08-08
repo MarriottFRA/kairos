@@ -15,7 +15,7 @@
 import type Database from "better-sqlite3-multiple-ciphers";
 import { KairosClient, query } from "./client";
 import { SyncHeads, PlanHead, CommitLimits } from "../../shared/kairosSync/protocol";
-import { ensureSyncState, getSyncState, updateSyncState } from "./repo";
+import { ensureSyncState, getOuState, getSyncState, putOuHeads, updateSyncState } from "./repo";
 
 type Db = InstanceType<typeof Database>;
 
@@ -34,8 +34,17 @@ export const FALLBACK_LIMITS: CommitLimits = {
 };
 
 export interface HeadsResult {
-  /** null when the server answered 304 — nothing at this property has moved. */
+  /**
+   * The current heads for the property — from the network on a 200, from the
+   * store on a 304. Null only when we have genuinely never had a 200 here.
+   *
+   * It is deliberately NOT null on a 304. A 304 means "what you already hold is
+   * still correct", and a caller handed null instead reads it as "this property
+   * has no plans", which is the opposite answer.
+   */
   heads: SyncHeads | null;
+  /** True when the server answered 304 — nothing at this property has moved. */
+  notModified: boolean;
   etag: string | null;
   /** Plans whose `version` is ahead of our watermark, or whose epoch moved. */
   stalePlans: PlanHead[];
@@ -46,9 +55,11 @@ export interface HeadsResult {
 /**
  * Probe the property, and work out what actually needs pulling.
  *
- * The ETag is stored per-OU rather than per-plan, on the state row of any plan
- * at that property — `heads` is one answer about the whole hotel. It is kept on
- * every row so a plan that is later removed does not orphan the ETag.
+ * ETag and body are both stored, per-OU, because `heads` is one answer about a
+ * whole hotel. Storing only the ETag is the bug this shape exists to prevent:
+ * every sync after the first answers 304, and a client with no body then
+ * believes nothing is published — offering to register plans that already
+ * exist and publishing them at `baseVersion: 0`.
  *
  * Note the server folds the caller's authorisation digest into the ETag, so a
  * changed grant invalidates it even when no data moved. A 200 where a 304 was
@@ -59,19 +70,27 @@ export async function fetchHeads(
   client: KairosClient,
   ou: string
 ): Promise<HeadsResult> {
-  const etag = readOuEtag(db, ou);
+  const cached = getOuState(db, ou);
   const response = await client.getConditional<SyncHeads>(
     `/sync/heads${query({ ou })}`,
-    etag
+    cached?.headsEtag ?? null
   );
 
   if (response.status === 304) {
-    return { heads: null, etag: response.etag, stalePlans: [], epochMoved: false };
+    return {
+      heads: readCachedHeads(cached?.headsJson ?? null),
+      notModified: true,
+      etag: cached?.headsEtag ?? response.etag,
+      stalePlans: [],
+      epochMoved: false,
+    };
   }
 
   const heads = response.body;
   const stalePlans: PlanHead[] = [];
   let epochMoved = false;
+
+  putOuHeads(db, ou, response.etag, JSON.stringify(heads), new Date().toISOString());
 
   for (const plan of heads.plans) {
     ensureSyncState(db, plan.id, ou);
@@ -88,28 +107,24 @@ export async function fetchHeads(
       relation: plan.relation,
       scopeKind: plan.scopeKind,
       scopeDepartments: plan.departments,
-      headsEtag: response.etag,
     });
   }
 
-  return { heads, etag: response.etag, stalePlans, epochMoved };
+  return { heads, notModified: false, etag: response.etag, stalePlans, epochMoved };
 }
 
 /**
- * The stored `heads` ETag for a property.
- *
- * Every plan row at the OU holds the same value, so any one of them answers.
- * Taking the first means a property with no plans yet simply has no ETag, which
- * is correct — there is nothing to revalidate against.
+ * A stored body is a cache, so a corrupt one is a cache miss and not a crash.
+ * Returning null here degrades to "we have never had a 200", which every caller
+ * already handles.
  */
-function readOuEtag(db: Db, ou: string): string | null {
-  const row = db
-    .prepare(
-      `SELECT heads_etag FROM kairos_sync_state
-        WHERE ou = ? AND heads_etag IS NOT NULL LIMIT 1`
-    )
-    .get(ou) as { heads_etag?: string } | undefined;
-  return row?.heads_etag ?? null;
+function readCachedHeads(json: string | null): SyncHeads | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as SyncHeads;
+  } catch {
+    return null;
+  }
 }
 
 /** The limits to chunk against: the server's if we have them, else the fallback. */

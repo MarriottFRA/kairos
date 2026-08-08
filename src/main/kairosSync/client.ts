@@ -97,6 +97,12 @@ export const KAIROS_ERRORS = {
   UPLOAD_EXPIRED: "kairos_upload_expired",
   REQUIRES_ADMIN_LEASE: "kairos_requires_admin_lease",
   REQUEST_TOO_LARGE: "request_too_large",
+  /**
+   * Client-side only: this caller's write scope is empty, so a publish would
+   * send nothing. Raised before the request rather than after, because a
+   * server-side "0 accepted" is indistinguishable from "nothing to do".
+   */
+  WRITE_SCOPE_EMPTY: "kairos_write_scope_empty",
 } as const;
 
 /** A conditional GET's answer: fresh data, or "you already have it". */
@@ -340,19 +346,34 @@ export class KairosClient {
     );
   }
 
-  /** Raw bytes out, for artifact downloads. 304 returns a null body. */
+  /**
+   * Raw bytes out, for artifact downloads. 304 returns a null body.
+   *
+   * `headers` is passed through because two of these responses carry meaning
+   * outside the body: an artifact's `X-Kairos-Plan-Version` says whether it is
+   * stale, and an admin bundle's `X-Kairos-Rows` is the only place the row count
+   * appears at all.
+   */
   async getBytes(
     path: string,
     etag: string | null
-  ): Promise<{ status: number; bytes: Buffer | null; etag: string | null }> {
+  ): Promise<{
+    status: number;
+    bytes: Buffer | null;
+    etag: string | null;
+    headers: Headers;
+  }> {
     const response = await this.send(path, { method: "GET" }, { ifNoneMatch: etag });
     const nextEtag = response.headers.get("etag");
-    if (response.status === 304) return { status: 304, bytes: null, etag: etag ?? nextEtag };
+    if (response.status === 304) {
+      return { status: 304, bytes: null, etag: etag ?? nextEtag, headers: response.headers };
+    }
     if (!response.ok) throw await toError(response);
     return {
       status: 200,
       bytes: Buffer.from(await response.arrayBuffer()),
       etag: nextEtag,
+      headers: response.headers,
     };
   }
 }

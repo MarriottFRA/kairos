@@ -32,22 +32,33 @@ import {
   SyncStatusResponse,
 } from "../shared/kairosSync/ipc";
 import {
+  AdminHotel,
+  AdminPlanList,
   ArtifactList,
+  AuditRow,
   BstPushEligibility,
   BstVersion,
   BstWorkbook,
+  BundleOptions,
+  BundleResult,
   Cluster,
   ClusterDivergence,
   Delegation,
   DelegatableDepartments,
   DelegationCandidates,
   DepartmentOwnership,
+  HandbackResult,
   KpiSeriesRequest,
   KpiSeriesResponse,
+  LeaseCreate,
+  LeaseReleaseResult,
   LeaseResponse,
   OuSettings,
   PiiSummary,
   PlanSummary,
+  PlanVersion,
+  ScopeTrace,
+  SupportDownload,
   Activity,
 } from "../shared/kairosSync/protocol";
 
@@ -326,6 +337,25 @@ export function revokeDelegation(
   });
 }
 
+/**
+ * Publish deliberately over the server's copy.
+ *
+ * Use only where the user has explicitly chosen "keep mine". It fetches the
+ * server's current hashes first and sends those as `baseHash`, which is the
+ * protocol's own two-step overwrite — there is no force flag, on purpose, so
+ * that overwriting is an informed act rather than an accident.
+ *
+ * Two things it cannot override, whatever the user chose: a server tombstone
+ * still wins over a live local row, and a delegate's writes still stay inside
+ * their departments.
+ */
+export function publishOverServer(
+  ou: string,
+  planId: string
+): Promise<SyncOutcome<PublishResponse>> {
+  return call<PublishResponse>(KAIROS_SYNC_CHANNELS.publishOverServer, { ou, planId });
+}
+
 /** "I'm done with this department." Keeps read access; the grant survives. */
 export function handBack(
   ou: string,
@@ -334,6 +364,23 @@ export function handBack(
   note?: string
 ): Promise<SyncOutcome<unknown>> {
   return call(KAIROS_SYNC_CHANNELS.handBack, { ou, planId, departmentCode, note });
+}
+
+/**
+ * "I'm done with all of it." Every ACTIVE department, one handover.
+ *
+ * Unlike the per-department form this DOES check for unpublished work, because
+ * handing everything back is the moment that work becomes unpublishable. A
+ * `kairos_handback_with_unsynced_work` carries `dirtyEntities` and the
+ * departments — show them, then re-call with `force: true` if they still want to.
+ * The delegation survives either way; this is not a revocation.
+ */
+export function handBackAll(
+  ou: string,
+  planId: string,
+  force = false
+): Promise<SyncOutcome<HandbackResult>> {
+  return call<HandbackResult>(KAIROS_SYNC_CHANNELS.handBackAll, { ou, planId, force });
 }
 
 export function reopenDepartment(
@@ -518,12 +565,170 @@ export function clusterDivergence(
   });
 }
 
+// --------------------------------------------------------------- plan admin
+
+/** The cheapest single-plan probe: version, epoch, state and your relation. */
+export function planVersion(
+  ou: string,
+  planId: string
+): Promise<SyncOutcome<PlanVersion>> {
+  return call<PlanVersion>(KAIROS_SYNC_CHANNELS.planVersion, { ou, planId });
+}
+
+/**
+ * Hand the plan to somebody else. An OWNER capability — no administrator needed.
+ *
+ * The successor must meet the full ownership bar, and a refusal comes back as
+ * `kairos_owner_not_eligible` carrying a `context.required` block naming exactly
+ * what they are missing. Render it; a generic "no" is unactionable.
+ */
+export function transferPlan(
+  ou: string,
+  planId: string,
+  newOwnerUserId: number,
+  reason: string
+): Promise<SyncOutcome<unknown>> {
+  return call(KAIROS_SYNC_CHANNELS.transferPlan, {
+    ou,
+    planId,
+    newOwnerUserId,
+    reason,
+  });
+}
+
+export function patchPlan(
+  ou: string,
+  planId: string,
+  patch: { label?: string; state?: "ACTIVE" | "ARCHIVED" }
+): Promise<SyncOutcome<PlanSummary>> {
+  return call<PlanSummary>(KAIROS_SYNC_CHANNELS.patchPlan, { ou, planId, ...patch });
+}
+
+/** Soft delete — recoverable by support, which is why it is not a hard one. */
+export function deletePlan(ou: string, planId: string): Promise<SyncOutcome<unknown>> {
+  return call(KAIROS_SYNC_CHANNELS.deletePlan, { ou, planId });
+}
+
+// -------------------------------------------------------------------- lease
+
 /** Readable by the hotel, so a 423 on save can be explained rather than retried. */
 export function lease(
   ou: string,
   planId: string
 ): Promise<SyncOutcome<LeaseResponse | null>> {
   return call<LeaseResponse | null>(KAIROS_SYNC_CHANNELS.lease, { ou, planId });
+}
+
+/** `EXCLUSIVE` is the only mode that confers write, and it locks the owner out. */
+export function acquireLease(
+  ou: string,
+  planId: string,
+  request: LeaseCreate
+): Promise<SyncOutcome<LeaseResponse>> {
+  return call<LeaseResponse>(KAIROS_SYNC_CHANNELS.acquireLease, {
+    ou,
+    planId,
+    lease: request,
+  });
+}
+
+export function extendLease(
+  ou: string,
+  planId: string,
+  minutes: number
+): Promise<SyncOutcome<LeaseResponse>> {
+  return call<LeaseResponse>(KAIROS_SYNC_CHANNELS.extendLease, { ou, planId, minutes });
+}
+
+/** Bumps `syncEpoch` — every client at the property will full-refresh. Say so. */
+export function releaseLease(
+  ou: string,
+  planId: string,
+  summary: string
+): Promise<SyncOutcome<LeaseReleaseResult>> {
+  return call<LeaseReleaseResult>(KAIROS_SYNC_CHANNELS.releaseLease, {
+    ou,
+    planId,
+    summary,
+  });
+}
+
+// ----------------------------------------------------------- administration
+
+/**
+ * Am I an administrator?
+ *
+ * Answered by making an admin-only request and reading the status code, because
+ * this client has no other source of truth about the signed-in user's role. That
+ * also makes the answer expire correctly: an administrator whose role is removed
+ * fails the next probe rather than keeping an unlocked screen.
+ */
+export function adminProbe(): Promise<SyncOutcome<{ isAdmin: boolean }>> {
+  return call<{ isAdmin: boolean }>(KAIROS_SYNC_CHANNELS.adminProbe, {});
+}
+
+export function adminHotels(): Promise<SyncOutcome<AdminHotel[]>> {
+  return call<AdminHotel[]>(KAIROS_SYNC_CHANNELS.adminHotels, {});
+}
+
+export function adminPlans(filters: {
+  ou?: string | null;
+  year?: number | null;
+  ownerIneligible?: boolean | null;
+  limit?: number | null;
+  offset?: number | null;
+}): Promise<SyncOutcome<AdminPlanList>> {
+  return call<AdminPlanList>(KAIROS_SYNC_CHANNELS.adminPlans, filters);
+}
+
+export function adminAudit(filters: {
+  planId?: string | null;
+  action?: string | null;
+  limit?: number | null;
+}): Promise<SyncOutcome<AuditRow[]>> {
+  return call<AuditRow[]>(KAIROS_SYNC_CHANNELS.adminAudit, filters);
+}
+
+/** Deliberately readable by any administrator: a control only its own subject
+ *  can inspect is not a control. */
+export function adminDownloads(filters: {
+  planId?: string | null;
+  limit?: number | null;
+}): Promise<SyncOutcome<SupportDownload[]>> {
+  return call<SupportDownload[]>(KAIROS_SYNC_CHANNELS.adminDownloads, filters);
+}
+
+/** The resolver explaining itself, step by step, for one user. */
+export function adminUserScope(
+  userId: number,
+  planId: string | null,
+  capability: string | null
+): Promise<SyncOutcome<ScopeTrace>> {
+  return call<ScopeTrace>(KAIROS_SYNC_CHANNELS.adminUserScope, {
+    userId,
+    planId,
+    capability,
+  });
+}
+
+/** Saved to the Downloads folder. Rate limited to 20/day across the estate. */
+export function adminBundle(
+  options: BundleOptions
+): Promise<SyncOutcome<BundleResult>> {
+  return call<BundleResult>(KAIROS_SYNC_CHANNELS.adminBundle, options);
+}
+
+/** The property's personal-data kill switch. Administrators only. */
+export function putOuSettings(
+  ou: string,
+  piiEnabled: boolean,
+  reason: string
+): Promise<SyncOutcome<OuSettings>> {
+  return call<OuSettings>(KAIROS_SYNC_CHANNELS.putOuSettings, {
+    ou,
+    piiEnabled,
+    reason,
+  });
 }
 
 export type { PlanSyncStatus, SyncOutcome };

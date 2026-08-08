@@ -39,6 +39,7 @@ import {
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
+import { makeNumberPasteParser } from "../../shared/positions/pasteParsers";
 
 export interface BlockColumnsContext {
   numberFormat: Intl.NumberFormat;
@@ -239,6 +240,10 @@ export function buildBlockColumns(
   ctx: BlockColumnsContext
 ): GridColDef<PositionRow>[] {
   const columns: GridColDef<PositionRow>[] = [];
+  // Built once, not per column: the formatted cells below carry the locale's
+  // thousands separators, which the grid's default numeric parser reads back
+  // as NaN, so a copied amount never pastes without the inverse.
+  const parsePastedNumber = makeNumberPasteParser(ctx.numberFormat);
 
   for (const block of blocks) {
     const slots = blockInputSlots(block);
@@ -334,6 +339,7 @@ export function buildBlockColumns(
           const num = Number(value);
           return Number.isFinite(num) ? ctx.numberFormat.format(num) : "";
         },
+        pastedValueParser: parsePastedNumber,
       });
     });
 

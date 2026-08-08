@@ -71,11 +71,15 @@ export const KAIROS_SYNC_TABLES_SQL = `
       scope_kind         TEXT,
       scope_departments  TEXT,
       structure_editable INTEGER NOT NULL DEFAULT 0,
-      -- ETags. Note these also invalidate when GRANTS change, not only when data
-      -- does: the server folds the caller's authorization digest into them, so a
-      -- revoked delegation cannot be served from a cache for a scope no longer
-      -- held. A 200 where a 304 was expected is normal.
+      -- Superseded by kairos_ou_state.heads_etag: the heads answer is about a
+      -- whole property, not about a plan. Retained so an older build downgrading
+      -- onto this file still finds its column.
       heads_etag         TEXT,
+      -- ETag + the body it validates. Note these also invalidate when GRANTS
+      -- change, not only when data does: the server folds the caller's
+      -- authorization digest into them, so a revoked delegation cannot be served
+      -- from a cache for a scope no longer held. A 200 where a 304 was expected
+      -- is normal.
       ownership_etag     TEXT,
       ownership_json     TEXT,
       last_published_at  TEXT,
@@ -86,4 +90,26 @@ export const KAIROS_SYNC_TABLES_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_kairos_sync_state_ou
       ON kairos_sync_state (ou);
+
+  -- The last GET /sync/heads answer for a property, ETag AND body.
+  --
+  -- Caching the body is not an optimisation, it is a correctness requirement.
+  -- A 304 carries no plan list, so a client that stored only the ETag has, from
+  -- the second sync onwards, no idea which plans exist on the server, what
+  -- version they are at, or what the caller's relation to them is. Everything
+  -- downstream then reads "not published": the page offers to register a plan
+  -- that is already registered, and a publish sends baseVersion 0 against a live
+  -- plan, which conflicts on every row.
+  --
+  -- Per-OU because that is what the answer is about. The ETag used to be copied
+  -- onto every plan's state row and read back with LIMIT 1, which worked but
+  -- left no home for the body and no row at all for a property with no plans.
+  CREATE TABLE IF NOT EXISTS kairos_ou_state (
+      ou          TEXT PRIMARY KEY,
+      heads_etag  TEXT,
+      -- The verbatim SyncHeads body last received with a 200. Replayed whenever
+      -- the server answers 304.
+      heads_json  TEXT,
+      fetched_at  TEXT
+  );
 `;

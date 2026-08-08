@@ -93,6 +93,17 @@ export interface PlanSummary {
   updatedAt: string | null;
 }
 
+/** `GET /plans/{id}/version` — the cheapest answer about one plan. */
+export interface PlanVersion {
+  planId: string;
+  version: number;
+  syncEpoch: number;
+  structureVersion: number;
+  state: string;
+  relation: Relation | null;
+  scope: ScopeReport;
+}
+
 // ---------------------------------------------------------------------- heads
 
 export interface PlanHead {
@@ -561,6 +572,33 @@ export interface RevokedContext {
   exportAdvised: boolean;
 }
 
+/** `context` of a 409 `kairos_handback_with_unsynced_work`. */
+export interface HandbackUnsyncedContext {
+  dirtyEntities: number;
+  departments: string[];
+  retryWith: { force: boolean };
+}
+
+export type HandbackState = "ACTIVE" | "HANDED_BACK";
+
+export interface HandbackDepartment {
+  department: string;
+  state: HandbackState;
+  handedBackAt: string | null;
+  /**
+   * The plan version at handover. Every department moved in one call shares it,
+   * so the owner's audit trail shows one handover rather than five coincidental
+   * ones.
+   */
+  handedBackAtVersion: number | null;
+}
+
+export interface HandbackResult {
+  planId: string;
+  delegationId: string;
+  departments: HandbackDepartment[];
+}
+
 export interface RevokeResponse {
   id: string;
   revokedAt: string;
@@ -615,9 +653,22 @@ export interface Activity {
 
 // ---------------------------------------------------------------------- lease
 
+/**
+ * The two lease modes, and the distinction that matters.
+ *
+ * `READ_ONLY_SUPPORT` changes nothing about anybody else's access. It exists so
+ * that reading a hotel's data — break-glass PII included — is a decision
+ * somebody recorded, and it grants its holder no writes at all.
+ *
+ * `EXCLUSIVE` is the deliberate second step and the ONLY mode that confers
+ * write. It sets the plan to LOCKED_BY_SUPPORT and locks the owner out, so every
+ * other commit comes back 423.
+ */
+export type LeaseMode = "READ_ONLY_SUPPORT" | "EXCLUSIVE";
+
 export interface Lease {
   leaseId: string;
-  mode: "EXCLUSIVE" | "SHARED";
+  mode: LeaseMode;
   adminEmail: string;
   acquiredAt: string;
   expiresAt: string;
@@ -628,6 +679,137 @@ export interface Lease {
 export interface LeaseResponse {
   planId: string;
   lease: Lease | null;
+}
+
+export interface LeaseCreate {
+  mode: LeaseMode;
+  /** Recorded, never returned to the hotel — it can name a defect or a customer. */
+  reason: string;
+  ticketRef: string;
+  /** 5–240 per acquisition, 1440 in total across extensions. */
+  minutes: number;
+}
+
+/**
+ * What the release moved.
+ *
+ * Handback bumps `syncEpoch`, which forces every client at the property to
+ * full-refresh — so the numbers here are what lets the UI say "the server moved
+ * 812 → 847 while support held this plan" instead of showing an unexplained pile
+ * of conflicts.
+ */
+export interface LeaseReleaseResult {
+  planId: string;
+  syncEpoch: number;
+  versionAtAcquire: number;
+  version: number;
+  entitiesChanged: number;
+}
+
+// ---------------------------------------------------------------- administration
+
+/** A property with Kairos activity, for support triage. */
+export interface AdminHotel {
+  ou: string;
+  name: string | null;
+  plans: number;
+  entities: number;
+  lastPublishedAt: string | null;
+}
+
+/** One row of the estate-wide plan list, with the flags support triages on. */
+export interface AdminPlanRow {
+  id: string;
+  ou: string;
+  year: number;
+  label: string;
+  state: string;
+  version: number;
+  syncEpoch: number;
+  entityCount: number;
+  ownerUserId: number;
+  ownerEmail: string | null;
+  /** The owner no longer meets the bar — they are OWNER_DEGRADED on their own plan. */
+  ownerIneligible: boolean;
+  leaseHeldBy: string | null;
+  updatedAt: string | null;
+}
+
+export interface AdminPlanList {
+  plans: AdminPlanRow[];
+  total: number;
+}
+
+export interface AuditRow {
+  id: number;
+  at: string;
+  actorEmail: string | null;
+  action: string;
+  planId: string | null;
+  ou: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+/**
+ * An administrator's export, with the reason they gave.
+ *
+ * Readable by ANY administrator, not only the one who made it: a control that
+ * only its own subject can inspect is not a control.
+ */
+export interface SupportDownload {
+  id: number;
+  at: string;
+  adminEmail: string;
+  planId: string;
+  piiMode: string;
+  reason: string;
+  ticketRef: string | null;
+  rows: number;
+}
+
+/**
+ * `GET /admin/users/{id}/scope` — the resolver explaining itself.
+ *
+ * Produced by the same function that enforces the decision, with a trace
+ * attached, rather than by a second implementation of the rules. "Anna has no
+ * access" is not something anybody can act on; "Anna's OU grant expired on 3
+ * June" is.
+ */
+export interface ScopeTraceStep {
+  step: string;
+  outcome: string;
+  detail?: string | null;
+}
+
+export interface ScopeTrace {
+  userId: number;
+  email: string | null;
+  planId: string | null;
+  capability: string | null;
+  inputs: Record<string, unknown>;
+  steps: ScopeTraceStep[];
+  outcome: Record<string, unknown>;
+}
+
+/** `pii=raw` is break-glass and requires a lease; it is never a bare admin read. */
+export type BundlePiiMode = "omit" | "pseudonymize" | "raw";
+
+export interface BundleOptions {
+  planId: string;
+  pii: BundlePiiMode;
+  /** Mandatory. A bundle with no recorded justification is unexplainable later. */
+  reason: string;
+  ticketRef?: string | null;
+  outputs?: boolean;
+}
+
+export interface BundleResult {
+  planId: string;
+  /** Where the .ndjson.gz was written on this machine. */
+  savedTo: string;
+  rows: number;
+  piiMode: string;
+  byteSize: number;
 }
 
 // ------------------------------------------------------------------ artifacts

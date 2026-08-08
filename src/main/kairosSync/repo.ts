@@ -38,7 +38,6 @@ export interface SyncState {
   scopeKind: string | null;
   scopeDepartments: string[] | null;
   structureEditable: boolean;
-  headsEtag: string | null;
   ownershipEtag: string | null;
   ownershipJson: string | null;
   lastPublishedAt: string | null;
@@ -75,7 +74,6 @@ function toState(row: Record<string, unknown>): SyncState {
     scopeKind: (row.scope_kind as string) ?? null,
     scopeDepartments: parseList(row.scope_departments),
     structureEditable: row.structure_editable === 1,
-    headsEtag: (row.heads_etag as string) ?? null,
     ownershipEtag: (row.ownership_etag as string) ?? null,
     ownershipJson: (row.ownership_json as string) ?? null,
     lastPublishedAt: (row.last_published_at as string) ?? null,
@@ -119,7 +117,6 @@ export function updateSyncState(
     scopeKind: string | null;
     scopeDepartments: string[] | null;
     structureEditable: boolean;
-    headsEtag: string | null;
     ownershipEtag: string | null;
     ownershipJson: string | null;
     lastPublishedAt: string | null;
@@ -143,7 +140,6 @@ export function updateSyncState(
   if (patch.structureEditable !== undefined) {
     columns.structure_editable = patch.structureEditable ? 1 : 0;
   }
-  if (patch.headsEtag !== undefined) columns.heads_etag = patch.headsEtag;
   if (patch.ownershipEtag !== undefined) columns.ownership_etag = patch.ownershipEtag;
   if (patch.ownershipJson !== undefined) columns.ownership_json = patch.ownershipJson;
   if (patch.lastPublishedAt !== undefined) {
@@ -182,6 +178,54 @@ export function completePull(
         SET watermark = ?, sync_epoch = ?, last_pulled_at = ?
       WHERE plan_id = ?`
   ).run(toVersion, syncEpoch, at, planId);
+}
+
+// ---------------------------------------------------------------- ou state
+
+/** The last `/sync/heads` answer for a property: ETag and the body it validates. */
+export interface OuState {
+  ou: string;
+  headsEtag: string | null;
+  headsJson: string | null;
+  fetchedAt: string | null;
+}
+
+export function getOuState(db: Db, ou: string): OuState | null {
+  const row = prepared(db, `SELECT * FROM kairos_ou_state WHERE ou = ?`).get(ou) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  return {
+    ou: String(row.ou),
+    headsEtag: (row.heads_etag as string) ?? null,
+    headsJson: (row.heads_json as string) ?? null,
+    fetchedAt: (row.fetched_at as string) ?? null,
+  };
+}
+
+/**
+ * Store a 200 answer whole.
+ *
+ * ETag and body are written together and never separately: an ETag without the
+ * body it validates is worse than no ETag at all, because the next request will
+ * answer 304 to a client that has nothing to serve from.
+ */
+export function putOuHeads(
+  db: Db,
+  ou: string,
+  etag: string | null,
+  body: string,
+  at: string
+): void {
+  prepared(
+    db,
+    `INSERT INTO kairos_ou_state (ou, heads_etag, heads_json, fetched_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(ou) DO UPDATE SET
+       heads_etag = excluded.heads_etag,
+       heads_json = excluded.heads_json,
+       fetched_at = excluded.fetched_at`
+  ).run(ou, etag, body, at);
 }
 
 // ------------------------------------------------------------------ shadow

@@ -53,6 +53,15 @@ export interface ReviewDialogProps {
   skippedTypes?: string[];
   /** A support lease was handed back; the whole plan is being re-downloaded. */
   reset?: boolean;
+  /**
+   * Override the plain-English names for the keys in `byType`.
+   *
+   * The hotel-setup diff comes back keyed by document section rather than by
+   * entity type, and it deserves the same review step as a plan pull — it can
+   * also overwrite work — so the dialog takes its vocabulary as a parameter
+   * instead of hard-coding one domain's.
+   */
+  labels?: Record<string, string>;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -72,6 +81,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     chunks,
     skippedTypes = [],
     reset = false,
+    labels = TYPE_LABELS,
     onConfirm,
     onClose,
   } = props;
@@ -109,7 +119,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
                   <Chip
                     key={type}
                     size="small"
-                    label={`${TYPE_LABELS[type] ?? type}: ${count}`}
+                    label={`${labels[type] ?? type}: ${count}`}
                     variant="outlined"
                   />
                 ))}
@@ -129,7 +139,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
                         key={type}
                         size="small"
                         color="warning"
-                        label={`${TYPE_LABELS[type] ?? type}: ${count}`}
+                        label={`${labels[type] ?? type}: ${count}`}
                       />
                     ))}
                 </Stack>

@@ -17,6 +17,19 @@
  *
  * Candidates who are ineligible arrive WITH a reason and are shown greyed rather
  * than filtered out — "why isn't Anna in the list?" has to have an answer.
+ *
+ * ## What they will actually receive
+ *
+ * The overlap is computed and shown BEFORE submitting, from the candidate's own
+ * `deptScope` which the candidate list already carries. The server still has the
+ * last word — the effective set is intersected per request, not frozen at grant
+ * time — but an owner should not learn that two of their four departments will
+ * do nothing by being refused. `acknowledgeNonOverlap` then confirms something
+ * already on the screen rather than answering a surprise.
+ *
+ * The row counts come along too. "3 departments" is an abstraction; "3
+ * departments, 96 positions, and you will not be able to edit them until you
+ * withdraw" is the sentence that stops somebody over-delegating.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -113,6 +126,30 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
     () => departments.filter((department) => !department.grantable),
     [departments]
   );
+
+  /**
+   * The intersection, computed from data already on the client.
+   *
+   * `deptScope.mode === "ALL"` is the common case for a hotel admin and means
+   * everything requested lands. A LIST narrows it. This mirrors the server's
+   * rule rather than replacing it — the grant still goes through the same
+   * validation, and a 422 still wins.
+   */
+  const effective = useMemo(() => {
+    const rows = grantable
+      .filter((department) => selected.includes(department.code))
+      .reduce((total, department) => total + department.activeCount, 0);
+
+    if (!person || person.deptScope.mode === "ALL") {
+      return { effective: selected, ineffective: [] as string[], rows };
+    }
+    const theirs = new Set(person.deptScope.departments);
+    return {
+      effective: selected.filter((code) => theirs.has(code)),
+      ineffective: selected.filter((code) => !theirs.has(code)),
+      rows,
+    };
+  }, [selected, person, grantable]);
 
   const submit = (acknowledge: boolean) => {
     if (!person) return;
@@ -229,6 +266,57 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
             </Typography>
           </Box>
 
+          {selected.length > 0 && (
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                What they will get
+              </Typography>
+              <Alert severity={effective.ineffective.length > 0 ? "warning" : "info"}>
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mb: 1 }}>
+                  {effective.effective.map((code) => (
+                    <Chip key={code} size="small" color="success" label={code} />
+                  ))}
+                  {effective.ineffective.map((code) => (
+                    <Chip
+                      key={code}
+                      size="small"
+                      variant="outlined"
+                      label={code}
+                      sx={{ textDecoration: "line-through", opacity: 0.7 }}
+                    />
+                  ))}
+                </Stack>
+
+                {!person ? (
+                  <Typography variant="body2">
+                    Choose a colleague below to see which of these will take
+                    effect for them.
+                  </Typography>
+                ) : effective.ineffective.length > 0 ? (
+                  <Typography variant="body2">
+                    <strong>
+                      {effective.ineffective.length} of these will do nothing:
+                    </strong>{" "}
+                    {person.email} does not have access to{" "}
+                    {effective.ineffective.join(", ")}. The grant is still
+                    recorded, so if their access is widened later it starts
+                    working with no second action.
+                  </Typography>
+                ) : (
+                  <Typography variant="body2">
+                    All {effective.effective.length} will take effect.
+                  </Typography>
+                )}
+
+                <Typography variant="body2" sx={{ mt: 1 }}>
+                  {effective.rows} {effective.rows === 1 ? "position" : "positions"} in
+                  total. You will not be able to edit these departments yourself
+                  until you withdraw the delegation.
+                </Typography>
+              </Alert>
+            </Box>
+          )}
+
           <Box>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
               They may
@@ -269,8 +357,11 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
           </Box>
 
           {overlap && (
-            // The warning the owner MUST see before the grant goes through.
-            // Without it they wait for a publish that can never happen.
+            // The server's own version of the warning above. It still runs: the
+            // client-side preview is built from the candidate list, which can be
+            // a few seconds stale, and the effective set is resolved per request.
+            // When both agree this simply restates it; when they disagree, the
+            // server is right.
             <Alert severity="warning">
               <AlertTitle>Some departments will not take effect</AlertTitle>
               <Typography variant="body2" sx={{ mb: 1 }}>
@@ -298,11 +389,18 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
         <Button
           variant="contained"
           disabled={busy || !person || selected.length === 0}
-          onClick={() => submit(overlap !== null)}
-          color={overlap ? "warning" : "primary"}
+          // Acknowledged up front when the preview already showed the shortfall:
+          // the owner has seen exactly which departments will do nothing, so a
+          // second round trip to tell them again is a speed bump with no
+          // information in it. A shortfall only the server knows about still
+          // comes back as `overlap` and still stops here first.
+          onClick={() => submit(overlap !== null || effective.ineffective.length > 0)}
+          color={overlap || effective.ineffective.length > 0 ? "warning" : "primary"}
           startIcon={busy ? <CircularProgress size={16} /> : undefined}
         >
-          {overlap ? "Delegate anyway" : "Delegate"}
+          {overlap || effective.ineffective.length > 0
+            ? `Delegate ${effective.effective.length} of ${selected.length}`
+            : "Delegate"}
         </Button>
       </DialogActions>
     </Dialog>

@@ -42,6 +42,7 @@ import type {
 import LegacyImportCard from "../../components/settings/LegacyImportCard";
 import OracleImportCard from "../../components/settings/OracleImportCard";
 import StorageCleanupCard from "../../components/settings/StorageCleanupCard";
+import SupportToolsCard from "../../components/settings/SupportToolsCard";
 import TermsCard from "../../components/settings/TermsCard";
 
 // Admins carry far more hotels than they can scroll. Match on everything shown
@@ -699,6 +700,8 @@ export default function Settings() {
             </Button>
           </DialogActions>
         </Dialog>
+
+        <SupportToolsCard />
 
         {import.meta.env.DEV && (
           <Card

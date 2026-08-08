@@ -26,10 +26,13 @@ import {
   Cluster,
   ClusterDivergence,
   ClusterList,
+  LeaseCreate,
+  LeaseReleaseResult,
   LeaseResponse,
   PlanCreate,
   PlanPatch,
   PlanSummary,
+  PlanVersion,
 } from "../../shared/kairosSync/protocol";
 
 const plan = (planId: string) => `/plans/${encodeURIComponent(planId)}`;
@@ -45,6 +48,21 @@ export function listPlans(
 
 export function getPlan(client: KairosClient, planId: string): Promise<PlanSummary> {
   return client.get<PlanSummary>(plan(planId));
+}
+
+/**
+ * The cheapest single-plan probe: version, epoch and this caller's relation.
+ *
+ * Exists for one job — resolving `baseVersion` before a commit when `/sync/heads`
+ * answered 304 and the cached body predates a registration. Sending a guessed
+ * `0` against a live plan is not a near miss; it makes every row in the chunk
+ * come back `ALREADY_EXISTS`.
+ */
+export function fetchPlanVersion(
+  client: KairosClient,
+  planId: string
+): Promise<PlanVersion> {
+  return client.get<PlanVersion>(`${plan(planId)}/version`);
 }
 
 /**
@@ -118,6 +136,48 @@ export async function fetchLease(
     }
     throw error;
   }
+}
+
+/**
+ * Take a support lease. The only path by which an administrator gains write.
+ *
+ * `READ_ONLY_SUPPORT` grants reads only — to its holder as much as to anybody
+ * else — and exists so that looking at a hotel's data is a decision somebody
+ * recorded. `EXCLUSIVE` is the only mode that confers write, and it locks the
+ * owner out for as long as it is held, which is why it is a separate, deliberate
+ * choice rather than a flag on the first one.
+ */
+export function acquireLease(
+  client: KairosClient,
+  planId: string,
+  body: LeaseCreate
+): Promise<LeaseResponse> {
+  return client.post<LeaseResponse>(`${plan(planId)}/lease`, body);
+}
+
+/** Extend. Only the holder may extend, and 1440 minutes is the overall ceiling. */
+export function extendLease(
+  client: KairosClient,
+  planId: string,
+  minutes: number
+): Promise<LeaseResponse> {
+  return client.patch<LeaseResponse>(`${plan(planId)}/lease`, { minutes });
+}
+
+/**
+ * Release, with a summary of what was done.
+ *
+ * Releasing restores the plan's state from before the lease, so a lease taken on
+ * an ARCHIVED plan does not quietly un-archive it. An administrator may release
+ * a lease they do not hold — a colleague who went home with a hotel locked is
+ * exactly the situation this resolves — and that is audited as such.
+ */
+export function releaseLease(
+  client: KairosClient,
+  planId: string,
+  summary: string
+): Promise<LeaseReleaseResult> {
+  return client.delete<LeaseReleaseResult>(`${plan(planId)}/lease`, { summary });
 }
 
 // ------------------------------------------------------------------ clusters

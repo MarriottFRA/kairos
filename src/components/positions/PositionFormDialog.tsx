@@ -144,6 +144,17 @@ export interface PositionFormDialogProps {
   currentOu: string | null;
   hotelNames?: ReadonlyMap<string, string>;
   masked: boolean;
+  /**
+   * The server's write scope, exactly as the grid receives it.
+   *
+   * Without these the form was a hole straight through the department lock: its
+   * `cellEditable` context omitted them, so every field on a delegated row came
+   * back editable and its commits went into the same write queue as the grid's.
+   * `undefined` means an unpublished plan and unrestricted editing, same as
+   * everywhere else — the distinction from an empty Set is load-bearing.
+   */
+  writableDepartments?: ReadonlySet<string>;
+  planLocked?: boolean;
   status?: RowSaveStatus;
   /** The cell the user opened from — focused first, so Alt+Enter lands where
    *  they were looking. */
@@ -172,6 +183,8 @@ export default function PositionFormDialog({
   currentOu,
   hotelNames,
   masked,
+  writableDepartments,
+  planLocked,
   status,
   initialFocusField,
   index,
@@ -302,11 +315,17 @@ export default function PositionFormDialog({
       maskableKeys,
       hotelClusters,
       currentOu,
+      // The same server-side write scope the grid locks against. The form and
+      // the grid must give one answer, not two — they share `cellEditable`
+      // precisely so that a rule added in one place cannot be missing from the
+      // other.
+      writableDepartments,
+      planLocked,
       // Same pooled-weight lock the grid applies, so the form cannot offer an
       // edit the grid refuses (or the other way round).
       poolWeightEditable: poolWeightGate(blocks),
     }),
-    [masked, maskableKeys, hotelClusters, currentOu, blocks]
+    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked, blocks]
   );
 
   // Two commits can land in one tick (Enter blurs one field and focuses the

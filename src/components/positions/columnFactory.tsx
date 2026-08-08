@@ -61,6 +61,11 @@ import {
 } from "../../shared/hotelClusters/resolve";
 import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
 import {
+  makeNumberPasteParser,
+  makeOptionPasteParser,
+  makePercentPasteParser,
+} from "../../shared/positions/pasteParsers";
+import {
   basicSalaryCellLocked,
   COMPUTES,
   PositionRow,
@@ -869,6 +874,10 @@ function buildColumn(
             })
           : ctx.numberFormat.format(num);
       };
+      // Without this the grid's default numeric parser reads its own formatted
+      // output ("30,000") back as NaN, which survives the paste gate and then
+      // gets reverted by sanitizeRow — a paste that looks like it did nothing.
+      column.pastedValueParser = makeNumberPasteParser(ctx.numberFormat);
       break;
     }
     case "PERCENT": {
@@ -885,6 +894,10 @@ function buildColumn(
         // Values above 1 are read as whole percentages (5 -> 5%).
         return num > 1 ? num / 100 : num;
       };
+      // Same rule on paste, but tolerating the formatter's separators and
+      // rejecting garbage instead of falling back to 0 — a mis-aligned paste
+      // must not silently zero a merit increase.
+      column.pastedValueParser = makePercentPasteParser(ctx.numberFormat);
       break;
     }
     case "DATE": {
@@ -921,6 +934,12 @@ function buildColumn(
         // the *display* (value -> label) and filtering; the custom edit cell only
         // replaces the editor, so a pick commits on the first click.
         Object.assign(column, { type: "singleSelect", valueOptions: options });
+        // MUI's default singleSelect paste parser strict-compares the clipboard
+        // string against each option's VALUE, but copy emitted its LABEL — so
+        // every one of these columns silently drops a paste (and a numeric
+        // option list like Increase Month's could never match at all). Accept
+        // either face and hand back the option's own typed value.
+        column.pastedValueParser = makeOptionPasteParser(options);
         // Months stay a plain menu however many they are — a list of twelve you
         // already know the order of beats a search box.
         const searchable =
@@ -1122,6 +1141,12 @@ function buildColumn(
     delete column.headerAlign;
     // singleSelect owns filtering; display + editor are custom below.
     Object.assign(column, { type: "singleSelect", valueOptions: options });
+    // The cell copies out as the cluster NAME, so paste has to match on the
+    // name and store the id — MUI's default parser compares the name against
+    // uuids and never lands. "None" (and an empty cell) clears; a stale
+    // "(deleted cluster)" finds no match and is rejected, which leaves the
+    // orphan id intact rather than blanking it behind the user's back.
+    column.pastedValueParser = makeOptionPasteParser(options);
     column.valueFormatter = (value: unknown) => {
       const id = typeof value === "string" ? value : "";
       if (!id) return "";

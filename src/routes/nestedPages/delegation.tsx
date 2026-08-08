@@ -62,6 +62,7 @@ import {
   departmentOwnership as ownershipCall,
   grantDelegation as grantCall,
   handBack as handBackCall,
+  handBackAll as handBackAllCall,
   listDelegations as listCall,
   reopenDepartment as reopenCall,
   revokeDelegation as revokeCall,
@@ -73,19 +74,14 @@ import {
   DelegationCandidate,
   DelegationCreate,
   DepartmentOwnership,
+  HandbackUnsyncedContext,
   PartialOverlapContext,
   UnsyncedWorkContext,
 } from "../../shared/kairosSync/protocol";
+import { LOCK_REASON } from "../../shared/kairosSync/lockReason";
 import GrantDelegationDialog from "../../components/sync/GrantDelegationDialog";
 
 type Toast = { severity: "success" | "error" | "info" | "warning"; message: string } | null;
-
-/** Why a department this user can see is not editable by them. */
-const LOCK_REASON: Record<string, string> = {
-  DELEGATED: "Delegated — withdraw to edit it yourself",
-  HANDED_BACK: "Handed back to the owner",
-  NOT_IN_WRITE_SCOPE: "Not yours to edit",
-};
 
 const INEFFECTIVE_REASON: Record<string, string> = {
   OU_ACCESS_REVOKED: "Their access to this hotel was removed",
@@ -113,6 +109,9 @@ export default function DelegationPage() {
   const [revoking, setRevoking] = useState<Delegation | null>(null);
   const [revokeReason, setRevokeReason] = useState("");
   const [unsynced, setUnsynced] = useState<UnsyncedWorkContext | null>(null);
+  /** Set when a bulk handback was refused because this delegate has dirty rows. */
+  const [handbackUnsynced, setHandbackUnsynced] =
+    useState<HandbackUnsyncedContext | null>(null);
 
   const refresh = useCallback(async () => {
     if (!ou || !planId) return;
@@ -220,6 +219,47 @@ export default function DelegationPage() {
     [ou, planId, refresh]
   );
 
+  /**
+   * Hand every department back in one go.
+   *
+   * Unlike the per-department form this checks for unpublished work first, and
+   * that difference is deliberate: finishing one of five departments with four
+   * still open is routine, but finishing ALL of them is the moment any
+   * unpublished work becomes unpublishable — the owner would have to reopen a
+   * department for it to go anywhere. So the delegate is told before, not after,
+   * and forcing is a second, explicit press.
+   *
+   * The delegation itself survives either way. This is not a revocation: read
+   * access stays and the owner can reopen without re-granting.
+   */
+  const handleHandBackAll = useCallback(
+    async (force: boolean) => {
+      if (!ou || !planId) return;
+      setBusy(true);
+      const result = await handBackAllCall(ou, planId, force);
+      setBusy(false);
+
+      if (syncFailed(result)) {
+        if (result.error.code === "kairos_handback_with_unsynced_work") {
+          setHandbackUnsynced(
+            (result.error.context ?? {}) as unknown as HandbackUnsyncedContext
+          );
+          return;
+        }
+        setToast({ severity: "error", message: result.error.message });
+        return;
+      }
+
+      setHandbackUnsynced(null);
+      setToast({
+        severity: "success",
+        message: `${result.data.departments.length} departments handed back. You can still see them.`,
+      });
+      await refresh();
+    },
+    [ou, planId, refresh]
+  );
+
   const handleReopen = useCallback(
     async (delegationId: string, code: string) => {
       if (!ou || !planId) return;
@@ -305,6 +345,17 @@ export default function DelegationPage() {
                 />
               ))}
             </Stack>
+
+            {myHoldings.length > 1 && (
+              <Button
+                size="small"
+                sx={{ mt: 2 }}
+                disabled={busy}
+                onClick={() => void handleHandBackAll(false)}
+              >
+                Hand everything back
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}
@@ -530,6 +581,48 @@ export default function DelegationPage() {
             onClick={() => void handleRevoke(unsynced !== null)}
           >
             {unsynced ? "Withdraw anyway" : "Withdraw"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={handbackUnsynced !== null}
+        onClose={busy ? undefined : () => setHandbackUnsynced(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>You have unpublished work</DialogTitle>
+        <DialogContent dividers>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            <AlertTitle>
+              {handbackUnsynced?.dirtyEntities} changes have not been published
+            </AlertTitle>
+            <Typography variant="body2">
+              They are in {handbackUnsynced?.departments.join(", ")}. Handing
+              everything back removes your ability to publish them — the owner
+              would have to give a department back to you first.
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Your work is <strong>not lost</strong> either way. It stays on this
+              machine.
+            </Typography>
+          </Alert>
+          <DialogContentText>
+            Publish first if you want the owner to see this work. Hand back anyway
+            if you have finished and the changes were not meant to go.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHandbackUnsynced(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            color="warning"
+            variant="contained"
+            disabled={busy}
+            onClick={() => void handleHandBackAll(true)}
+          >
+            Hand back anyway
           </Button>
         </DialogActions>
       </Dialog>

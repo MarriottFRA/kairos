@@ -12,6 +12,12 @@
  * guarantees the default "Planning" scenario exists (the backend creates it on
  * first list), and reports the selection upward so it can persist in
  * `planningScenarioId`.
+ *
+ * Creating a scenario takes an optional "Start from" source: a new scenario and
+ * a duplicated one are the same act with a different starting point, so they are
+ * one control rather than two competing affordances. Picking a source runs the
+ * ordinary roll-forward (saveScenario then cloneScenario) into the scenario that
+ * was just minted — empty by construction, which is what the clone requires.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -22,7 +28,9 @@ import EditIcon from "@mui/icons-material/Edit";
 import LayersIcon from "@mui/icons-material/Layers";
 import SettingsIcon from "@mui/icons-material/Settings";
 import {
+  Alert,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -40,11 +48,17 @@ import {
 } from "@mui/material";
 import { ScenarioDto } from "../../shared/positions/ipc";
 import {
+  cloneScenario,
   deleteScenario,
   listScenarios,
   saveScenario,
 } from "../../services/scenarioService";
 import ContextChip from "../ContextChip";
+import {
+  renderScenarioSourceValue,
+  scenarioSourceItems,
+  scenarioSourceLabel,
+} from "./scenarioSourceOptions";
 
 export interface ScenarioPickerProps {
   ou: string | null;
@@ -67,6 +81,9 @@ export default function ScenarioPicker({
   const [scenarios, setScenarios] = useState<ScenarioDto[]>([]);
   const [manageOpen, setManageOpen] = useState(false);
   const [newLabel, setNewLabel] = useState("");
+  /** "" = start empty. Otherwise the scenario id to copy in, any year. */
+  const [newSource, setNewSource] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -111,9 +128,32 @@ export default function ScenarioPicker({
   const handleCreate = async () => {
     if (!ou || !newLabel.trim()) return;
     setBusy(true);
+    setNotice(null);
     try {
       const created = await saveScenario(ou, { year, label: newLabel.trim() });
+
+      if (newSource) {
+        try {
+          const result = await cloneScenario(ou, newSource, created.id);
+          setNotice(
+            `Copied ${result.positions} position${
+              result.positions === 1 ? "" : "s"
+            } into ${created.label}.`
+          );
+        } catch (cloneError) {
+          // The scenario row exists but is empty and not what was asked for.
+          // Undo it rather than leaving an orphan in the chip menu.
+          try {
+            await deleteScenario(ou, created.id);
+          } catch {
+            // The copy failure is the one worth reporting.
+          }
+          throw cloneError;
+        }
+      }
+
       setNewLabel("");
+      setNewSource("");
       await reload();
       onSelect(created.id);
     } catch (error) {
@@ -182,6 +222,7 @@ export default function ScenarioPicker({
           <MenuItem
             key="manage"
             onClick={() => {
+              setNotice(null);
               setManageOpen(true);
               close();
             }}
@@ -196,8 +237,8 @@ export default function ScenarioPicker({
 
       <Dialog
         open={manageOpen}
-        onClose={() => setManageOpen(false)}
-        maxWidth="xs"
+        onClose={busy ? undefined : () => setManageOpen(false)}
+        maxWidth="sm"
         fullWidth
       >
         <DialogTitle>Scenarios — {year}</DialogTitle>
@@ -256,31 +297,96 @@ export default function ScenarioPicker({
             )}
           </List>
 
-          <Stack direction="row" spacing={1} sx={{ mt: 1, alignItems: "center" }}>
+          <Divider sx={{ mt: 1, mb: 2 }} />
+
+          <Typography variant="overline" sx={{ color: "text.secondary" }}>
+            New scenario
+          </Typography>
+
+          <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField
               size="small"
-              label="New scenario"
+              label="Name"
               placeholder="e.g. Aggressive hiring"
               value={newLabel}
               onChange={(event) => setNewLabel(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") void handleCreate();
               }}
-              sx={{ flex: 1 }}
+              disabled={busy}
+              fullWidth
             />
-            <Button
-              variant="contained"
-              disableElevation
-              startIcon={<AddIcon />}
-              onClick={() => void handleCreate()}
-              disabled={busy || !newLabel.trim()}
+
+            {/* Sources span every year, so this is also the discoverable home of
+                the roll-forward: "new 2027 scenario, start from 2026 —
+                Planning". Empty stays the default — a copy is the slow,
+                surprising outcome and must never happen by accident. */}
+            <TextField
+              select
+              size="small"
+              label="Start from"
+              value={newSource}
+              onChange={(event) => setNewSource(event.target.value)}
+              disabled={busy}
+              fullWidth
+              slotProps={{
+                // Shrunk because displayEmpty means the field always shows text.
+                inputLabel: { shrink: true },
+                select: {
+                  displayEmpty: true,
+                  renderValue: renderScenarioSourceValue(scenarios, "Empty"),
+                },
+              }}
+              helperText={
+                newSource
+                  ? `Copies every position, pay detail and block value from ${scenarioSourceLabel(
+                      scenarios,
+                      newSource
+                    )}, including ones marked inactive. The copy is independent — editing it will not change the source.`
+                  : "Enter positions manually."
+              }
             >
-              Add
-            </Button>
+              {[
+                <MenuItem key="empty" value="">
+                  Empty
+                </MenuItem>,
+                ...scenarioSourceItems(scenarios, { currentYear: year }),
+              ]}
+            </TextField>
+
+            <Stack direction="row" sx={{ justifyContent: "flex-end" }}>
+              <Button
+                variant="contained"
+                disableElevation
+                startIcon={
+                  busy ? (
+                    <CircularProgress size={16} color="inherit" />
+                  ) : (
+                    <AddIcon />
+                  )
+                }
+                onClick={() => void handleCreate()}
+                disabled={busy || !newLabel.trim()}
+              >
+                {newSource ? "Create & copy" : "Add"}
+              </Button>
+            </Stack>
           </Stack>
+
+          {notice && (
+            <Alert
+              severity="success"
+              onClose={() => setNotice(null)}
+              sx={{ mt: 2 }}
+            >
+              {notice}
+            </Alert>
+          )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setManageOpen(false)}>Close</Button>
+          <Button onClick={() => setManageOpen(false)} disabled={busy}>
+            Close
+          </Button>
         </DialogActions>
       </Dialog>
     </>

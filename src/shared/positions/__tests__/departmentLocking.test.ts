@@ -174,3 +174,56 @@ describe("department write scope", () => {
     expect(cellEditable(target, column, after)).toBe(false);
   });
 });
+
+/**
+ * The row form applies the same rules as the grid.
+ *
+ * `PositionFormDialog` builds its own `EditabilityContext` and calls the same
+ * `cellEditable`. It used to omit `writableDepartments` and `planLocked`, which
+ * made it a hole straight through the lock: every field on a delegated row came
+ * back editable and the form's commits went into the same write queue as the
+ * grid's. These pin the two together — the point of sharing the predicate is
+ * that a rule cannot be present in one caller and missing from the other.
+ */
+describe("the row form and the grid agree", () => {
+  const column = anyEditableColumn();
+
+  it("locks a delegated row in a context built without a cluster map", () => {
+    // The form omits `clusterById` (it is a hot-path optimisation the grid
+    // needs and the form does not). That must not change the answer.
+    const formCtx: EditabilityContext = {
+      masked: false,
+      maskableKeys,
+      hotelClusters: [],
+      currentOu: OU,
+      writableDepartments: new Set(["D0410"]),
+    };
+    expect(cellEditable(row("D0410"), column, formCtx)).toBe(true);
+    expect(cellEditable(row("D0610"), column, formCtx)).toBe(false);
+  });
+
+  it("honours planLocked from the form context too", () => {
+    const formCtx: EditabilityContext = {
+      masked: false,
+      maskableKeys,
+      hotelClusters: [],
+      currentOu: OU,
+      writableDepartments: new Set(["D0410"]),
+      planLocked: true,
+    };
+    expect(cellEditable(row("D0410"), column, formCtx)).toBe(false);
+  });
+
+  it("stays unrestricted when the plan was never published", () => {
+    // The form is reached on an offline hotel too, and must behave exactly as it
+    // did before sync existed.
+    const formCtx: EditabilityContext = {
+      masked: false,
+      maskableKeys,
+      hotelClusters: [],
+      currentOu: OU,
+    };
+    expect(cellEditable(row(""), column, formCtx)).toBe(true);
+    expect(cellEditable(row("D0610"), column, formCtx)).toBe(true);
+  });
+});

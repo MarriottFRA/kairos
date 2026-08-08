@@ -42,6 +42,7 @@ import {
   DelegationCreate,
   DelegationList,
   DepartmentOwnership,
+  HandbackResult,
   PartialOverlapContext,
   PresenceReport,
   RevokeResponse,
@@ -227,6 +228,30 @@ export function handBack(
       departmentCode
     )}/handback`,
     { note: note ?? null }
+  );
+}
+
+/**
+ * "I'm finished with all of it" — every ACTIVE department in one call.
+ *
+ * Separate from the per-department form because the semantics differ in one
+ * place that matters: this one DOES check for unpublished work and answers
+ * `409 kairos_handback_with_unsynced_work` unless forced, whereas handing back
+ * one of five departments with four still open is routine and is not checked.
+ * Handing everything back is the moment a delegate's unpublished work becomes
+ * unpublishable — the owner would have to reopen a department for them to finish
+ * — so they are told before rather than after.
+ *
+ * The delegation itself survives either way. This is not a revocation: read
+ * access stays, and the owner can reopen without re-granting.
+ */
+export function handBackAll(
+  client: KairosClient,
+  planId: string,
+  force: boolean
+): Promise<HandbackResult> {
+  return client.post<HandbackResult>(
+    `${plan(planId)}/delegations/me/handback${query({ force: force ? 1 : 0 })}`
   );
 }
 

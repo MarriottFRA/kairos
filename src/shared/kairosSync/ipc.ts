@@ -55,6 +55,16 @@ export const KAIROS_SYNC_CHANNELS = {
   previewPublish: "kairosSync:previewPublish",
   /** Publish. */
   publish: "kairosSync:publish",
+  /**
+   * Publish deliberately over the server's copy.
+   *
+   * The protocol has no client-asserted force flag, on purpose. To overwrite you
+   * fetch the server's current hashes and send those as `baseHash`, which makes
+   * an overwrite two informed steps rather than one accidental one. That is
+   * exactly what this does — adopt the manifest, then publish — so it is a
+   * sequence of ordinary calls, not a privilege.
+   */
+  publishOverServer: "kairosSync:publishOverServer",
   /** Reconcile the shadow against the server's manifest. */
   reconcile: "kairosSync:reconcile",
   /** Rebuild the shadow from the server — the post-rebuild recovery path. */
@@ -77,6 +87,9 @@ export const KAIROS_SYNC_CHANNELS = {
   amendDelegation: "kairosSync:amendDelegation",
   revokeDelegation: "kairosSync:revokeDelegation",
   handBack: "kairosSync:handBack",
+  /** Every ACTIVE department at once. Unlike the single form, this checks for
+   *  unpublished work and 409s unless forced. */
+  handBackAll: "kairosSync:handBackAll",
   reopenDepartment: "kairosSync:reopenDepartment",
   presence: "kairosSync:presence",
   activity: "kairosSync:activity",
@@ -98,7 +111,38 @@ export const KAIROS_SYNC_CHANNELS = {
 
   clusters: "kairosSync:clusters",
   clusterDivergence: "kairosSync:clusterDivergence",
+
+  // ----------------------------------------------------------------- plan admin
+  /** GET /plans/{id}/version — the cheapest single-plan probe. */
+  planVersion: "kairosSync:planVersion",
+  /** Owner-callable, not admin-only: `plan:transfer` is an OWNER capability. */
+  transferPlan: "kairosSync:transferPlan",
+  /** Label and ACTIVE/ARCHIVED. LOCKED_BY_SUPPORT is set by the lease, not here. */
+  patchPlan: "kairosSync:patchPlan",
+  /** Soft delete — the rows survive server-side so support can recover it. */
+  deletePlan: "kairosSync:deletePlan",
+
+  // --------------------------------------------------------------------- lease
   lease: "kairosSync:lease",
+  acquireLease: "kairosSync:acquireLease",
+  extendLease: "kairosSync:extendLease",
+  releaseLease: "kairosSync:releaseLease",
+
+  // ------------------------------------------------------------- administration
+  /**
+   * "Am I an administrator?" — answered by making an admin-only request and
+   * believing the status code. There is no client-side claim to forge, which is
+   * what makes the Settings switch safe to expose to everybody.
+   */
+  adminProbe: "kairosSync:adminProbe",
+  adminHotels: "kairosSync:adminHotels",
+  adminPlans: "kairosSync:adminPlans",
+  adminAudit: "kairosSync:adminAudit",
+  adminDownloads: "kairosSync:adminDownloads",
+  adminUserScope: "kairosSync:adminUserScope",
+  adminBundle: "kairosSync:adminBundle",
+  /** PUT /ou/{ou}/settings — the PII kill switch. Administrators only. */
+  putOuSettings: "kairosSync:putOuSettings",
 } as const;
 
 /**

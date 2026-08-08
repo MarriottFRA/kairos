@@ -426,10 +426,19 @@ const DEPARTMENTS = new Map([
 ]);
 
 /**
- * Blocks are ON here, unlike the app default. Most of this file is about how a
- * band becomes a block, which cannot be asserted with the toggle off; the
- * toggle's own behaviour has its own describe block below.
+ * Every toggle is ON here, unlike the app defaults, which start empty. Most of
+ * this file asserts what each part of the import produces, which cannot be
+ * seen with the toggles off; the toggles' own behaviour has its own describe
+ * block below.
  */
+const ALL_PARTS_ON: LegacyImportOptions = {
+  ...DEFAULT_LEGACY_IMPORT_OPTIONS,
+  calendarAndHours: true,
+  manualInput: true,
+  allocations: true,
+  blocks: true,
+};
+
 function planFixture(
   overrides?: Record<string, Cell>,
   options: Partial<LegacyImportOptions> = {},
@@ -437,7 +446,7 @@ function planFixture(
 ) {
   return analyzeWorkbook(parseFixture(overrides, workbookOptions), {
     filePath: "C:/tmp/fixture.xlsm",
-    options: { ...DEFAULT_LEGACY_IMPORT_OPTIONS, blocks: true, ...options },
+    options: { ...ALL_PARTS_ON, ...options },
     departmentNameByCode: DEPARTMENTS,
   });
 }

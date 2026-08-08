@@ -44,6 +44,8 @@ type SettingsState = {
   // Planning context (set on the Home page, read everywhere else)
   budgetYear: number;
   planningScenarioId: string;
+  /** Render the administrator surface. A preference, not a permission. */
+  adminToolsEnabled: boolean;
 
   // Loading state
   loading: boolean;
@@ -92,6 +94,7 @@ type SettingsState = {
   // Planning context setters
   setBudgetYear: (year: number) => Promise<void>;
   setPlanningScenarioId: (scenarioId: string) => Promise<void>;
+  setAdminToolsEnabled: (enabled: boolean) => Promise<void>;
   updateMultipleSettings: (settings: Partial<AppSettings>) => Promise<void>;
 
   // Load and save
@@ -142,6 +145,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   // Planning context defaults
   budgetYear: new Date().getFullYear(),
   planningScenarioId: "",
+  adminToolsEnabled: false,
   loading: false,
   initialized: false,
 
@@ -597,6 +601,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  setAdminToolsEnabled: async (enabled) => {
+    const previous = get().adminToolsEnabled;
+    set({ adminToolsEnabled: enabled });
+    try {
+      await settingsService.setSetting(SETTINGS_KEYS.ADMIN_TOOLS_ENABLED, enabled);
+    } catch (error) {
+      console.error("Failed to save admin tools setting:", error);
+      set({ adminToolsEnabled: previous });
+    }
+  },
+
   // Update multiple settings at once
   updateMultipleSettings: async (settings) => {
     // Store previous state for rollback
@@ -703,6 +718,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         // Planning context
         budgetYear: settings[SETTINGS_KEYS.BUDGET_YEAR],
         planningScenarioId: settings[SETTINGS_KEYS.PLANNING_SCENARIO_ID],
+        adminToolsEnabled: settings[SETTINGS_KEYS.ADMIN_TOOLS_ENABLED],
         initialized: true,
       });
 
@@ -812,3 +828,4 @@ export const useIncludeDetailBreakdown = () => useSettingsStore((s) => s.include
 export const useIncludeBanquetingBreakdown = () => useSettingsStore((s) => s.includeBanquetingBreakdown);
 export const useBudgetYear = () => useSettingsStore((s) => s.budgetYear);
 export const usePlanningScenarioId = () => useSettingsStore((s) => s.planningScenarioId);
+export const useAdminToolsEnabled = () => useSettingsStore((s) => s.adminToolsEnabled);

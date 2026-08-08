@@ -203,10 +203,22 @@ export function initializeIpc(deps: {
   // already makes. Server-side authority is re-resolved on every request
   // regardless: the OU gate stops a request naming the wrong hotel, it does not
   // decide what the user may see.
+  // The administration reads are estate-wide by definition — "every plan with an
+  // ineligible owner" and "who exported what" name no hotel and cannot be gated
+  // on one. They are gated instead where it counts: the server refuses them to
+  // anyone who is not an administrator, which is also how the client finds out
+  // whether it should render the surface at all.
   const CROSS_OU_SYNC_CHANNELS = new Set<string>([
     KAIROS_SYNC_CHANNELS.myDelegations,
     KAIROS_SYNC_CHANNELS.clusters,
     KAIROS_SYNC_CHANNELS.clusterDivergence,
+    KAIROS_SYNC_CHANNELS.adminProbe,
+    KAIROS_SYNC_CHANNELS.adminHotels,
+    KAIROS_SYNC_CHANNELS.adminPlans,
+    KAIROS_SYNC_CHANNELS.adminAudit,
+    KAIROS_SYNC_CHANNELS.adminDownloads,
+    KAIROS_SYNC_CHANNELS.adminUserScope,
+    KAIROS_SYNC_CHANNELS.adminBundle,
   ]);
   const kairosSyncHandlers = createKairosSyncHandlers(apiClient);
   Object.entries(kairosSyncHandlers).forEach(([channel, handler]) => {

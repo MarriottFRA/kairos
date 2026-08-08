@@ -54,6 +54,12 @@ export const SETTINGS_KEYS = {
   // Home page and consumed everywhere else (positions grid, future reports)
   BUDGET_YEAR: 'budgetYear',
   PLANNING_SCENARIO_ID: 'planningScenarioId',
+  // Whether to RENDER the administrator surface on Sync and Settings. A
+  // preference, never a permission: every action behind it is authorised
+  // server-side on every request, and the switch itself only turns on after an
+  // admin-only endpoint has answered 200. A hotel user who sets this by editing
+  // the database sees the same buttons and gets 403 from all of them.
+  ADMIN_TOOLS_ENABLED: 'adminToolsEnabled',
   // Terms of use acceptance record. Version + who + when, so a re-worded set of
   // terms (TERMS_VERSION bump) re-prompts, and Settings can show what was
   // accepted. "" means never accepted.
@@ -106,6 +112,7 @@ export interface AppSettings {
   [SETTINGS_KEYS.POSITIONS_GRID_STATE]: string;
   [SETTINGS_KEYS.BUDGET_YEAR]: number;
   [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: string;
+  [SETTINGS_KEYS.ADMIN_TOOLS_ENABLED]: boolean;
   [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: string;
   [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: string;
   [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: string;
@@ -158,6 +165,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   [SETTINGS_KEYS.POSITIONS_GRID_STATE]: "",
   [SETTINGS_KEYS.BUDGET_YEAR]: currentYear,
   [SETTINGS_KEYS.PLANNING_SCENARIO_ID]: "",
+  [SETTINGS_KEYS.ADMIN_TOOLS_ENABLED]: false,
   [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: "",
   [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: "",
   [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: "",

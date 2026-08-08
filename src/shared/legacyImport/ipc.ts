@@ -151,22 +151,25 @@ export interface LegacyImportOptions {
    * Create the benefit blocks (pension, allowances, incentives…) from the
    * workbook's bands.
    *
-   * Defaults OFF, unlike the sheet options. The importer can read the columns,
-   * but it cannot know what a hotel has USED them for — one hotel's "Custom
-   * Allowance 2" is another's shift differential — and a block built by hand is
-   * both more accurate and understood by whoever has to maintain it. The
-   * preview lists every band it found either way, so leaving this off is a
-   * recipe rather than a loss.
+   * The importer can read the columns, but it cannot know what a hotel has
+   * USED them for — one hotel's "Custom Allowance 2" is another's shift
+   * differential — and a block built by hand is both more accurate and
+   * understood by whoever has to maintain it. The preview lists every band it
+   * found either way, so leaving this off is a recipe rather than a loss.
    */
   blocks: boolean;
   /** Force a column map instead of reading it off the file. */
   version: LegacyVersionChoice;
 }
 
+/**
+ * Everything OFF. The import writes into a live plan, so each part is a
+ * deliberate tick rather than something you have to remember to untick.
+ */
 export const DEFAULT_LEGACY_IMPORT_OPTIONS: LegacyImportOptions = {
-  calendarAndHours: true,
-  manualInput: true,
-  allocations: true,
+  calendarAndHours: false,
+  manualInput: false,
+  allocations: false,
   blocks: false,
   version: "auto",
 };
