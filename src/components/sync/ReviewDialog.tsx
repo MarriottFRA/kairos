@@ -54,6 +54,16 @@ export interface ReviewDialogProps {
   /** A support lease was handed back; the whole plan is being re-downloaded. */
   reset?: boolean;
   /**
+   * Offer the button even when there is nothing to transfer.
+   *
+   * Set for a plan this computer does not hold. "Nothing to download" and
+   * "nothing to do" are different things there: the download is also what puts
+   * the plan in the local list, and a plan whose rows have all arrived before —
+   * or which nobody has published into yet — otherwise gets a dialog with no
+   * button on it and can never be brought onto this machine at all.
+   */
+  allowEmpty?: boolean;
+  /**
    * The local plan this download takes the name of.
    *
    * Named here rather than only on the card, because the confirmation is the
@@ -89,6 +99,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     chunks,
     skippedTypes = [],
     reset = false,
+    allowEmpty = false,
     replacesLabel = null,
     labels = TYPE_LABELS,
     onConfirm,
@@ -121,11 +132,22 @@ export default function ReviewDialog(props: ReviewDialogProps) {
         )}
 
         {nothing ? (
-          <Typography color="text.secondary">
-            {direction === "pull"
-              ? "Nothing has changed on the server since your last download."
-              : "Everything here has already been published."}
-          </Typography>
+          allowEmpty ? (
+            <Alert severity="info">
+              <AlertTitle>There are no rows to bring down</AlertTitle>
+              The server holds this plan but has nothing in it for you that this
+              computer does not already have — usually because nobody has
+              published into it yet. Downloading still puts the plan on this
+              computer, so it can be opened on the Positions page and published
+              from here.
+            </Alert>
+          ) : (
+            <Typography color="text.secondary">
+              {direction === "pull"
+                ? "Nothing has changed on the server since your last download."
+                : "Everything here has already been published."}
+            </Typography>
+          )
         ) : (
           <Stack spacing={2}>
             <Box>
@@ -201,9 +223,9 @@ export default function ReviewDialog(props: ReviewDialogProps) {
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={busy}>
-          {nothing ? "Close" : "Cancel"}
+          {nothing && !allowEmpty ? "Close" : "Cancel"}
         </Button>
-        {!nothing && (
+        {(!nothing || allowEmpty) && (
           <Button
             variant="contained"
             onClick={onConfirm}
@@ -211,7 +233,11 @@ export default function ReviewDialog(props: ReviewDialogProps) {
             startIcon={busy ? <CircularProgress size={16} /> : undefined}
             color={deleted > 0 ? "warning" : "primary"}
           >
-            {direction === "pull" ? "Download and apply" : "Publish"}
+            {direction !== "pull"
+              ? "Publish"
+              : nothing
+                ? "Add to this computer"
+                : "Download and apply"}
           </Button>
         )}
       </DialogActions>

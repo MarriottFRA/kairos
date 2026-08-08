@@ -99,6 +99,9 @@ import { planState } from "../../shared/kairosSync/planState";
 import { useAdminTools } from "../../hooks/useAdminTools";
 import PlanSyncCard, { PlanAdminActions } from "../../components/sync/PlanSyncCard";
 import CloudPlanCard from "../../components/sync/CloudPlanCard";
+import DeletePlanDialog, {
+  LocalCopyAfterDelete,
+} from "../../components/sync/DeletePlanDialog";
 import PublishResultAlert from "../../components/sync/PublishResultAlert";
 import ReviewDialog from "../../components/sync/ReviewDialog";
 import LeaseBanner from "../../components/sync/LeaseBanner";
@@ -155,6 +158,19 @@ interface StructureReview {
   removedByType: Record<string, number>;
   total: number;
   removed: number;
+}
+
+/**
+ * What this computer is left holding once the server's copy is deleted.
+ *
+ * The three cases are genuinely different promises, so the dialog is told which
+ * one applies rather than hedging across all three. `twin` is the interesting
+ * one: a plan of the same name here that is NOT this plan, which is exactly the
+ * situation where deleting is the constructive move — it frees the name.
+ */
+function localCopyAfterDelete(plan: PlanSyncStatus): LocalCopyAfterDelete {
+  if (plan.onThisComputer) return "keeps";
+  return plan.twinPlanId ? "twin" : "none";
 }
 
 /** Which per-plan dialog is open, and for which plan. */
@@ -335,7 +351,10 @@ export default function Sync() {
           skippedTypes: result.data.skippedTypes,
           reset: result.data.reset,
           replaceLocalPlanId: plan.onThisComputer ? null : plan.twinPlanId,
-          firstDownload: !plan.onThisComputer,
+          // The handler decides this, not the card: it is the one that knows
+          // whether a live `scenarios` row exists, and it uses the same answer
+          // to choose between a delta and a full pull.
+          firstDownload: result.data.firstDownload,
         });
       });
     },
@@ -361,6 +380,17 @@ export default function Sync() {
               "open it from the Positions page."
             : `Downloaded ${result.data.total} rows.`,
       });
+      // Only meaningful on a first download, and only when the server had no
+      // plan record of its own to send. Said out loud because it is the answer
+      // to "why is this plan empty?" — the rows exist, nobody published them.
+      if (result.data.createdLocalPlan && result.data.total === 0) {
+        setToast({
+          severity: "info",
+          message:
+            "The plan is now on this computer, but the server had no rows in it " +
+            "to send. Anything you enter here can be published normally.",
+        });
+      }
       // A plan downloaded onto a machine that has never held one renders through
       // whatever columns, blocks and schemes that machine happens to have. The
       // hotel setup is the other half of the download, so it is offered straight
@@ -716,6 +746,7 @@ export default function Sync() {
   const handleDelete = useCallback(async () => {
     if (!ou || dialog?.kind !== "delete") return;
     const plan = dialog.plan;
+    const freesName = !plan.onThisComputer && plan.twinPlanId !== null;
     await run(plan.planId, async () => {
       const result = await deletePlanCall(ou, plan.planId);
       setDialog(null);
@@ -724,7 +755,13 @@ export default function Sync() {
           ? { severity: "error", message: result.error.message }
           : {
               severity: "success",
-              message: "Deleted from the server. The rows survive there and support can restore it.",
+              // The name clash is the reason most owners come to this button, so
+              // the toast says the thing they are waiting to hear rather than
+              // making them go and check whether Publish has woken up.
+              message: freesName
+                ? "Deleted from the server. The name is free — your own plan of that " +
+                  "name can now be published. Support can still restore the copy that went."
+                : "Deleted from the server. The rows survive there and support can restore it.",
             }
       );
       await refresh();
@@ -909,6 +946,7 @@ export default function Sync() {
           onResolveDivergence={() => setDialog({ kind: "claim", plan })}
           onOpenDelegation={() => navigate(`/signed-in-landing/delegation?plan=${plan.planId}`)}
           onTransfer={() => setDialog({ kind: "transfer", plan })}
+          onDeleteFromServer={() => setDialog({ kind: "delete", plan })}
         >
           {plan.revoked && (
             // The one deliberate break in denial opacity, and the reason it
@@ -969,6 +1007,7 @@ export default function Sync() {
               busy={busyPlan === plan.planId}
               twinLabel={plan.twinPlanId ? labelById.get(plan.twinPlanId) : null}
               onDownload={() => void handlePreviewPull(plan)}
+              onDeleteFromServer={() => setDialog({ kind: "delete", plan })}
             />
           ))}
         </Box>
@@ -1010,6 +1049,9 @@ export default function Sync() {
         deleted={pullReview?.deleted ?? 0}
         skippedTypes={pullReview?.skippedTypes ?? []}
         reset={pullReview?.reset ?? false}
+        // A first download is worth doing even with nothing to bring down: it
+        // is what makes the plan exist here.
+        allowEmpty={pullReview?.firstDownload ?? false}
         replacesLabel={
           pullReview?.replaceLocalPlanId
             ? labelById.get(pullReview.replaceLocalPlanId) ?? "your local plan"
@@ -1143,31 +1185,17 @@ export default function Sync() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={dialog?.kind === "delete"} onClose={() => setDialog(null)} maxWidth="sm" fullWidth>
-        <DialogTitle>Delete this plan from the server?</DialogTitle>
-        <DialogContent dividers>
-          <DialogContentText sx={{ mb: 2 }}>
-            <strong>{dialog?.plan.label}</strong> will stop being listed and
-            nobody will be able to pull it. The copy on each person&rsquo;s own
-            machine is untouched.
-          </DialogContentText>
-          <Alert severity="warning">
-            The rows are kept server-side, so support can restore this — but
-            anybody working on it will lose the ability to publish until it is.
-          </Alert>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDialog(null)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            disabled={busyPlan !== null}
-            onClick={() => void handleDelete()}
-          >
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <DeletePlanDialog
+        open={dialog?.kind === "delete"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        localCopy={dialog ? localCopyAfterDelete(dialog.plan) : "none"}
+        twinLabel={
+          dialog?.plan.twinPlanId ? labelById.get(dialog.plan.twinPlanId) ?? null : null
+        }
+        onConfirm={() => void handleDelete()}
+        onClose={() => setDialog(null)}
+      />
 
       <Snackbar
         open={toast !== null}

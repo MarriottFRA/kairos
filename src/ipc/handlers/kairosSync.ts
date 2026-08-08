@@ -33,6 +33,7 @@ import { prepared } from "../../main/positions/stmtCache";
 import type { ApiClient } from "../../main/auth/apiClient";
 import { KAIROS_ERRORS, KairosApiError, KairosClient } from "../../main/kairosSync/client";
 import { fetchHeads, limitsFrom } from "../../main/kairosSync/heads";
+import { contentHash } from "../../main/kairosSync/hash";
 import { pullPlan } from "../../main/kairosSync/pull";
 import { previewPublish, publishPlan } from "../../main/kairosSync/publish";
 import { rebuildShadowFromServer, reconcilePlan } from "../../main/kairosSync/reconcile";
@@ -44,10 +45,16 @@ import * as artifacts from "../../main/kairosSync/artifacts";
 import * as plansApi from "../../main/kairosSync/plans";
 import * as admin from "../../main/kairosSync/admin";
 import {
+  getShadow,
   getSyncState,
   listSyncStates,
   updateSyncState,
 } from "../../main/kairosSync/repo";
+import {
+  PublishedEntityType,
+  Row,
+  toEntity,
+} from "../../shared/kairosSync/entityMap";
 import { WriteScope } from "../../main/kairosSync/collect";
 import {
   KAIROS_SYNC_CHANNELS,
@@ -138,19 +145,49 @@ function clearRevocation(planId: string): void {
  * one request. That is safe in this direction: the filter only ever WITHHOLDS
  * rows, and the server re-resolves authority on the commit regardless. A scope
  * that has widened since the cache costs one extra publish, not a lost write.
+ *
+ * ## Why the head is consulted, and not only the cached state
+ *
+ * `state.relation` is written by ONE call — `/department-ownership` — and that
+ * call is only ever made by the Delegation page. An owner who publishes without
+ * having opened it has `relation === null`, which used to resolve to
+ * `canWriteStructure: false`. The consequence was not theoretical: the plan's
+ * own `scenario` row carries no department (`entityMap` gives it
+ * `departmentOf: () => null`), so it lands in the owner-only branch and was
+ * withheld from the publish — silently, since a withheld row is not a rejection.
+ *
+ * The result was a plan on the server with every position in it and no record of
+ * the plan itself. A colleague downloading it received the rows and never got a
+ * `scenarios` row, so it stayed listed as "in the cloud, not on this computer"
+ * for good — while the watermark advanced, which made every later download
+ * answer "nothing has changed on the server since your last download".
+ *
+ * `/sync/heads` carries a relation for every plan and the publish has just
+ * fetched it, so an unknown relation is now answered rather than assumed.
  */
-function writeScopeFor(planId: string): WriteScope {
+function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
   const state = getSyncState(secureDb(), planId);
-  const relation = (state?.relation ?? null) as Relation | null;
+  // `/department-ownership` is the more precise answer — its department list is
+  // filtered to the ones actually writable — so it wins whenever it exists.
+  const known = state?.relation != null;
+  const relation = (known ? state?.relation : head?.relation ?? null) as Relation | null;
+  const departments = known
+    ? state?.scopeDepartments ?? null
+    : head?.scopeKind === "PARTIAL"
+      ? head.departments
+      : null;
+
   return {
     // OWNER_DEGRADED keeps its departments but loses structure — exactly the
     // distinction this flag exists for. GLOBAL_ADMIN writes nothing at all.
     canWriteStructure: relation === "OWNER" || relation === "ADMIN_LEASE",
-    departments:
-      state?.scopeDepartments === null || state?.scopeDepartments === undefined
-        ? null
-        : new Set(state.scopeDepartments),
+    departments: departments == null ? null : new Set(departments),
   };
+}
+
+/** The head for one plan out of a (possibly replayed) property answer. */
+function headFor(heads: SyncHeads | null, planId: string): PlanHead | null {
+  return heads?.plans.find((plan) => plan.id === planId) ?? null;
 }
 
 /** How each relation reads to somebody who is not holding the guide. */
@@ -211,7 +248,7 @@ async function resolveBaseVersion(
   heads: SyncHeads | null,
   planId: string
 ): Promise<number> {
-  const head = heads?.plans.find((plan) => plan.id === planId);
+  const head = headFor(heads, planId);
   if (head) return head.version;
   if (!getSyncState(db, planId)) return 0;
   return (await plansApi.fetchPlanVersion(client, planId)).version;
@@ -470,7 +507,10 @@ export function createKairosSyncHandlers(
         await attempt(async () => {
           const scope = resolveOuScope(request.ou);
           const probe = await fetchHeads(secureDb(), client, scope.ou);
-          const writeScope = writeScopeFor(request.planId);
+          const writeScope = writeScopeFor(
+            request.planId,
+            headFor(probe.heads, request.planId)
+          );
           // Raised here as well as on publish so the refusal arrives at the
           // review step, before the user has confirmed anything.
           assertCanPublish(request.planId, writeScope);
@@ -1209,7 +1249,7 @@ export function createKairosSyncHandlers(
     const scope = resolveOuScope(request.ou);
     const db = secureDb();
     const probe = await fetchHeads(db, client, scope.ou);
-    const writeScope = writeScopeFor(request.planId);
+    const writeScope = writeScopeFor(request.planId, headFor(probe.heads, request.planId));
     assertCanPublish(request.planId, writeScope);
 
     if (adoptServerHashes) {
@@ -1254,6 +1294,50 @@ export function createKairosSyncHandlers(
     };
   }
 
+  /**
+   * Bring a cloud-only plan onto this computer even when the delta is empty.
+   *
+   * A plan is "on this computer" if and only if it has a live `scenarios` row —
+   * that is what the Positions page lists and what the Sync page counts. The row
+   * normally arrives as part of the download, because `scenario` is a published
+   * entity type; but it only arrives if somebody managed to publish it, and
+   * until the write-scope fix above they frequently could not.
+   *
+   * Rather than leave those plans permanently un-downloadable, the row is
+   * synthesised from `GET /plans/{id}` — which is the same year and label the
+   * cloud card was already displaying. Only ever called when there is no live
+   * local row, so it can neither overwrite a scenario the pull just wrote nor
+   * rename one the user already has.
+   */
+  async function ensureLocalScenario(ou: string, planId: string): Promise<boolean> {
+    const summary = await plansApi.getPlan(client, planId);
+    const now = new Date().toISOString();
+    prepared(
+      localDbHandle(),
+      `INSERT INTO scenarios (id, ou, year, label, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, NULL)
+       ON CONFLICT(id) DO UPDATE SET
+         ou = excluded.ou,
+         year = excluded.year,
+         label = excluded.label,
+         updated_at = excluded.updated_at,
+         -- Un-deletes a scenario the user had removed locally. That is the
+         -- point: they have just asked for the server's copy back.
+         deleted_at = NULL`
+    ).run(planId, ou, summary.year, summary.label, now);
+    return true;
+  }
+
+  /** Does this computer hold a live scenario row for the plan? */
+  function hasLocalScenario(ou: string, planId: string): boolean {
+    return (
+      prepared(
+        localDbHandle(),
+        `SELECT 1 FROM scenarios WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+      ).get(planId, ou) !== undefined
+    );
+  }
+
   async function runPull(
     request: { ou: string; planId: string; replaceLocalPlanId?: string | null },
     apply: boolean
@@ -1263,13 +1347,34 @@ export function createKairosSyncHandlers(
     const probe = await fetchHeads(db, client, scope.ou);
     const state = getSyncState(db, request.planId);
 
+    /**
+     * A delta is only meaningful against a copy we hold.
+     *
+     * For a plan this computer does not have, `since = watermark` is the wrong
+     * question — and a stale watermark from an earlier download that landed rows
+     * but never produced a `scenarios` row made it a trap: the server correctly
+     * answers "nothing since then", the download applies nothing, and the plan
+     * can never become local. Downloading a plan we do not hold is always a full
+     * pull, whatever we think we saw last time.
+     */
+    const onThisComputer = hasLocalScenario(scope.ou, request.planId);
+    const since = onThisComputer ? state?.watermark ?? 0 : 0;
+
     const result = await pullPlan(stores(), db, client, {
       planId: request.planId,
       ou: scope.ou,
-      since: state?.watermark ?? 0,
+      since,
       applyOrder: probe.heads?.applyOrder,
       apply,
     });
+
+    // The plan's own row, if the server never had one to send. Before the twin
+    // is soft-deleted below, so a failure here cannot leave the property with
+    // the local plan gone and the downloaded one still not listed.
+    let createdLocalPlan = false;
+    if (apply && !onThisComputer && !hasLocalScenario(scope.ou, request.planId)) {
+      createdLocalPlan = await ensureLocalScenario(scope.ou, request.planId);
+    }
 
     /**
      * The name clash, resolved in the only direction that is safe.
@@ -1291,6 +1396,10 @@ export function createKairosSyncHandlers(
 
     return {
       replacedLocalPlan,
+      /** The plan is now listed here, whether or not any rows came with it. */
+      createdLocalPlan,
+      /** True when this download is what puts the plan on this computer. */
+      firstDownload: !onThisComputer,
       planId: result.planId,
       fromVersion: result.fromVersion,
       toVersion: result.toVersion,
@@ -1336,38 +1445,142 @@ export function createKairosSyncHandlers(
 }
 
 /**
- * Rows changed locally since the last publish — the Publish button's badge.
+ * Rows changed locally since this machine and the server last agreed about them
+ * — the Publish button's badge.
  *
- * Deliberately an approximation. The exact figure comes from `previewPublish`,
- * which hashes every row in the plan; running that behind a badge that refreshes
- * on every window focus would make the app stutter for a number nobody acts on
- * until they open the Sync page anyway.
+ * ## Why this is per row and not per plan
  *
- * A plan that has never been published counts every live row, because that is
- * genuinely what a first publish would send.
+ * It used to be `updated_at > last_published_at`, one cutoff for the whole plan.
+ * That counts a row DOWNLOADED from a colleague as a local change: applying a
+ * pull writes the publisher's own `updated_at` onto the row (see
+ * `entityMap.fromPayload`) and moves `last_pulled_at`, never `last_published_at`
+ * — so every row that had just arrived was newer than the cutoff. A download
+ * therefore left the card reading "3,412 changes not published yet", and the
+ * only thing that cleared it was publishing the colleague's own work straight
+ * back at them.
+ *
+ * The shadow already records, per row, when the server last confirmed it holds
+ * that exact row — written by a pull as each page lands and by a publish as each
+ * chunk is accepted. Comparing against that answers the question actually being
+ * asked: has this row been touched HERE since the last time the two sides
+ * agreed about it?
+ *
+ * ## Two stages, because a timestamp is not a change
+ *
+ * The timestamp comparison alone still over-counts, and in a way the user
+ * cannot clear: a row re-typed to the value it already had, or touched by a
+ * recalculation, an importer or a cluster propagation, has a newer `updated_at`
+ * and identical content. "Check for differences" reports — correctly — that
+ * everything agrees, and publishing sends nothing, because the publish path
+ * compares hashes and skips it. So the number sat there with nothing that could
+ * move it. Clock skew between two machines lands in the same trap.
+ *
+ * So the SQL narrows to CANDIDATES, and when there are few enough of them each
+ * one is hashed and compared against the shadow — the same comparison a publish
+ * makes, which is what makes the two agree. Above `PENDING_REFINE_LIMIT` the
+ * candidate count is reported unrefined: that is a first publish or a fresh
+ * download, where the set is the whole plan and the exact figure changes
+ * nothing. The precise number always comes from `previewPublish`, which hashes
+ * everything; running that behind a badge that refreshes on every window focus
+ * would make the app stutter.
+ *
+ * A row with no shadow entry counts however it hashes — never published, or
+ * withheld from a publish for being outside this caller's write scope, and both
+ * are genuinely pending.
+ *
+ * `kairos_sync_shadow` lives in the encrypted store alongside all four of these
+ * tables, so stage one is a join rather than a second round trip.
  */
+/**
+ * The four published types that live in the encrypted store, with the SQL
+ * expression that reproduces each one's entity id. Kept beside the ids in
+ * `entityMap` — if one of those ever changes, this is the other place.
+ */
+const PENDING_SOURCES = [
+  { entityType: "position", table: "positions", entityId: "r.id" },
+  {
+    entityType: "component_value",
+    table: "component_values",
+    // The composite id, exactly as `componentValueId` mints it.
+    entityId: "r.position_id || ':' || r.component_def_id",
+  },
+  { entityType: "buyout_row", table: "buyout_rows", entityId: "r.id" },
+  { entityType: "manual_input_row", table: "manual_input_rows", entityId: "r.id" },
+] as const;
+
+/**
+ * Rows whose timestamp has moved since the server last confirmed them.
+ *
+ * `select` picks the rows themselves and is only ever run on a small candidate
+ * set; `count` is the one that runs on every plan, every refresh.
+ */
+function candidateSql(
+  source: (typeof PENDING_SOURCES)[number],
+  projection: "COUNT(*) AS total" | "r.*"
+): string {
+  return `
+    SELECT ${projection} FROM ${source.table} r
+      LEFT JOIN kairos_sync_shadow s
+        ON s.plan_id = r.scenario_id
+       AND s.entity_type = '${source.entityType}'
+       AND s.entity_id = ${source.entityId}
+     WHERE r.ou = ? AND r.scenario_id = ?
+       AND r.updated_at > COALESCE(s.synced_at, '')`;
+}
+
+/**
+ * Above this many candidates the count is reported as-is.
+ *
+ * Hashing is what makes the number exact, and it is worth doing for the handful
+ * of rows a working day produces. It is not worth doing for a first publish or a
+ * fresh download, where the candidate set is the whole plan — and where the
+ * exact number would not change what the user does anyway.
+ */
+const PENDING_REFINE_LIMIT = 500;
+
 function pendingCount(planId: string, ou: string): number {
   const db = secureDb();
-  const state = getSyncState(db, planId);
-  const since = state?.lastPublishedAt ?? "";
 
-  const row = prepared(
-    secureDb(),
-    `SELECT
-       (SELECT COUNT(*) FROM positions
-         WHERE ou = ? AND scenario_id = ? AND updated_at > ?) +
-       (SELECT COUNT(*) FROM component_values
-         WHERE ou = ? AND scenario_id = ? AND updated_at > ?) +
-       (SELECT COUNT(*) FROM buyout_rows
-         WHERE ou = ? AND scenario_id = ? AND updated_at > ?) +
-       (SELECT COUNT(*) FROM manual_input_rows
-         WHERE ou = ? AND scenario_id = ? AND updated_at > ?) AS total`
-  ).get(
-    ou, planId, since,
-    ou, planId, since,
-    ou, planId, since,
-    ou, planId, since
-  ) as { total?: number } | undefined;
+  const counts = PENDING_SOURCES.map((source) => {
+    const row = prepared(db, candidateSql(source, "COUNT(*) AS total")).get(ou, planId) as
+      | { total?: number }
+      | undefined;
+    return Number(row?.total ?? 0);
+  });
+  const candidates = counts.reduce((sum, value) => sum + value, 0);
+  if (candidates === 0 || candidates > PENDING_REFINE_LIMIT) return candidates;
 
-  return Number(row?.total ?? 0);
+  /**
+   * A newer timestamp is not a change.
+   *
+   * Re-typing a value that was already there, a recalculation touching a row,
+   * an importer or a cluster propagation all move `updated_at` while leaving the
+   * content identical. Those rows are then permanently stuck in the badge:
+   * "Check for differences" correctly reports that everything agrees, and
+   * publishing them is a no-op that returns before recording anything, so
+   * nothing the user can press ever clears the number.
+   *
+   * Hashing the candidates settles it the same way a publish would — the hash
+   * IS the comparison the protocol makes — and the candidate set is small by
+   * construction, so this costs a few hundred hashes at most.
+   */
+  let changed = 0;
+  for (const source of PENDING_SOURCES) {
+    const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
+    for (const row of rows) {
+      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const known = getShadow(db, planId, source.entityType, mapped.entityId);
+      // No shadow entry means the server has never confirmed this row, whatever
+      // its hash happens to be. That genuinely is pending.
+      if (!known || known.hash !== contentHash(mapped.payload)) {
+        changed += 1;
+        continue;
+      }
+      // Content agrees; a local delete the server has not been told about does
+      // not, and is exactly the change a publish would carry.
+      if (known.deleted !== mapped.deleted) changed += 1;
+    }
+  }
+
+  return changed;
 }

@@ -53,6 +53,12 @@ export interface CloudPlanCardProps {
   /** The label of the local plan this would replace, if there is one. */
   twinLabel?: string | null;
   onDownload: () => void;
+  /**
+   * Delete the server's copy. Owner-callable, and the answer to a plan on the
+   * server that nobody wants — including the name clash, where deleting is what
+   * frees the name so the local plan of that name can finally be published.
+   */
+  onDeleteFromServer?: () => void;
 }
 
 export default function CloudPlanCard({
@@ -60,8 +66,14 @@ export default function CloudPlanCard({
   busy,
   twinLabel,
   onDownload,
+  onDeleteFromServer,
 }: CloudPlanCardProps) {
   const departments = plan.departments?.length ?? 0;
+  // `plan:delete` is OWNER and ADMIN_LEASE only. A delegate looking at a plan
+  // that has been shared with them must never be offered this.
+  const canDelete =
+    onDeleteFromServer !== undefined &&
+    (plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE");
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2, mb: 2 }}>
@@ -112,16 +124,35 @@ export default function CloudPlanCard({
           </Alert>
         )}
 
-        <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center", justifyContent: "flex-end" }}>
-          {busy && <CircularProgress size={20} />}
-          <Button
-            variant="contained"
-            startIcon={<CloudDownloadOutlinedIcon />}
-            disabled={busy}
-            onClick={onDownload}
-          >
-            {plan.twinPlanId ? "Download and replace" : "Download to this computer"}
-          </Button>
+        {/* Delete is on the OPPOSITE end of the row from Download, not beside
+            it. There is no Details disclosure to hide it behind here, so the
+            separation has to come from the layout: a plain text button in error
+            colour at the far left, and the filled primary at the far right. The
+            two most consequential actions on this card send the plan in
+            opposite directions, and they should not be adjacent. */}
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ mt: 2, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+        >
+          <Box>
+            {canDelete && (
+              <Button size="small" color="error" disabled={busy} onClick={onDeleteFromServer}>
+                Delete from the server
+              </Button>
+            )}
+          </Box>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            {busy && <CircularProgress size={20} />}
+            <Button
+              variant="contained"
+              startIcon={<CloudDownloadOutlinedIcon />}
+              disabled={busy}
+              onClick={onDownload}
+            >
+              {plan.twinPlanId ? "Download and replace" : "Download to this computer"}
+            </Button>
+          </Stack>
         </Stack>
       </CardContent>
     </Card>

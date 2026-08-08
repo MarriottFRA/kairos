@@ -50,9 +50,6 @@ const ADD_PRESETS = [5, 10, 25];
 
 export interface PositionsToolbarProps {
   disabled: boolean;
-  /** Planning context (set in the app bar) — shown as chips on the right. */
-  budgetYear: number;
-  scenarioLabel: string;
   masked: boolean;
   groupByDept: boolean;
   showInactive: boolean;
@@ -83,6 +80,14 @@ export interface PositionsToolbarProps {
   onExportCsv: () => void;
 }
 
+/**
+ * The save state, when there is one worth reporting.
+ *
+ * Nothing is rendered while the queue is idle. A permanent green "All changes
+ * saved" is the state the grid is in almost all of the time, so it carried no
+ * information — the states below do, and they read louder without it sitting
+ * next to them.
+ */
 function saveChip(state: QueueState, pendingRows: number) {
   switch (state) {
     case "saving":
@@ -127,22 +132,12 @@ function saveChip(state: QueueState, pendingRows: number) {
         />
       );
     default:
-      return (
-        <Chip
-          size="small"
-          color="success"
-          variant="outlined"
-          label="All changes saved"
-          sx={{ height: 28, fontWeight: 600 }}
-        />
-      );
+      return null;
   }
 }
 
 export default function PositionsToolbar({
   disabled,
-  budgetYear,
-  scenarioLabel,
   masked,
   groupByDept,
   showInactive,
@@ -520,28 +515,11 @@ export default function PositionsToolbar({
         </span>
       </Tooltip>
 
-      {/* Save state first, then the planning context this grid edits — the
-          context strip used to be its own row above the toolbar. */}
+      {/* Only the save states that need answering. The budget year and the
+          scenario are already named in the app bar pickers directly above this
+          toolbar, and repeating them here said nothing the user could not see. */}
       <Stack direction="row" spacing={1} sx={{ ml: "auto", alignItems: "center" }}>
         {saveChip(queueState, pendingRows)}
-        <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-        <Tooltip title="Budget year and planning scenario are set in the app bar">
-          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`Budget ${budgetYear}`}
-              sx={{ height: 28, fontWeight: 600 }}
-            />
-            <Chip
-              size="small"
-              variant="outlined"
-              color="primary"
-              label={scenarioLabel}
-              sx={{ height: 28, fontWeight: 600 }}
-            />
-          </Stack>
-        </Tooltip>
       </Stack>
     </Stack>
   );

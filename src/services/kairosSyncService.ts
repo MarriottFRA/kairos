@@ -160,7 +160,11 @@ export function registerPlan(
 export function previewPull(
   ou: string,
   planId: string
-): Promise<SyncOutcome<PullPreview & { applied: boolean; reset: boolean }>> {
+): Promise<
+  SyncOutcome<
+    PullPreview & { applied: boolean; reset: boolean; firstDownload: boolean }
+  >
+> {
   return call(KAIROS_SYNC_CHANNELS.previewPull, { ou, planId });
 }
 
@@ -170,6 +174,10 @@ export function previewPull(
  * `replaceLocalPlanId` is the name-clash resolution and nothing else: pass the
  * `twinPlanId` the status call reported, and the local plan of that name is
  * soft-deleted once — and only once — the server's rows have landed.
+ *
+ * `createdLocalPlan` says the plan is now listed on this computer because this
+ * download put it there — which can happen with `total: 0`, when the server
+ * holds the plan but has no rows in it this caller had not already received.
  */
 export function pull(
   ou: string,
@@ -177,7 +185,13 @@ export function pull(
   replaceLocalPlanId?: string | null
 ): Promise<
   SyncOutcome<
-    PullPreview & { applied: boolean; reset: boolean; replacedLocalPlan: boolean }
+    PullPreview & {
+      applied: boolean;
+      reset: boolean;
+      replacedLocalPlan: boolean;
+      createdLocalPlan: boolean;
+      firstDownload: boolean;
+    }
   >
 > {
   return call(KAIROS_SYNC_CHANNELS.pull, { ou, planId, replaceLocalPlanId });

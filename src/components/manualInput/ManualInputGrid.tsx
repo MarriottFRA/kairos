@@ -15,7 +15,6 @@ import {
   DataGridPremium,
   GridCellParams,
   GridRowSelectionModel,
-  GRID_CHECKBOX_SELECTION_FIELD,
   useGridApiRef,
 } from "@mui/x-data-grid-premium";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
@@ -98,20 +97,6 @@ export default function ManualInputGrid({
         processRowUpdate={onRowUpdate}
         onProcessRowUpdateError={onRowUpdateError}
         showToolbar
-        initialState={{
-          pinnedColumns: {
-            left: [
-              GRID_CHECKBOX_SELECTION_FIELD,
-              "description",
-              "department",
-              "departmentCode",
-              "costAccount",
-              "statsAccount",
-              "rate",
-            ],
-            right: ["totalStats", "totalAmount"],
-          },
-        }}
         hideFooterSelectedRowCount
         rowBufferPx={200}
         sx={{

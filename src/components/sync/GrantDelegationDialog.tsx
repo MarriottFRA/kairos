@@ -18,21 +18,33 @@
  * Candidates who are ineligible arrive WITH a reason and are shown greyed rather
  * than filtered out — "why isn't Anna in the list?" has to have an answer.
  *
- * ## Estate administrators are not in the list
+ * ## Who is not in the list, and why it is two rules
  *
  * The server scopes candidates to people with live OU access to this property,
- * which is right — but an `access_type` of `admin` synthesises `all_ous` and
- * `all_departments` from the role, so every administrator in the estate appears
- * in every hotel's list at every property. They are the wrong answer twice over:
- * nobody at a hotel means to hand a department to the support team, and the
- * support team does not need it — an administrator's route to write access is a
- * support lease, which is deliberate and audited, not a delegation somebody had
- * to be talked into granting.
+ * which is right, and still returns two groups a hotel does not want to see.
  *
- * They come back when the support-tools switch in Settings is on, so an
- * administrator delegating between administrators still can. That switch is
- * server-probed, so this is not a hiding place for a permission — the server
- * authorises the grant either way.
+ * **Estate administrators** (`access_type = admin`) are hidden outright. The
+ * role synthesises `all_ous` and `all_departments`, so every administrator in
+ * the estate appears in every hotel's list at every property. They are the wrong
+ * answer twice over: nobody at a hotel means to hand a department to the support
+ * team, and the support team does not need it — an administrator's route to
+ * write access is a support lease, which is deliberate and audited, not a
+ * delegation somebody had to be talked into granting. They come back when the
+ * support-tools switch in Settings is on, so an administrator delegating between
+ * administrators still can. That switch is server-probed, so this is not a
+ * hiding place for a permission — the server authorises the grant either way.
+ *
+ * **Above-property colleagues** are hidden from browsing but found by searching.
+ * They are a different case and must not get the same rule: they hold real grant
+ * rows at this hotel rather than synthesised ones, there are a great many of
+ * them across the estate, and most have never opened Kairos — so as a default
+ * list they bury the handful of people the hotel actually works with. But some
+ * of them genuinely do the budgets, and hiding them absolutely would be a dead
+ * end: the support switch is server-probed and a hotel owner can never turn it
+ * on, while an administrator cannot grant a delegation on somebody else's plan
+ * without first taking a lease. So they are absent from the list and present the
+ * moment somebody types who they are looking for, with a line under the box
+ * saying so — because "why isn't X in the list?" always has to have an answer.
  *
  * ## What they will actually receive
  *
@@ -98,8 +110,31 @@ const INELIGIBLE_REASON: Record<string, string> = {
  */
 const ESTATE_ACCESS_TYPES = new Set(["admin"]);
 
+/**
+ * `access_type` values that are legitimately at this hotel but do not belong in
+ * a list somebody is browsing.
+ *
+ * Unlike `admin` these people hold real grant rows — they are here because they
+ * genuinely have access, and the server is right to return them. There are
+ * simply a great many of them across the estate and most have never opened
+ * Kairos, so as a default list they are noise in front of the handful of
+ * colleagues the hotel actually works with.
+ */
+const ABOVE_PROPERTY_ACCESS_TYPES = new Set(["above_property"]);
+
+/** How many characters make an input a deliberate search rather than a browse. */
+const SEARCH_REVEALS_AT = 3;
+
+function accessTypeOf(candidate: DelegationCandidate): string {
+  return String(candidate.accessType ?? "").trim().toLowerCase();
+}
+
 function isEstateAdmin(candidate: DelegationCandidate): boolean {
-  return ESTATE_ACCESS_TYPES.has(String(candidate.accessType ?? "").trim().toLowerCase());
+  return ESTATE_ACCESS_TYPES.has(accessTypeOf(candidate));
+}
+
+function isAboveProperty(candidate: DelegationCandidate): boolean {
+  return ABOVE_PROPERTY_ACCESS_TYPES.has(accessTypeOf(candidate));
 }
 
 export interface GrantDelegationDialogProps {
@@ -108,7 +143,11 @@ export interface GrantDelegationDialogProps {
   departments: DelegatableDepartment[];
   candidates: DelegationCandidate[];
   candidatesLoading: boolean;
-  /** Include estate administrators. On only behind the Settings support switch. */
+  /**
+   * Show everybody the server returned, including estate administrators and
+   * above-property colleagues. On only behind the Settings support switch,
+   * which is server-probed — see the note at the top of this file.
+   */
   showAdministrators?: boolean;
   /** Non-null once the server has warned about a partial overlap. */
   overlap: PartialOverlapContext | null;
@@ -131,12 +170,35 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
     onClose,
   } = props;
 
-  const people = useMemo(
-    () =>
-      showAdministrators
-        ? candidates
-        : candidates.filter((candidate) => !isEstateAdmin(candidate)),
-    [candidates, showAdministrators]
+  /** What is typed in the person box. Drives the reveal, not the query itself. */
+  const [query, setQuery] = useState("");
+
+  /**
+   * Two different kinds of hiding, because they are two different problems.
+   *
+   * Estate administrators are hidden outright — they are not really "at" this
+   * hotel and delegating to them is never the answer. Above-property colleagues
+   * ARE at this hotel and occasionally are the answer, so hiding them absolutely
+   * would leave an owner with no route at all: the support switch that reveals
+   * administrators is server-probed, so a hotel owner can never turn it on, and
+   * an administrator cannot grant a delegation on somebody else's plan without
+   * taking a lease first. They are therefore kept out of the browsing list and
+   * brought back by a deliberate search — findable when you know who you want,
+   * absent when you are looking down the list.
+   */
+  const people = useMemo(() => {
+    if (showAdministrators) return candidates;
+    const searching = query.trim().length >= SEARCH_REVEALS_AT;
+    return candidates.filter(
+      (candidate) =>
+        !isEstateAdmin(candidate) && (searching || !isAboveProperty(candidate))
+    );
+  }, [candidates, showAdministrators, query]);
+
+  /** True when somebody is only in the list because they were searched for. */
+  const revealedBySearch = useMemo(
+    () => !showAdministrators && people.some(isAboveProperty),
+    [people, showAdministrators]
   );
 
   const [selected, setSelected] = useState<string[]>([]);
@@ -269,7 +331,10 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
               getOptionLabel={(option) => option.email}
               getOptionDisabled={(option) => !option.eligible}
               onChange={(_event, value) => setPerson(value)}
-              onInputChange={(_event, value) => onSearch(value)}
+              onInputChange={(_event, value) => {
+                setQuery(value);
+                onSearch(value);
+              }}
               renderOption={(optionProps, option) => (
                 <li {...optionProps} key={option.userId}>
                   <ListItemText
@@ -299,9 +364,17 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
                 <TextField {...params} placeholder="Search colleagues at this hotel" />
               )}
             />
-            <Typography variant="caption" color="text.secondary">
-              Only people with access to this hotel are listed. Delegating gives
-              them nothing outside this plan.
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              People based at this hotel are listed. Delegating gives them
+              nothing outside this plan.
+            </Typography>
+            {/* The one question this list must always be able to answer is "why
+                isn't X in it?" — the same reason ineligible people are greyed
+                rather than removed. */}
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              {revealedBySearch
+                ? "Above-property colleagues are shown because you searched for them."
+                : "Above-property colleagues are not listed by default — type their name or email to find one."}
             </Typography>
           </Box>
 

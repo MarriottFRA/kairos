@@ -139,6 +139,13 @@ export interface PlanSyncCardProps {
   onOpenDelegation: () => void;
   /** Owner-callable, no administrator involved. */
   onTransfer?: () => void;
+  /**
+   * Delete the SERVER's copy. Owner-callable — `plan:delete` belongs to OWNER
+   * and ADMIN_LEASE, so it is not a support action and does not belong only in
+   * the support menu. It lives behind Details rather than in the button row:
+   * the same reasoning that keeps it out of one pixel from Publish.
+   */
+  onDeleteFromServer?: () => void;
   children?: ReactNode;
 }
 
@@ -154,11 +161,19 @@ export default function PlanSyncCard({
   onResolveDivergence,
   onOpenDelegation,
   onTransfer,
+  onDeleteFromServer,
   children,
 }: PlanSyncCardProps) {
   const state = planState(plan, lease);
   const partial = plan.scopeKind === "PARTIAL";
   const isOwner = plan.relation === "OWNER" || plan.relation === "OWNER_DEGRADED";
+  // `plan:delete` is OWNER and ADMIN_LEASE only — NOT OWNER_DEGRADED, whose
+  // access has lapsed, and not GLOBAL_ADMIN without a lease. Offering it wider
+  // than that just produces a 403 the user cannot act on.
+  const canDelete =
+    plan.published &&
+    onDeleteFromServer !== undefined &&
+    (plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE");
 
   const [showDetails, setShowDetails] = useState(false);
   const [relationAnchor, setRelationAnchor] = useState<HTMLElement | null>(null);
@@ -370,6 +385,30 @@ export default function PlanSyncCard({
             <Detail label="Last published" value={formatWhen(plan.lastPublishedAt)} />
             <Detail label="Last pulled" value={formatWhen(plan.lastPulledAt)} />
           </Stack>
+
+          {canDelete && (
+            // Last thing in the disclosure, quiet, and a long way from Publish.
+            // The sentence beside it is the point: people hesitate over this
+            // because they think it deletes their work, and it does not.
+            <>
+              <Divider sx={{ mt: 2, mb: 1.5 }} />
+              <Stack
+                direction="row"
+                spacing={2}
+                useFlexGap
+                sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+              >
+                <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 460 }}>
+                  Removes the server&rsquo;s copy only. The plan stays on this
+                  computer and keeps working; colleagues lose the ability to
+                  download it or publish to it.
+                </Typography>
+                <Button size="small" color="error" onClick={onDeleteFromServer} disabled={busy}>
+                  Delete from the server
+                </Button>
+              </Stack>
+            </>
+          )}
         </Collapse>
       </CardContent>
 

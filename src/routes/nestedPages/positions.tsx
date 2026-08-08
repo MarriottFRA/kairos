@@ -1649,13 +1649,11 @@ export default function Positions() {
         </Alert>
       )}
 
-      {/* The year/scenario context lives on the toolbar's right edge — one row
-          for controls, status and context, so the grid gets the height back. */}
+      {/* One row for controls and save status. The budget year and scenario are
+          named in the app bar pickers, so the toolbar no longer repeats them. */}
       <Box sx={{ mb: 1.5 }}>
         <PositionsToolbar
           disabled={controlsDisabled}
-          budgetYear={budgetYear}
-          scenarioLabel={scenario?.label ?? "No scenario"}
           masked={masked}
           groupByDept={groupByDept}
           showInactive={showInactive}
