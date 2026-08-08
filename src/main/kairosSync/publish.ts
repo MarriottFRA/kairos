@@ -60,7 +60,9 @@ import {
   toCommitEntities,
 } from "./collect";
 import {
+  advanceWatermarkAfterPublish,
   countShadow,
+  getSyncState,
   loadShadowMap,
   shadowKey,
   updateSyncState,
@@ -163,6 +165,11 @@ export function previewPublish(
  * server already holds this exact hash, which is precisely the fact the shadow
  * is supposed to record. Conflicts and rejections leave it alone, so the next
  * publish tries again rather than believing a row landed.
+ *
+ * The watermark moves too, under the narrow conditions set out on
+ * `advanceWatermarkAfterPublish`. Without that, publishing left the plan
+ * reading as "changes waiting for you to download" — the changes being the ones
+ * that had just gone up from this machine.
  */
 export async function publishPlan(
   deps: CollectDeps,
@@ -171,6 +178,9 @@ export async function publishPlan(
   options: PublishOptions
 ): Promise<PublishResult> {
   const { planId, ou } = options;
+  // Captured before the chunk loop reassigns `options` to chain baseVersions.
+  const startBaseVersion = options.baseVersion;
+  const watermarkBefore = getSyncState(db, planId)?.watermark ?? 0;
 
   const entities = collectLocalEntities(deps, {
     ou,
@@ -287,6 +297,20 @@ export async function publishPlan(
   }
 
   updateSyncState(db, planId, { lastPublishedAt: new Date().toISOString() });
+
+  // Everything between the base we committed against and the version we
+  // produced is our own work, and we already hold it. Anything else in that gap
+  // — somebody else's commit, a row we overrode, a row that conflicted — and the
+  // watermark stays where it is, because then the plan really has moved beyond
+  // what this machine has seen.
+  const soleAuthor =
+    watermarkBefore === startBaseVersion &&
+    result.conflicts.length === 0 &&
+    result.overrodeBase === 0;
+  if (soleAuthor && result.committedVersion > watermarkBefore) {
+    advanceWatermarkAfterPublish(db, planId, result.committedVersion);
+  }
+
   return result;
 }
 

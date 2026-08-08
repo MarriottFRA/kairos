@@ -18,6 +18,22 @@
  * Candidates who are ineligible arrive WITH a reason and are shown greyed rather
  * than filtered out — "why isn't Anna in the list?" has to have an answer.
  *
+ * ## Estate administrators are not in the list
+ *
+ * The server scopes candidates to people with live OU access to this property,
+ * which is right — but an `access_type` of `admin` synthesises `all_ous` and
+ * `all_departments` from the role, so every administrator in the estate appears
+ * in every hotel's list at every property. They are the wrong answer twice over:
+ * nobody at a hotel means to hand a department to the support team, and the
+ * support team does not need it — an administrator's route to write access is a
+ * support lease, which is deliberate and audited, not a delegation somebody had
+ * to be talked into granting.
+ *
+ * They come back when the support-tools switch in Settings is on, so an
+ * administrator delegating between administrators still can. That switch is
+ * server-probed, so this is not a hiding place for a permission — the server
+ * authorises the grant either way.
+ *
  * ## What they will actually receive
  *
  * The overlap is computed and shown BEFORE submitting, from the candidate's own
@@ -74,12 +90,26 @@ const INELIGIBLE_REASON: Record<string, string> = {
   NO_DEPARTMENTS: "Has no department access",
 };
 
+/**
+ * `access_type` values that hold every OU and every department by role.
+ *
+ * Kept as a set rather than a bare comparison so the day a second estate-wide
+ * type appears, this is the one place it goes.
+ */
+const ESTATE_ACCESS_TYPES = new Set(["admin"]);
+
+function isEstateAdmin(candidate: DelegationCandidate): boolean {
+  return ESTATE_ACCESS_TYPES.has(String(candidate.accessType ?? "").trim().toLowerCase());
+}
+
 export interface GrantDelegationDialogProps {
   open: boolean;
   busy: boolean;
   departments: DelegatableDepartment[];
   candidates: DelegationCandidate[];
   candidatesLoading: boolean;
+  /** Include estate administrators. On only behind the Settings support switch. */
+  showAdministrators?: boolean;
   /** Non-null once the server has warned about a partial overlap. */
   overlap: PartialOverlapContext | null;
   onSearch: (query: string) => void;
@@ -94,11 +124,20 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
     departments,
     candidates,
     candidatesLoading,
+    showAdministrators = false,
     overlap,
     onSearch,
     onSubmit,
     onClose,
   } = props;
+
+  const people = useMemo(
+    () =>
+      showAdministrators
+        ? candidates
+        : candidates.filter((candidate) => !isEstateAdmin(candidate)),
+    [candidates, showAdministrators]
+  );
 
   const [selected, setSelected] = useState<string[]>([]);
   const [person, setPerson] = useState<DelegationCandidate | null>(null);
@@ -224,7 +263,7 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
               Delegate to
             </Typography>
             <Autocomplete
-              options={candidates}
+              options={people}
               value={person}
               loading={candidatesLoading}
               getOptionLabel={(option) => option.email}

@@ -98,6 +98,7 @@ import {
 import { planState } from "../../shared/kairosSync/planState";
 import { useAdminTools } from "../../hooks/useAdminTools";
 import PlanSyncCard, { PlanAdminActions } from "../../components/sync/PlanSyncCard";
+import CloudPlanCard from "../../components/sync/CloudPlanCard";
 import PublishResultAlert from "../../components/sync/PublishResultAlert";
 import ReviewDialog from "../../components/sync/ReviewDialog";
 import LeaseBanner from "../../components/sync/LeaseBanner";
@@ -134,6 +135,10 @@ interface PullReview {
   deleted: number;
   skippedTypes: string[];
   reset: boolean;
+  /** The local plan of the same name this download takes over from. */
+  replaceLocalPlanId: string | null;
+  /** True for a plan this computer does not hold yet — a first download. */
+  firstDownload: boolean;
 }
 
 interface PublishReview {
@@ -179,6 +184,8 @@ export default function Sync() {
   const [publishReview, setPublishReview] = useState<PublishReview | null>(null);
   const [publishResult, setPublishResult] = useState<PublishResponse | null>(null);
   const [structureReview, setStructureReview] = useState<StructureReview | null>(null);
+  /** Set by a first download; consumed by the effect under `handleStructurePreview`. */
+  const [checkSetupAfterDownload, setCheckSetupAfterDownload] = useState(false);
 
   const [dialog, setDialog] = useState<PlanDialog>(null);
   const [candidates, setCandidates] = useState<DelegationCandidate[]>([]);
@@ -327,6 +334,8 @@ export default function Sync() {
           deleted: result.data.deleted,
           skippedTypes: result.data.skippedTypes,
           reset: result.data.reset,
+          replaceLocalPlanId: plan.onThisComputer ? null : plan.twinPlanId,
+          firstDownload: !plan.onThisComputer,
         });
       });
     },
@@ -336,13 +345,27 @@ export default function Sync() {
   const handleConfirmPull = useCallback(async () => {
     if (!ou || !pullReview) return;
     await run(pullReview.planId, async () => {
-      const result = await pullCall(ou, pullReview.planId);
+      const result = await pullCall(ou, pullReview.planId, pullReview.replaceLocalPlanId);
       if (syncFailed(result)) {
         fail(result.error.message);
         return;
       }
       setPullReview(null);
-      setToast({ severity: "success", message: `Downloaded ${result.data.total} rows.` });
+      setToast({
+        severity: "success",
+        message: result.data.replacedLocalPlan
+          ? `Downloaded ${result.data.total} rows. This is now the plan of that name on ` +
+            "this computer; the copy it replaced is no longer listed."
+          : pullReview.firstDownload
+            ? `Downloaded ${result.data.total} rows. The plan is now on this computer — ` +
+              "open it from the Positions page."
+            : `Downloaded ${result.data.total} rows.`,
+      });
+      // A plan downloaded onto a machine that has never held one renders through
+      // whatever columns, blocks and schemes that machine happens to have. The
+      // hotel setup is the other half of the download, so it is offered straight
+      // away — as a review, like every other direction, never applied blind.
+      if (pullReview.firstDownload) setCheckSetupAfterDownload(true);
       await refresh();
     });
   }, [ou, pullReview, refresh, run, fail]);
@@ -522,6 +545,15 @@ export default function Sync() {
       removed: changes.filter((change) => change.kind === "removed").length,
     });
   }, [ou, fail]);
+
+  // Deliberately an effect rather than a call inside `handleConfirmPull`: the
+  // preview is declared below that handler, so naming it there would read it
+  // before it exists.
+  useEffect(() => {
+    if (!checkSetupAfterDownload) return;
+    setCheckSetupAfterDownload(false);
+    void handleStructurePreview();
+  }, [checkSetupAfterDownload, handleStructurePreview]);
 
   const handleStructurePull = useCallback(async () => {
     if (!ou) return;
@@ -727,8 +759,31 @@ export default function Sync() {
    * expect — but it does not get the same weight as one with unpublished work
    * or a support lease on it.
    */
+  /**
+   * Plans the server holds that this computer does not.
+   *
+   * Kept out of the main list on purpose: none of the states below apply to
+   * them, and the only action is to download. A new machine and a fresh
+   * delegation both land here.
+   */
+  const cloudPlans = useMemo(
+    () => (status?.plans ?? []).filter((plan) => !plan.onThisComputer),
+    [status]
+  );
+
+  const localPlans = useMemo(
+    () => (status?.plans ?? []).filter((plan) => plan.onThisComputer),
+    [status]
+  );
+
+  /** planId → label, so a clash can be named on both cards. */
+  const labelById = useMemo(
+    () => new Map((status?.plans ?? []).map((plan) => [plan.planId, plan.label])),
+    [status]
+  );
+
   const orderedPlans = useMemo(() => {
-    const plans = status?.plans ?? [];
+    const plans = localPlans;
     return [...plans].sort((left, right) => {
       const leftState = planState(left, leases[left.planId]);
       const rightState = planState(right, leases[right.planId]);
@@ -738,7 +793,7 @@ export default function Sync() {
       if (left.year !== right.year) return right.year - left.year;
       return left.label.localeCompare(right.label);
     });
-  }, [status, leases]);
+  }, [localPlans, leases]);
 
   if (!ou) {
     return (
@@ -748,12 +803,15 @@ export default function Sync() {
     );
   }
 
-  const anyOwner = status?.plans.some(
+  // Only a plan this computer holds can have its setup published from here.
+  const anyOwner = localPlans.some(
     (plan) => plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE"
   );
-  const attentionCount = orderedPlans.filter(
-    (plan) => planState(plan, leases[plan.planId]).needsAttention
-  ).length;
+  // Cloud-only plans count: a page that says "Up to date" above a plan waiting
+  // to be downloaded is contradicting itself.
+  const attentionCount =
+    orderedPlans.filter((plan) => planState(plan, leases[plan.planId]).needsAttention)
+      .length + cloudPlans.length;
 
   const adminActionsFor = (plan: PlanSyncStatus): PlanAdminActions => ({
     onTakeLease: () => setDialog({ kind: "acquireLease", plan }),
@@ -830,10 +888,10 @@ export default function Sync() {
         </Box>
       )}
 
-      {status?.plans.length === 0 && (
+      {status && localPlans.length === 0 && cloudPlans.length === 0 && (
         <Alert severity="info">
-          There are no planning scenarios for this hotel yet. Create one on the
-          Positions page first.
+          There are no planning scenarios for this hotel yet, and the server has
+          none for you either. Create one on the Positions page.
         </Alert>
       )}
 
@@ -891,6 +949,31 @@ export default function Sync() {
         </PlanSyncCard>
       ))}
 
+      {cloudPlans.length > 0 && (
+        // Deliberately below the local plans and above the hotel setup: it is
+        // the answer to "where is my plan?" on a machine that has never held it,
+        // and for a delegate it is the only thing on this page that applies.
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+            In the cloud, not on this computer
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Plans the server holds for you at this hotel — ones you own from
+            another machine, and ones colleagues have delegated to you. Downloading
+            brings the whole plan here; nothing changes until you do.
+          </Typography>
+          {cloudPlans.map((plan) => (
+            <CloudPlanCard
+              key={plan.planId}
+              plan={plan}
+              busy={busyPlan === plan.planId}
+              twinLabel={plan.twinPlanId ? labelById.get(plan.twinPlanId) : null}
+              onDownload={() => void handlePreviewPull(plan)}
+            />
+          ))}
+        </Box>
+      )}
+
       {status && (
         <Card variant="outlined" sx={{ borderRadius: 2, mt: 3 }}>
           <CardContent>
@@ -918,7 +1001,7 @@ export default function Sync() {
 
       <ReviewDialog
         open={pullReview !== null}
-        title="Download changes"
+        title={pullReview?.firstDownload ? "Download this plan" : "Download changes"}
         direction="pull"
         busy={busyPlan !== null}
         byType={pullReview?.byType ?? {}}
@@ -927,6 +1010,11 @@ export default function Sync() {
         deleted={pullReview?.deleted ?? 0}
         skippedTypes={pullReview?.skippedTypes ?? []}
         reset={pullReview?.reset ?? false}
+        replacesLabel={
+          pullReview?.replaceLocalPlanId
+            ? labelById.get(pullReview.replaceLocalPlanId) ?? "your local plan"
+            : null
+        }
         onConfirm={() => void handleConfirmPull()}
         onClose={() => setPullReview(null)}
       />

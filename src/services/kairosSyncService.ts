@@ -164,11 +164,23 @@ export function previewPull(
   return call(KAIROS_SYNC_CHANNELS.previewPull, { ou, planId });
 }
 
+/**
+ * Apply a pull.
+ *
+ * `replaceLocalPlanId` is the name-clash resolution and nothing else: pass the
+ * `twinPlanId` the status call reported, and the local plan of that name is
+ * soft-deleted once — and only once — the server's rows have landed.
+ */
 export function pull(
   ou: string,
-  planId: string
-): Promise<SyncOutcome<PullPreview & { applied: boolean; reset: boolean }>> {
-  return call(KAIROS_SYNC_CHANNELS.pull, { ou, planId });
+  planId: string,
+  replaceLocalPlanId?: string | null
+): Promise<
+  SyncOutcome<
+    PullPreview & { applied: boolean; reset: boolean; replacedLocalPlan: boolean }
+  >
+> {
+  return call(KAIROS_SYNC_CHANNELS.pull, { ou, planId, replaceLocalPlanId });
 }
 
 /** What a publish would send, what it withholds, and what has no department. */

@@ -199,6 +199,28 @@ export interface PlanSyncStatus {
   pendingChanges: number;
   /** Set while a revoked-delegation banner should be shown. Never auto-cleared. */
   revoked: Record<string, unknown> | null;
+  /**
+   * False when the server holds this plan and this computer does not.
+   *
+   * A new machine, or a delegation on a plan somebody else created. The page
+   * used to be built from the local `scenarios` table alone, so such a plan was
+   * invisible and the only action on offer was "publish" — which for a delegate
+   * means POST /plans, a create they are not eligible to make.
+   */
+  onThisComputer: boolean;
+  /** Who owns it. Only resolved for plans this computer does not hold. */
+  ownerEmail: string | null;
+  /** Rows the server holds. Only resolved for plans this computer does not hold. */
+  serverRows: number;
+  /**
+   * A DIFFERENT plan of the same year and name on the other side.
+   *
+   * Set on both halves of the pair. The ids differ, so these are two plans and
+   * no amount of matching makes them one — but publishing the local one would
+   * put a second plan of the same name on the server, which is never what
+   * somebody who has just moved machine wants.
+   */
+  twinPlanId: string | null;
 }
 
 export interface SyncStatusResponse {
@@ -316,6 +338,14 @@ export interface PlanRequest {
 
 export interface PullRequest extends PlanRequest {
   apply?: boolean;
+  /**
+   * Soft-delete this local scenario once the pull has applied.
+   *
+   * The name-clash resolution: the server's copy takes over as the plan of that
+   * name, and the local one it replaced stops being listed. Only ever the id the
+   * status call reported as `twinPlanId`, and only after the rows have landed.
+   */
+  replaceLocalPlanId?: string | null;
 }
 
 export interface GrantRequest extends PlanRequest {

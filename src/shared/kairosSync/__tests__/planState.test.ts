@@ -30,6 +30,10 @@ function plan(overrides: Partial<PlanSyncStatus> = {}): PlanSyncStatus {
     lastPulledAt: "2026-08-01T10:00:00Z",
     pendingChanges: 0,
     revoked: null,
+    onThisComputer: true,
+    ownerEmail: null,
+    serverRows: 0,
+    twinPlanId: null,
     ...overrides,
   };
 }
@@ -124,6 +128,55 @@ describe("planState", () => {
         mode: "READ_ONLY_SUPPORT",
       });
       expect(state.kind).toBe("LOCAL_AHEAD");
+    });
+  });
+
+  describe("plans this computer does not hold", () => {
+    it("is CLOUD_ONLY, and the action is to download it", () => {
+      // The case that made a delegate's Sync page empty: the server lists the
+      // plan, the local scenarios table does not, so it was dropped entirely.
+      const state = planState(
+        plan({ onThisComputer: false, relation: "DELEGATE", watermark: 0 })
+      );
+      expect(state.kind).toBe("CLOUD_ONLY");
+      expect(state.action).toBe("download");
+      expect(state.needsAttention).toBe(true);
+    });
+
+    it("says plainly that downloading replaces the local plan of the same name", () => {
+      const state = planState(plan({ onThisComputer: false, twinPlanId: "local-1" }));
+      expect(state.kind).toBe("CLOUD_ONLY");
+      expect(state.detail).toContain("removes the other");
+    });
+
+    it("wins over the version counters, which mean nothing without a local copy", () => {
+      const state = planState(
+        plan({ onThisComputer: false, serverVersion: 50, watermark: 0 })
+      );
+      expect(state.kind).toBe("CLOUD_ONLY");
+    });
+
+    it("still yields to a lease and a revocation", () => {
+      expect(planState(plan({ onThisComputer: false }), EXCLUSIVE).kind).toBe("LOCKED");
+      expect(planState(plan({ onThisComputer: false, revoked: {} })).kind).toBe("REVOKED");
+    });
+  });
+
+  describe("a local plan whose name is already taken on the server", () => {
+    it("is NAME_TAKEN and offers no publish", () => {
+      // Publishing here mints a SECOND plan of the same name rather than
+      // linking to the first — the ids differ and the id is the plan.
+      const state = planState(
+        plan({ published: false, pendingChanges: 162, twinPlanId: "cloud-1" })
+      );
+      expect(state.kind).toBe("NAME_TAKEN");
+      expect(state.action).toBeNull();
+      expect(state.needsAttention).toBe(true);
+    });
+
+    it("does not fire once this copy has a plan of its own on the server", () => {
+      const state = planState(plan({ published: true, twinPlanId: "cloud-1" }));
+      expect(state.kind).toBe("UP_TO_DATE");
     });
   });
 

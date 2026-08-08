@@ -17,12 +17,20 @@
  * whatever else is true of it, because nothing else the user could do will work
  * until the lease is released — telling them they have 162 changes to publish
  * would be true and useless. Same for a withdrawn delegation.
+ *
+ * CLOUD_ONLY sits directly under those two: a plan this computer does not hold
+ * has no local copy to be ahead or behind, so every counter below it is
+ * meaningless and the only move is to download.
  */
 
 import { PlanSyncStatus } from "./ipc";
 import { Lease, Relation } from "./protocol";
 
 export type PlanStateKind =
+  /** The server has it; this computer does not. A new machine, or a delegation. */
+  | "CLOUD_ONLY"
+  /** Unpublished, and a plan of the same name is already on the server. */
+  | "NAME_TAKEN"
   /** Never published. The copy on this machine is the only copy. */
   | "LOCAL_ONLY"
   /** Published, and both sides agree. */
@@ -40,7 +48,7 @@ export type PlanStateKind =
   /** A delegation was withdrawn. The work survives but cannot be published. */
   | "REVOKED";
 
-export type PlanAction = "publish" | "pull" | "review" | "register" | null;
+export type PlanAction = "publish" | "pull" | "review" | "register" | "download" | null;
 
 export interface PlanState {
   kind: PlanStateKind;
@@ -91,6 +99,40 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
         "until " +
         formatWhen(lease.expiresAt) +
         ". You can look, but saving and publishing are refused until it is released.",
+      action: null,
+      tone: "blocked",
+      needsAttention: true,
+    };
+  }
+
+  // Nothing else can be said about a plan this computer does not hold: there is
+  // no local copy to be ahead, behind or level with. Downloading is the only
+  // move, and it is the same move whether you own it or hold one department.
+  if (!plan.onThisComputer) {
+    return {
+      kind: "CLOUD_ONLY",
+      headline: "On the server, not on this computer",
+      detail: plan.twinPlanId
+        ? "You already have a plan with this name here, and it is a different plan. " +
+          "Downloading makes this one the plan of that name and removes the other."
+        : "Nothing on this computer changes until you download it.",
+      action: "download",
+      tone: "attention",
+      needsAttention: true,
+    };
+  }
+
+  // Unpublished, and the server already has a plan of this name that this
+  // machine did not produce. Publishing would put a second one beside it — the
+  // usual cause being a plan rebuilt by hand after moving machine.
+  if (!plan.published && plan.twinPlanId) {
+    return {
+      kind: "NAME_TAKEN",
+      headline: "A plan with this name is already on the server",
+      detail:
+        "Publishing this copy would create a second plan of the same name. Download " +
+        "the server's copy instead — it replaces this one — or rename this plan to " +
+        "publish it alongside.",
       action: null,
       tone: "blocked",
       needsAttention: true,

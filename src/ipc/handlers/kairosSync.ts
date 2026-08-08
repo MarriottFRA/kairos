@@ -28,6 +28,7 @@ import { IpcHandler, IpcResult } from "../types";
 import { localDbHandle } from "../../local_db";
 import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
+import { softDeleteScenario } from "../../main/positions/structureRepo";
 import { prepared } from "../../main/positions/stmtCache";
 import type { ApiClient } from "../../main/auth/apiClient";
 import { KAIROS_ERRORS, KairosApiError, KairosClient } from "../../main/kairosSync/client";
@@ -60,6 +61,7 @@ import {
   KpiSeriesRequest,
   LeaseCreate,
   PlanHead,
+  PlanSummary,
   Relation,
   SyncHeads,
 } from "../../shared/kairosSync/protocol";
@@ -224,6 +226,17 @@ function localScenarios(ou: string): Array<{ id: string; year: number; label: st
   ).all(ou) as Array<{ id: string; year: number; label: string }>;
 }
 
+/**
+ * "Same plan" for the purposes of warning about a name clash.
+ *
+ * Year and label only, because that is all a human has to go on. The ids are
+ * different — that is the whole problem — so this is a heuristic for a warning
+ * and never a key anything is merged on.
+ */
+function nameKey(year: number, label: string): string {
+  return `${year} ${label.trim().toLowerCase()}`;
+}
+
 export function createKairosSyncHandlers(
   apiClient: ApiClient
 ): Record<string, IpcHandler> {
@@ -277,7 +290,51 @@ export function createKairosSyncHandlers(
             piiEnabled = null;
           }
 
-          const plans: PlanSyncStatus[] = localScenarios(scope.ou).map((scenario) => {
+          const scenarios = localScenarios(scope.ou);
+          const localIds = new Set(scenarios.map((scenario) => scenario.id));
+
+          /**
+           * Plans the server holds that this computer has no scenario for.
+           *
+           * `/sync/heads` already lists them — it is resolved through the same
+           * resolver as the routes, so it covers plans owned from another
+           * machine and plans delegated to this caller. They used to be
+           * discarded because the page was built from the local table alone.
+           *
+           * `GET /plans` is what carries the label and year (a head has neither),
+           * and it is called ONLY when there is such a plan, so the steady state
+           * where every plan is already local costs nothing extra. ARCHIVED
+           * plans are left out: they are not something to start working on.
+           */
+          const missingHeads = (heads?.plans ?? []).filter(
+            (head) => !localIds.has(head.id) && head.state === "ACTIVE"
+          );
+          let remoteSummaries: PlanSummary[] = [];
+          if (missingHeads.length > 0) {
+            try {
+              remoteSummaries = await plansApi.listPlans(client, scope.ou);
+            } catch {
+              // A page that renders the local plans is better than no page.
+              remoteSummaries = [];
+            }
+          }
+          const summaryById = new Map(
+            remoteSummaries.map((summary) => [summary.id, summary])
+          );
+
+          const localByName = new Map(
+            scenarios.map((scenario) => [
+              nameKey(scenario.year, scenario.label),
+              scenario.id,
+            ])
+          );
+          const remoteByName = new Map<string, string>();
+          for (const head of missingHeads) {
+            const summary = summaryById.get(head.id);
+            if (summary) remoteByName.set(nameKey(summary.year, summary.label), head.id);
+          }
+
+          const plans: PlanSyncStatus[] = scenarios.map((scenario): PlanSyncStatus => {
             const head = headById.get(scenario.id);
             const state = states.get(scenario.id);
             return {
@@ -304,8 +361,48 @@ export function createKairosSyncHandlers(
               lastPulledAt: state?.lastPulledAt ?? null,
               pendingChanges: pendingCount(scenario.id, scope.ou),
               revoked: state?.revokedJson ? JSON.parse(state.revokedJson) : null,
+              onThisComputer: true,
+              ownerEmail: null,
+              serverRows: 0,
+              // Only meaningful while this copy is unpublished: once it has its
+              // own plan on the server, the same name elsewhere is a coincidence.
+              twinPlanId:
+                head === undefined && state === undefined
+                  ? remoteByName.get(nameKey(scenario.year, scenario.label)) ?? null
+                  : null,
             };
           });
+
+          for (const head of missingHeads) {
+            const summary = summaryById.get(head.id);
+            // No summary means `GET /plans` failed or did not list it. There is
+            // nothing to call it on screen, so it stays out rather than being
+            // rendered as an untitled row.
+            if (!summary) continue;
+            const state = states.get(head.id);
+            plans.push({
+              planId: head.id,
+              ou: scope.ou,
+              year: summary.year,
+              label: summary.label,
+              published: true,
+              serverVersion: head.version,
+              watermark: state?.watermark ?? 0,
+              relation: head.relation,
+              scopeKind: head.scopeKind,
+              departments: head.departments,
+              structureEditable: false,
+              handbacksPending: head.handbacksPending,
+              lastPublishedAt: null,
+              lastPulledAt: state?.lastPulledAt ?? null,
+              pendingChanges: 0,
+              revoked: null,
+              onThisComputer: false,
+              ownerEmail: summary.ownerEmail,
+              serverRows: summary.entityCount,
+              twinPlanId: localByName.get(nameKey(summary.year, summary.label)) ?? null,
+            });
+          }
 
           return {
             ou: scope.ou,
@@ -360,7 +457,7 @@ export function createKairosSyncHandlers(
 
     [KAIROS_SYNC_CHANNELS.pull]: async (
       _event,
-      request: { ou: string; planId: string }
+      request: { ou: string; planId: string; replaceLocalPlanId?: string | null }
     ) => envelope(await attempt(() => runPull(request, true), request.planId)),
 
     // ------------------------------------------------------------ publish
@@ -1157,7 +1254,10 @@ export function createKairosSyncHandlers(
     };
   }
 
-  async function runPull(request: { ou: string; planId: string }, apply: boolean) {
+  async function runPull(
+    request: { ou: string; planId: string; replaceLocalPlanId?: string | null },
+    apply: boolean
+  ) {
     const scope = resolveOuScope(request.ou);
     const db = secureDb();
     const probe = await fetchHeads(db, client, scope.ou);
@@ -1171,7 +1271,26 @@ export function createKairosSyncHandlers(
       apply,
     });
 
+    /**
+     * The name clash, resolved in the only direction that is safe.
+     *
+     * The server's plan arrives with its own scenario row — `scenario` is a
+     * published entity type, so the pull creates it — and the local plan of the
+     * same name is soft-deleted, exactly as deleting it from the Positions page
+     * would. Nothing is merged and no id is rewritten: they are two plans, and
+     * the user has said which one they want to keep working on.
+     *
+     * Only after the rows have landed. A soft delete before a pull that then
+     * failed would leave the property with neither plan.
+     */
+    let replacedLocalPlan = false;
+    if (apply && request.replaceLocalPlanId && result.applied) {
+      softDeleteScenario(localDbHandle(), scope, request.replaceLocalPlanId);
+      replacedLocalPlan = true;
+    }
+
     return {
+      replacedLocalPlan,
       planId: result.planId,
       fromVersion: result.fromVersion,
       toVersion: result.toVersion,

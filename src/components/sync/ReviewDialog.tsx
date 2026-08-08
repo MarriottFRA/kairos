@@ -54,6 +54,14 @@ export interface ReviewDialogProps {
   /** A support lease was handed back; the whole plan is being re-downloaded. */
   reset?: boolean;
   /**
+   * The local plan this download takes the name of.
+   *
+   * Named here rather than only on the card, because the confirmation is the
+   * last screen before a plan stops being listed — and by this point the user
+   * has clicked past the card and is reading row counts.
+   */
+  replacesLabel?: string | null;
+  /**
    * Override the plain-English names for the keys in `byType`.
    *
    * The hotel-setup diff comes back keyed by document section rather than by
@@ -81,6 +89,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     chunks,
     skippedTypes = [],
     reset = false,
+    replacesLabel = null,
     labels = TYPE_LABELS,
     onConfirm,
     onClose,
@@ -99,6 +108,15 @@ export default function ReviewDialog(props: ReviewDialogProps) {
             An administrator worked on this plan and has handed it back. The
             server&apos;s copy is authoritative, so everything is being downloaded
             again rather than merged.
+          </Alert>
+        )}
+
+        {replacesLabel && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            <AlertTitle>This replaces a plan on this computer</AlertTitle>
+            <strong>{replacesLabel}</strong> is a different plan with the same
+            name. After this download it stops being listed, along with anything
+            in it that was never published.
           </Alert>
         )}
 

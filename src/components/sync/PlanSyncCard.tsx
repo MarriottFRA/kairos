@@ -292,9 +292,27 @@ export default function PlanSyncCard({
           <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
             {busy && <CircularProgress size={20} />}
             {!plan.published ? (
-              <Button variant="contained" onClick={onRegister} disabled={busy}>
-                Publish to server
-              </Button>
+              // A plan of this name is already up there and is not this one, so
+              // publishing would put a second one beside it. The way out is the
+              // "Download and replace" on that plan's card further down the
+              // page, or renaming this one — both said in the state's detail.
+              <Tooltip
+                title={
+                  plan.twinPlanId
+                    ? "A plan with this name is already on the server. Download it below, or rename this plan to publish it separately."
+                    : ""
+                }
+              >
+                <span>
+                  <Button
+                    variant="contained"
+                    onClick={onRegister}
+                    disabled={busy || plan.twinPlanId !== null}
+                  >
+                    Publish to server
+                  </Button>
+                </span>
+              </Tooltip>
             ) : (
               <>
                 {/* Both sides moved. Neither Download nor Publish is the

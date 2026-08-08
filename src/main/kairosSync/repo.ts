@@ -163,7 +163,9 @@ export function updateSyncState(
  *
  * Separate from `updateSyncState` so the watermark advance is one named,
  * greppable call rather than a field that any caller could set. `pull.ts` runs
- * it once, after the last page, and nowhere else.
+ * it once, after the last page, and nowhere else. The only other function
+ * permitted to move a watermark is `advanceWatermarkAfterPublish`, immediately
+ * below, and it is deliberately narrower.
  */
 export function completePull(
   db: Db,
@@ -178,6 +180,38 @@ export function completePull(
         SET watermark = ?, sync_epoch = ?, last_pulled_at = ?
       WHERE plan_id = ?`
   ).run(toVersion, syncEpoch, at, planId);
+}
+
+/**
+ * Move the watermark over a range this client itself produced.
+ *
+ * Publishing bumps the plan's server version, so without this the very next
+ * probe reports `serverVersion > watermark` and the page tells somebody who has
+ * just published that there are changes waiting for them to download. There are
+ * not: the only rows in that range are the ones they just sent, and downloading
+ * them back was a no-op that existed purely to make the card go green.
+ *
+ * The caller must have established BOTH conditions before calling:
+ *
+ * - the watermark was level with the `baseVersion` the commit went out against,
+ *   so nothing published by anybody else sits in the gap; and
+ * - the commit came back with no conflicts and no `overrodeBase` rows, so no
+ *   row in the range holds a version of the truth this client has not seen.
+ *
+ * Fail either and the watermark stays put — being told to download when you
+ * need not is a nuisance, never downloading when you must is data loss.
+ */
+export function advanceWatermarkAfterPublish(
+  db: Db,
+  planId: string,
+  committedVersion: number
+): void {
+  prepared(
+    db,
+    `UPDATE kairos_sync_state
+        SET watermark = ?
+      WHERE plan_id = ? AND watermark < ?`
+  ).run(committedVersion, planId, committedVersion);
 }
 
 // ---------------------------------------------------------------- ou state

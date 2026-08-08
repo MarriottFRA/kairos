@@ -79,6 +79,7 @@ import {
   UnsyncedWorkContext,
 } from "../../shared/kairosSync/protocol";
 import { LOCK_REASON } from "../../shared/kairosSync/lockReason";
+import { useAdminTools } from "../../hooks/useAdminTools";
 import GrantDelegationDialog from "../../components/sync/GrantDelegationDialog";
 
 type Toast = { severity: "success" | "error" | "info" | "warning"; message: string } | null;
@@ -94,6 +95,7 @@ export default function DelegationPage() {
   const ou = useSelectedHotel();
   const [params] = useSearchParams();
   const planId = params.get("plan");
+  const adminTools = useAdminTools();
 
   const [ownership, setOwnership] = useState<DepartmentOwnership | null>(null);
   const [delegations, setDelegations] = useState<Delegation[]>([]);
@@ -515,6 +517,9 @@ export default function DelegationPage() {
         departments={departments}
         candidates={candidates}
         candidatesLoading={candidatesLoading}
+        // Estate administrators are hidden from hotels: their route to write
+        // access is a support lease, not a department somebody granted them.
+        showAdministrators={adminTools.visible}
         overlap={overlap}
         onSearch={(query) => void searchCandidates(query)}
         onSubmit={(body) => void handleGrant(body)}
