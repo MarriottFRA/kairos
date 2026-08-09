@@ -54,6 +54,23 @@ export interface ReviewDialogProps {
   /** A support lease was handed back; the whole plan is being re-downloaded. */
   reset?: boolean;
   /**
+   * Incoming rows that would land on local work that has never been published —
+   * pull only.
+   *
+   * Zero is worth saying out loud, not just worth not-warning-about. The
+   * situation it settles is common the moment delegation is in use: the owner
+   * edits F&B, their delegate publishes Rooms, and the plan now reads as
+   * DIVERGED with a two-way review in front of it. Those two sets cannot touch,
+   * because a delegate writes only inside their own departments — so the honest
+   * thing to show is "this overwrites nothing of yours", not a choice between
+   * versions that was never a choice.
+   */
+  collides?: number;
+  /** Departments the colliding rows are in, so the warning can name them. */
+  collidingDepartments?: string[];
+  /** Local rows not yet published, for phrasing the no-collision reassurance. */
+  pendingChanges?: number;
+  /**
    * Offer the button even when there is nothing to transfer.
    *
    * Set for a plan this computer does not hold. "Nothing to download" and
@@ -99,6 +116,9 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     chunks,
     skippedTypes = [],
     reset = false,
+    collides = 0,
+    collidingDepartments = [],
+    pendingChanges = 0,
     allowEmpty = false,
     replacesLabel = null,
     labels = TYPE_LABELS,
@@ -120,6 +140,35 @@ export default function ReviewDialog(props: ReviewDialogProps) {
             server&apos;s copy is authoritative, so everything is being downloaded
             again rather than merged.
           </Alert>
+        )}
+
+        {/* Only ever asked on a pull, and only worth answering when there IS
+            unpublished work to be anxious about. */}
+        {direction === "pull" && total > 0 && pendingChanges > 0 && (
+          collides > 0 ? (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <AlertTitle>
+                {collides === 1
+                  ? "1 of these overwrites a change of yours"
+                  : `${collides} of these overwrite changes of yours`}
+              </AlertTitle>
+              {collidingDepartments.length > 0 && (
+                <>
+                  In <strong>{collidingDepartments.join(", ")}</strong>.{" "}
+                </>
+              )}
+              The server&apos;s version of those rows wins. Publish first if you
+              want to keep yours.
+            </Alert>
+          ) : (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              <AlertTitle>None of these touch your unpublished work</AlertTitle>
+              You have {pendingChanges === 1 ? "1 change" : `${pendingChanges} changes`}{" "}
+              waiting to be published, and nothing arriving here lands on{" "}
+              {pendingChanges === 1 ? "it" : "any of them"}. Downloading is safe,
+              and you can publish afterwards as normal.
+            </Alert>
+          )
         )}
 
         {replacesLabel && (

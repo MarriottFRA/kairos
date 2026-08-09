@@ -45,11 +45,14 @@ import * as artifacts from "../../main/kairosSync/artifacts";
 import * as plansApi from "../../main/kairosSync/plans";
 import * as admin from "../../main/kairosSync/admin";
 import {
+  clearShadow,
+  deleteSyncState,
   getShadow,
   getSyncState,
   listSyncStates,
   updateSyncState,
 } from "../../main/kairosSync/repo";
+import { purgeScenario } from "../../main/maintenance/cleanupRepo";
 import {
   PublishedEntityType,
   Row,
@@ -61,10 +64,12 @@ import {
   PlanSyncStatus,
   SyncError,
   SyncOutcome,
+  SyncStatusResponse,
 } from "../../shared/kairosSync/ipc";
 import {
   BundleOptions,
   DelegationCreate,
+  DepartmentOwnership,
   KpiSeriesRequest,
   LeaseCreate,
   PlanHead,
@@ -72,6 +77,13 @@ import {
   Relation,
   SyncHeads,
 } from "../../shared/kairosSync/protocol";
+import {
+  canRead,
+  canWrite,
+  canWriteStructure,
+  RELATION_PLAIN,
+  WriteScopeKind,
+} from "../../shared/kairosSync/relations";
 
 function envelope<T>(data: T): IpcResult<T> {
   return { success: true, data, timestamp: Date.now() };
@@ -165,22 +177,71 @@ function clearRevocation(planId: string): void {
  * `/sync/heads` carries a relation for every plan and the publish has just
  * fetched it, so an unknown relation is now answered rather than assumed.
  */
+/**
+ * The cached `/department-ownership` body, which is the only authoritative
+ * answer to "which departments may I WRITE".
+ *
+ * Read from `ownershipJson` rather than the `scopeDepartments` column, and that
+ * distinction is load-bearing. Three calls write that column and they do not
+ * mean the same thing by it: `/department-ownership` stores the WRITABLE subset,
+ * while `/sync/heads` and a completed pull both store the caller's READ scope.
+ * Read scope is a superset — it includes departments handed back, and for a
+ * delegation granted with `canEdit: false` it is everything they hold while the
+ * writable set is empty. Deriving the publish filter from it therefore lets rows
+ * through that the server refuses, and makes a read-only share look writable the
+ * moment its holder downloads it.
+ *
+ * `ownershipJson` has exactly one writer, so its presence also answers "has the
+ * authoritative call ever run?" — which `relation` cannot, since heads sets that
+ * too.
+ */
+function cachedOwnership(planId: string): DepartmentOwnership | null {
+  const json = getSyncState(secureDb(), planId)?.ownershipJson;
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as DepartmentOwnership;
+  } catch {
+    // A corrupt cache is a cache miss, never a crash: every caller already
+    // handles "not asked yet".
+    return null;
+  }
+}
+
+function writableDepartmentsOf(ownership: DepartmentOwnership): string[] {
+  return ownership.departments.filter((row) => row.writable).map((row) => row.code);
+}
+
 function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
   const state = getSyncState(secureDb(), planId);
-  // `/department-ownership` is the more precise answer — its department list is
-  // filtered to the ones actually writable — so it wins whenever it exists.
-  const known = state?.relation != null;
-  const relation = (known ? state?.relation : head?.relation ?? null) as Relation | null;
-  const departments = known
-    ? state?.scopeDepartments ?? null
-    : head?.scopeKind === "PARTIAL"
+  // The relation itself comes from the head, which is refreshed on every probe;
+  // the cached ownership body is only written when the Delegation page or the
+  // grid has run, so it can be arbitrarily old.
+  const relation = (head?.relation ?? state?.relation ?? null) as Relation | null;
+
+  // Capability first. A relation with no write at all must not fall through to
+  // `departments == null`, which every caller reads as "no restriction" — for an
+  // OU_VISITOR that is exactly backwards, and would have the client filter
+  // nothing out of a publish the server refuses in its entirety.
+  if (!canWrite(relation)) {
+    return { canWriteStructure: false, departments: new Set<string>() };
+  }
+
+  const ownership = cachedOwnership(planId);
+  const departments = ownership
+    ? writableDepartmentsOf(ownership)
+    : // Never asked. The head's department list is the read scope, which is the
+      // best available guess and errs wide — the server still resolves authority
+      // per row, so the cost is a rejection rather than a lost write.
+      head?.scopeKind === "PARTIAL"
       ? head.departments
       : null;
 
   return {
     // OWNER_DEGRADED keeps its departments but loses structure — exactly the
     // distinction this flag exists for. GLOBAL_ADMIN writes nothing at all.
-    canWriteStructure: relation === "OWNER" || relation === "ADMIN_LEASE",
+    canWriteStructure: ownership
+      ? ownership.structureEditableByMe
+      : canWriteStructure(relation),
     departments: departments == null ? null : new Set(departments),
   };
 }
@@ -189,16 +250,6 @@ function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
 function headFor(heads: SyncHeads | null, planId: string): PlanHead | null {
   return heads?.plans.find((plan) => plan.id === planId) ?? null;
 }
-
-/** How each relation reads to somebody who is not holding the guide. */
-const RELATION_PLAIN: Record<string, string> = {
-  OWNER: "the owner of this plan",
-  OWNER_DEGRADED: "the owner, but with lapsed access",
-  DELEGATE: "a delegate on this plan",
-  ADMIN_LEASE: "the holder of a support lease",
-  GLOBAL_ADMIN: "an administrator with read-only access",
-  OU_MEMBER: "a colleague with read-only access",
-};
 
 /**
  * Refuse a publish that could not send a single row, and say why.
@@ -211,25 +262,54 @@ const RELATION_PLAIN: Record<string, string> = {
  * Only ever raised when the scope is empty AND the relation cannot write. A
  * `null` department set means "no restriction" and must never land here.
  */
-function assertCanPublish(planId: string, scope: WriteScope): void {
+function assertCanPublish(planId: string, scope: WriteScope, head?: PlanHead | null): void {
   if (scope.departments === null || scope.departments.size > 0) return;
   if (scope.canWriteStructure) return;
 
   const state = getSyncState(secureDb(), planId);
-  const relation = state?.relation ?? null;
-  const plain = relation ? RELATION_PLAIN[relation] ?? relation : null;
+  const relation = (head?.relation ?? state?.relation ?? null) as Relation | null;
 
   throw new KairosApiError(
     0,
-    plain
-      ? `Nothing would be published. The server currently sees you as ${plain}, ` +
-          "which gives you no departments to write to. If this plan is yours, its " +
-          "ownership on the server does not match — ask an administrator to check it."
-      : "Nothing would be published: the server has given you no departments to " +
-          "write to on this plan.",
+    emptyScopeMessage(relation),
     KAIROS_ERRORS.WRITE_SCOPE_EMPTY,
     { relation }
   );
+}
+
+/**
+ * Why this publish would send nothing, in the second person.
+ *
+ * Three genuinely different situations reach here and the wrong sentence in any
+ * of them sends somebody to their administrator over a working system.
+ */
+function emptyScopeMessage(relation: Relation | null): string {
+  // Not a fault at all: an ordinary read-only share, working as the owner
+  // intended. `canEdit: false` strips every write capability while leaving the
+  // relation a plain DELEGATE, so an empty scope here is the normal state.
+  if (relation === "DELEGATE") {
+    return (
+      "This plan was shared with you to look at, not to change. Everything you " +
+      "have done stays on this computer. Ask its owner if you need to edit a " +
+      "department — they can change that without re-sharing the plan."
+    );
+  }
+
+  // Discovery only. There is nothing to publish because there is nothing shared.
+  if (relation !== null && !canRead(relation)) {
+    return (
+      "This plan has not been shared with you, so nothing can be published to " +
+      "it. Ask its owner to delegate the departments you need."
+    );
+  }
+
+  const plain = relation ? RELATION_PLAIN[relation] ?? relation : null;
+  return plain
+    ? `Nothing would be published. The server currently sees you as ${plain}, ` +
+        "which gives you no departments to write to. If this plan is yours, its " +
+        "ownership on the server does not match — ask an administrator to check it."
+    : "Nothing would be published: the server has given you no departments to " +
+        "write to on this plan.";
 }
 
 /**
@@ -249,8 +329,11 @@ async function resolveBaseVersion(
   planId: string
 ): Promise<number> {
   const head = headFor(heads, planId);
-  if (head) return head.version;
-  if (!getSyncState(db, planId)) return 0;
+  // A null version means the head is a discovery-only entry, which has no
+  // version to commit against. Falling through to `/plans/{id}/version` gets the
+  // 403 that is the honest answer, rather than asserting `0` at a live plan.
+  if (head && head.version !== null) return head.version;
+  if (!head && !getSyncState(db, planId)) return 0;
   return (await plansApi.fetchPlanVersion(client, planId)).version;
 }
 
@@ -264,6 +347,20 @@ function localScenarios(ou: string): Array<{ id: string; year: number; label: st
 }
 
 /**
+ * A single scenario's name, read before it is destroyed.
+ *
+ * The purge takes the row with it, so the label has to be captured first or the
+ * message afterwards has nothing to call the plan it just removed.
+ */
+function scenarioLabel(ou: string, planId: string): string | null {
+  const row = prepared(
+    localDbHandle(),
+    `SELECT label FROM scenarios WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+  ).get(planId, ou) as { label: string } | undefined;
+  return row?.label ?? null;
+}
+
+/**
  * "Same plan" for the purposes of warning about a name clash.
  *
  * Year and label only, because that is all a human has to go on. The ids are
@@ -272,6 +369,49 @@ function localScenarios(ou: string): Array<{ id: string; year: number; label: st
  */
 function nameKey(year: number, label: string): string {
   return `${year} ${label.trim().toLowerCase()}`;
+}
+
+/**
+ * How much of this plan the user may write, as the card needs to say it.
+ *
+ * `UNKNOWN` until `/department-ownership` has answered once, because until then
+ * there is no honest way to tell "no departments" from "not asked". The
+ * distinction matters: `NONE` on a DELEGATE is a read-only share and the card
+ * must withdraw Publish, while `UNKNOWN` must leave it alone rather than accuse
+ * a working delegate of having lost their access.
+ *
+ * The head cannot answer this. Its `scopeKind` describes what you may READ, and
+ * a read-only delegate reads everything they were given — `canEdit: false`
+ * strips the write capabilities underneath a relation that stays plain
+ * `DELEGATE` on the wire.
+ */
+function writeScopeKindFor(
+  relation: Relation | null,
+  ownership: DepartmentOwnership | null
+): WriteScopeKind {
+  if (!canWrite(relation)) return "NONE";
+  if (!ownership) return "UNKNOWN";
+  const writable = writableDepartmentsOf(ownership);
+  if (writable.length === 0) return "NONE";
+  return writable.length < ownership.departments.length ? "PARTIAL" : "FULL";
+}
+
+/**
+ * Remove a plan this computer is no longer entitled to hold.
+ *
+ * Hard, not soft: a soft delete leaves every position, PII sidecar and component
+ * value live in the encrypted store — exactly the data the server has just
+ * stopped serving. See `purgeScenario`.
+ *
+ * Never called when there is unpublished work in it. A withdrawn delegation is
+ * frequently temporary — the owner re-grants, and the server stamps
+ * `override_base_until` precisely so the returning delegate's held-back writes
+ * win — and the app already promises on screen that the work is not lost.
+ */
+function removeUnsharedPlan(planId: string, ou: string): void {
+  purgeScenario(localDbHandle(), secureDb(), { id: planId, ou });
+  clearShadow(secureDb(), planId);
+  deleteSyncState(secureDb(), planId);
 }
 
 export function createKairosSyncHandlers(
@@ -327,6 +467,43 @@ export function createKairosSyncHandlers(
             piiEnabled = null;
           }
 
+          /**
+           * Plans this computer holds that the server will no longer show us.
+           *
+           * Access to a hotel used to confer `plan:read`, so a colleague's plan
+           * could be downloaded in full by anybody at the property. It no longer
+           * can, and a copy taken under the old rules — or one whose delegation
+           * has since been withdrawn — is data with nothing justifying it. It is
+           * purged outright rather than left to rot behind a disabled button.
+           *
+           * The exception is unpublished work, which is left strictly alone. A
+           * withdrawal is often temporary and the server has machinery
+           * (`override_base_until`) specifically so a re-granted delegate's
+           * held-back writes still land. Destroying it here would make a liar of
+           * the banner that promises it survives.
+           *
+           * Runs here rather than in the probe timer on purpose: something that
+           * removes a plan should happen on a page somebody is looking at.
+           */
+          const removed: SyncStatusResponse["removed"] = [];
+          for (const locked of probe.lockedPlans) {
+            if (!hasLocalScenario(scope.ou, locked.id)) continue;
+            if (pendingCount(locked.id, scope.ou) > 0) continue;
+            const local = scenarioLabel(scope.ou, locked.id);
+            try {
+              removeUnsharedPlan(locked.id, scope.ou);
+            } catch {
+              // A locked plan we failed to remove is not a reason to fail the
+              // page. It stays listed, frozen, and the next status call retries.
+              continue;
+            }
+            removed.push({
+              planId: locked.id,
+              label: local ?? "A plan",
+              ownerEmail: null,
+            });
+          }
+
           const scenarios = localScenarios(scope.ou);
           const localIds = new Set(scenarios.map((scenario) => scenario.id));
 
@@ -346,8 +523,19 @@ export function createKairosSyncHandlers(
           const missingHeads = (heads?.plans ?? []).filter(
             (head) => !localIds.has(head.id) && head.state === "ACTIVE"
           );
+          /**
+           * Frozen copies: held here, and unreadable.
+           *
+           * Only reachable with unpublished work in them — the sweep above took
+           * everything else. They need the listing for the same reason a locked
+           * tile does: naming the owner is what turns "you have lost access" into
+           * something the reader can act on, and a head carries no email.
+           */
+          const frozenLocalHeads = (heads?.plans ?? []).filter(
+            (head) => localIds.has(head.id) && !canRead(head.relation)
+          );
           let remoteSummaries: PlanSummary[] = [];
-          if (missingHeads.length > 0) {
+          if (missingHeads.length > 0 || frozenLocalHeads.length > 0 || removed.length > 0) {
             try {
               remoteSummaries = await plansApi.listPlans(client, scope.ou);
             } catch {
@@ -370,10 +558,26 @@ export function createKairosSyncHandlers(
             const summary = summaryById.get(head.id);
             if (summary) remoteByName.set(nameKey(summary.year, summary.label), head.id);
           }
+          /** Can the plan on the other side of a name clash actually be pulled? */
+          const readableById = new Map(
+            (heads?.plans ?? []).map((head) => [head.id, canRead(head.relation)])
+          );
+
+          // Now that the listing has been fetched, the purge notices can name the
+          // owner — which is the one fact that makes the message actionable
+          // rather than merely alarming.
+          for (const notice of removed) {
+            notice.ownerEmail = summaryById.get(notice.planId)?.ownerEmail ?? null;
+          }
 
           const plans: PlanSyncStatus[] = scenarios.map((scenario): PlanSyncStatus => {
             const head = headById.get(scenario.id);
             const state = states.get(scenario.id);
+            const relation = (head?.relation ?? state?.relation ?? null) as Relation | null;
+            const twinPlanId =
+              head === undefined && state === undefined
+                ? remoteByName.get(nameKey(scenario.year, scenario.label)) ?? null
+                : null;
             return {
               planId: scenario.id,
               ou: scope.ou,
@@ -386,12 +590,14 @@ export function createKairosSyncHandlers(
               published: head !== undefined || state !== undefined,
               serverVersion: head?.version ?? 0,
               watermark: state?.watermark ?? 0,
-              relation: (head?.relation ?? state?.relation ?? null) as Relation | null,
+              relation,
+              readable: canRead(relation),
               scopeKind: (head?.scopeKind ?? state?.scopeKind ?? null) as
                 | "FULL"
                 | "PARTIAL"
                 | null,
               departments: head?.departments ?? state?.scopeDepartments ?? null,
+              writeScope: writeScopeKindFor(relation, cachedOwnership(scenario.id)),
               structureEditable: state?.structureEditable ?? false,
               handbacksPending: head?.handbacksPending ?? 0,
               lastPublishedAt: state?.lastPublishedAt ?? null,
@@ -399,14 +605,18 @@ export function createKairosSyncHandlers(
               pendingChanges: pendingCount(scenario.id, scope.ou),
               revoked: state?.revokedJson ? JSON.parse(state.revokedJson) : null,
               onThisComputer: true,
-              ownerEmail: null,
+              // Normally null — a plan on this computer is yours, and printing
+              // your own address back at you is noise. A frozen copy is the
+              // exception: naming the owner is the only actionable thing left
+              // to say about it.
+              ownerEmail: canRead(relation)
+                ? null
+                : summaryById.get(scenario.id)?.ownerEmail ?? null,
               serverRows: 0,
               // Only meaningful while this copy is unpublished: once it has its
               // own plan on the server, the same name elsewhere is a coincidence.
-              twinPlanId:
-                head === undefined && state === undefined
-                  ? remoteByName.get(nameKey(scenario.year, scenario.label)) ?? null
-                  : null,
+              twinPlanId,
+              twinReadable: twinPlanId === null || (readableById.get(twinPlanId) ?? false),
             };
           });
 
@@ -417,17 +627,26 @@ export function createKairosSyncHandlers(
             // rendered as an untitled row.
             if (!summary) continue;
             const state = states.get(head.id);
+            const readable = canRead(head.relation);
+            const twinPlanId =
+              localByName.get(nameKey(summary.year, summary.label)) ?? null;
             plans.push({
               planId: head.id,
               ou: scope.ou,
               year: summary.year,
               label: summary.label,
               published: true,
-              serverVersion: head.version,
+              // Null on a discovery-only entry, and a null version is not
+              // version 0 — `readable` is what carries that, so the zero here is
+              // never read as "an empty plan".
+              serverVersion: head.version ?? 0,
               watermark: state?.watermark ?? 0,
               relation: head.relation,
+              readable,
               scopeKind: head.scopeKind,
               departments: head.departments,
+              // Nothing local to write, whatever the relation says.
+              writeScope: readable ? "UNKNOWN" : "NONE",
               structureEditable: false,
               handbacksPending: head.handbacksPending,
               lastPublishedAt: null,
@@ -436,8 +655,11 @@ export function createKairosSyncHandlers(
               revoked: null,
               onThisComputer: false,
               ownerEmail: summary.ownerEmail,
-              serverRows: summary.entityCount,
-              twinPlanId: localByName.get(nameKey(summary.year, summary.label)) ?? null,
+              serverRows: summary.entityCount ?? 0,
+              twinPlanId,
+              // A local plan is always downloadable-over by its own owner; the
+              // question only arises in the other direction.
+              twinReadable: true,
             });
           }
 
@@ -450,6 +672,7 @@ export function createKairosSyncHandlers(
             bst: heads?.bst ?? null,
             clustersVersion: heads?.clustersVersion ?? 0,
             upToDate: probe.notModified,
+            removed,
           };
         })
       );
@@ -507,13 +730,15 @@ export function createKairosSyncHandlers(
         await attempt(async () => {
           const scope = resolveOuScope(request.ou);
           const probe = await fetchHeads(secureDb(), client, scope.ou);
-          const writeScope = writeScopeFor(
-            request.planId,
-            headFor(probe.heads, request.planId)
-          );
+          const head = headFor(probe.heads, request.planId);
+          // Before deciding what is withheld, not after being told by the
+          // server. A department delegated away is not writable by its owner,
+          // and only this call knows that.
+          if (canRead(head?.relation ?? null)) await refreshOwnership(request.planId);
+          const writeScope = writeScopeFor(request.planId, head);
           // Raised here as well as on publish so the refusal arrives at the
           // review step, before the user has confirmed anything.
-          assertCanPublish(request.planId, writeScope);
+          assertCanPublish(request.planId, writeScope, head);
           const preview = previewPublish(stores(), secureDb(), {
             planId: request.planId,
             ou: scope.ou,
@@ -1083,6 +1308,37 @@ export function createKairosSyncHandlers(
         }, request.planId)
       ),
 
+    /**
+     * Throw away a local copy of a plan that is no longer shared with us.
+     *
+     * No request goes out, and none could: the server refuses every read of this
+     * plan, which is the reason the copy has to go. Local only, and hard.
+     *
+     * Guarded on readability rather than trusted from the renderer. This is the
+     * one channel in the feature that destroys data with no server-side undo, so
+     * "is this plan really unreadable?" is answered here, from the probe, not
+     * from a flag the caller passed in.
+     */
+    [KAIROS_SYNC_CHANNELS.discardLocalPlan]: async (
+      _event,
+      request: { ou: string; planId: string }
+    ) =>
+      envelope(
+        await attempt(async () => {
+          const scope = resolveOuScope(request.ou);
+          const probe = await fetchHeads(secureDb(), client, scope.ou);
+          const head = headFor(probe.heads, request.planId);
+          if (head && canRead(head.relation)) {
+            throw new Error(
+              "This plan is shared with you again. Download it instead of " +
+                "discarding your copy — refresh the page to see the change."
+            );
+          }
+          removeUnsharedPlan(request.planId, scope.ou);
+          return { planId: request.planId };
+        })
+      ),
+
     // ------------------------------------------------------------- lease
 
     [KAIROS_SYNC_CHANNELS.lease]: async (
@@ -1249,8 +1505,13 @@ export function createKairosSyncHandlers(
     const scope = resolveOuScope(request.ou);
     const db = secureDb();
     const probe = await fetchHeads(db, client, scope.ou);
-    const writeScope = writeScopeFor(request.planId, headFor(probe.heads, request.planId));
-    assertCanPublish(request.planId, writeScope);
+    const head = headFor(probe.heads, request.planId);
+    // The same refresh the preview does. Publishing straight from the card
+    // without previewing is a supported path, and it must not send rows the
+    // preview would have withheld.
+    if (canRead(head?.relation ?? null)) await refreshOwnership(request.planId);
+    const writeScope = writeScopeFor(request.planId, head);
+    assertCanPublish(request.planId, writeScope, head);
 
     if (adoptServerHashes) {
       await rebuildShadowFromServer(db, client, request.planId);
@@ -1328,6 +1589,48 @@ export function createKairosSyncHandlers(
     return true;
   }
 
+  /**
+   * Make sure the write scope is current before we decide what to send.
+   *
+   * `/department-ownership` is the only call that knows which departments this
+   * caller may WRITE, and until now nothing but the Delegation page and the
+   * positions grid ever made it. An owner who delegated Rooms from another
+   * machine — or simply granted it and went straight to Sync — therefore
+   * published against a scope derived from the plan head, which describes what
+   * they may READ and says FULL. Every Rooms row in that publish comes back
+   * `DEPARTMENT_OUT_OF_SCOPE`, and the preview that was supposed to warn them
+   * listed nothing as withheld.
+   *
+   * It is ETag'd server-side and cached here, so in the steady state this is a
+   * 304 and a few hundred bytes. A failure is not fatal: the cached answer, or
+   * the head fallback, is what `writeScopeFor` already degrades to.
+   */
+  async function refreshOwnership(planId: string): Promise<void> {
+    const db = secureDb();
+    try {
+      const state = getSyncState(db, planId);
+      const result = await delegation.fetchDepartmentOwnership(
+        client,
+        planId,
+        state?.ownershipEtag ?? null
+      );
+      if (!result.ownership) return;
+      updateSyncState(db, planId, {
+        ownershipEtag: result.etag,
+        ownershipJson: JSON.stringify(result.ownership),
+        structureEditable: result.ownership.structureEditableByMe,
+        relation: result.ownership.me.relation,
+        scopeKind: result.ownership.me.scopeKind,
+        scopeDepartments: result.ownership.departments
+          .filter((row) => row.writable)
+          .map((row) => row.code),
+      });
+    } catch {
+      // Offline, or a plan the server will not discuss. Both are already
+      // handled downstream — this is an accuracy improvement, not a gate.
+    }
+  }
+
   /** Does this computer hold a live scenario row for the plan? */
   function hasLocalScenario(ou: string, planId: string): boolean {
     return (
@@ -1366,6 +1669,9 @@ export function createKairosSyncHandlers(
       since,
       applyOrder: probe.heads?.applyOrder,
       apply,
+      // Only worth computing for the preview — by the time we apply, the user
+      // has already been shown the answer and decided.
+      collidesWith: apply ? undefined : pendingEntityKeys(request.planId, scope.ou),
     });
 
     // The plan's own row, if the server never had one to send. Before the twin
@@ -1409,6 +1715,8 @@ export function createKairosSyncHandlers(
       total: result.summary.total,
       deleted: result.summary.deleted,
       skippedTypes: result.skippedTypes,
+      collides: result.summary.collides,
+      collidingDepartments: result.summary.collidingDepartments,
       applied: result.applied,
       reset: result.reset,
     };
@@ -1537,6 +1845,34 @@ function candidateSql(
  * exact number would not change what the user does anyway.
  */
 const PENDING_REFINE_LIMIT = 500;
+
+/**
+ * WHICH rows are pending, not how many — `entityType:entityId`, the same key a
+ * `/changes` page can be matched on.
+ *
+ * Used to answer "would this download overwrite anything of mine?". Unlike
+ * `pendingCount` this always hashes, with no candidate ceiling: the answer is
+ * consumed by a preview the user is waiting on rather than a badge that
+ * refreshes on every window focus, and a ceiling here would silently under-report
+ * a collision, which is the one direction this must never err in.
+ */
+function pendingEntityKeys(planId: string, ou: string): ReadonlySet<string> {
+  const db = secureDb();
+  const keys = new Set<string>();
+  for (const source of PENDING_SOURCES) {
+    const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
+    for (const row of rows) {
+      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const known = getShadow(db, planId, source.entityType, mapped.entityId);
+      const changed =
+        !known ||
+        known.hash !== contentHash(mapped.payload) ||
+        known.deleted !== mapped.deleted;
+      if (changed) keys.add(`${source.entityType}:${mapped.entityId}`);
+    }
+  }
+  return keys;
+}
 
 function pendingCount(planId: string, ou: string): number {
   const db = secureDb();

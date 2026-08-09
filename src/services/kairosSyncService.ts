@@ -635,6 +635,21 @@ export function deletePlan(ou: string, planId: string): Promise<SyncOutcome<unkn
   return call(KAIROS_SYNC_CHANNELS.deletePlan, { ou, planId });
 }
 
+/**
+ * Purge this computer's copy of a plan the server will not share with us.
+ *
+ * The opposite of `deletePlan` in every respect: local rather than server-side,
+ * hard rather than soft, and with no support-side undo — the server does not
+ * acknowledge the plan to this user at all. Only offered on a copy the automatic
+ * sweep spared because it holds unpublished work.
+ */
+export function discardLocalPlan(
+  ou: string,
+  planId: string
+): Promise<SyncOutcome<{ planId: string }>> {
+  return call(KAIROS_SYNC_CHANNELS.discardLocalPlan, { ou, planId });
+}
+
 // -------------------------------------------------------------------- lease
 
 /** Readable by the hotel, so a 423 on save can be explained rather than retried. */

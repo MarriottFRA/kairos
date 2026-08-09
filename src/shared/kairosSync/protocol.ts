@@ -13,7 +13,13 @@
  * The server refuses unknown keys on request bodies (`extra="forbid"`), so a
  * misspelled field is a 422 rather than a silently dropped value. Keep the
  * request types exact.
+ *
+ * The one import is `Relation`, which lives with the capability table it decides
+ * rather than here: the enum and "what may they do?" have to move together, and
+ * a relation added here alone would inherit whichever branch it fell into.
  */
+
+import type { Relation } from "./relations";
 
 // --------------------------------------------------------------------- shared
 
@@ -44,14 +50,13 @@ export interface CommitLimits {
   manifestMaxEntities: number;
 }
 
-/** What the caller is on a given plan. Told to us; never sent. */
-export type Relation =
-  | "OWNER"
-  | "OWNER_DEGRADED"
-  | "DELEGATE"
-  | "ADMIN_LEASE"
-  | "GLOBAL_ADMIN"
-  | "OU_MEMBER";
+/**
+ * What the caller is on a given plan. Told to us; never sent.
+ *
+ * Re-exported so consumers that already import their wire shapes from here keep
+ * working; it is defined in `relations.ts` with the capability table.
+ */
+export type { Relation, WriteScopeKind } from "./relations";
 
 // ---------------------------------------------------------------------- plans
 
@@ -73,6 +78,17 @@ export interface PlanPatch {
   state?: "ACTIVE" | "ARCHIVED" | null;
 }
 
+/**
+ * A plan in `GET /plans`, which filters and never 403s for scope.
+ *
+ * Everything describing the plan's CONTENTS is nullable, because an `OU_VISITOR`
+ * entry has them all nulled — the listing is resolved for `plan:discover`, not
+ * `plan:read`. What survives is what a locked tile needs: `label`, `state`,
+ * `ownerUserId` and `ownerEmail`, the last being who to ask for a delegation.
+ *
+ * A null `version` is NOT version 0. Coercing it makes the client believe it has
+ * a plan to download for ever, against an endpoint that will only ever 403.
+ */
 export interface PlanSummary {
   id: string;
   ou: string;
@@ -81,10 +97,10 @@ export interface PlanSummary {
   ownerUserId: number;
   ownerEmail: string | null;
   state: string;
-  version: number;
-  syncEpoch: number;
-  structureVersion: number;
-  entityCount: number;
+  version: number | null;
+  syncEpoch: number | null;
+  structureVersion: number | null;
+  entityCount: number | null;
   relation: Relation | null;
   scopeKind: "FULL" | "PARTIAL" | null;
   departments: string[] | null;
@@ -106,14 +122,24 @@ export interface PlanVersion {
 
 // ---------------------------------------------------------------------- heads
 
+/**
+ * One plan on the probe.
+ *
+ * Same two shapes as the listing: an entry you hold `plan:read` on is complete,
+ * and an `OU_VISITOR` entry has `version`, `structureVersion`, `syncEpoch` and
+ * `scopeKind` all null. **Gate the sync loop on `relation`, before anything
+ * else** — `canRead()` in `relations.ts` is that gate. A client that compares a
+ * null version against a watermark with `>` does nothing, which is correct by
+ * luck; one that coerces it to 0 pulls for ever against a 403.
+ */
 export interface PlanHead {
   id: string;
-  version: number;
-  structureVersion: number;
-  syncEpoch: number;
+  version: number | null;
+  structureVersion: number | null;
+  syncEpoch: number | null;
   state: string;
   relation: Relation;
-  scopeKind: "FULL" | "PARTIAL";
+  scopeKind: "FULL" | "PARTIAL" | null;
   departments: string[] | null;
   /** Departments a delegate has handed back and the owner has not yet reopened. */
   handbacksPending: number;

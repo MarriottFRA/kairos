@@ -15,6 +15,7 @@
 import type Database from "better-sqlite3-multiple-ciphers";
 import { KairosClient, query } from "./client";
 import { SyncHeads, PlanHead, CommitLimits } from "../../shared/kairosSync/protocol";
+import { canRead } from "../../shared/kairosSync/relations";
 import { ensureSyncState, getOuState, getSyncState, putOuHeads, updateSyncState } from "./repo";
 
 type Db = InstanceType<typeof Database>;
@@ -48,6 +49,15 @@ export interface HeadsResult {
   etag: string | null;
   /** Plans whose `version` is ahead of our watermark, or whose epoch moved. */
   stalePlans: PlanHead[];
+  /**
+   * Plans at this property that this caller may see but not read.
+   *
+   * An `OU_VISITOR` entry: discoverable, with everything describing its contents
+   * nulled. Separated here rather than filtered away because two callers need
+   * them — the Sync page draws a locked tile from the label and owner, and the
+   * status handler purges any local copy that is no longer justified.
+   */
+  lockedPlans: PlanHead[];
   /** True when a support lease handback forces a full re-pull somewhere. */
   epochMoved: boolean;
 }
@@ -77,29 +87,54 @@ export async function fetchHeads(
   );
 
   if (response.status === 304) {
+    const replayed = readCachedHeads(cached?.headsJson ?? null);
     return {
-      heads: readCachedHeads(cached?.headsJson ?? null),
+      heads: replayed,
       notModified: true,
       etag: cached?.headsEtag ?? response.etag,
       stalePlans: [],
+      // Still reported on a 304: the plan has not changed, but neither has the
+      // fact that a local copy of it should not exist. A visitor's ETag is
+      // stable precisely BECAUSE the fields that move are the withheld ones, so
+      // a purge gated on a 200 would wait for a change that never comes.
+      lockedPlans: (replayed?.plans ?? []).filter((plan) => !canRead(plan.relation)),
       epochMoved: false,
     };
   }
 
   const heads = response.body;
   const stalePlans: PlanHead[] = [];
+  const lockedPlans: PlanHead[] = [];
   let epochMoved = false;
 
   putOuHeads(db, ou, response.etag, JSON.stringify(heads), new Date().toISOString());
 
   for (const plan of heads.plans) {
+    // Gate on the relation FIRST, before anything else in the loop.
+    //
+    // A plan this caller cannot read arrives with `version` and `syncEpoch`
+    // null, and the comparisons below are not merely uninformative on those —
+    // they are actively wrong. `null !== 0` is true, so a locked plan with a
+    // state row would set `epochMoved` and enter `stalePlans` on EVERY probe,
+    // for ever, driving a full re-pull into an endpoint that only ever 403s.
+    //
+    // It also gets no state row of its own. There is no watermark to keep for a
+    // plan whose versions are withheld, and creating one is what made the epoch
+    // comparison reachable in the first place.
+    if (!canRead(plan.relation)) {
+      lockedPlans.push(plan);
+      continue;
+    }
+
     ensureSyncState(db, plan.id, ou);
     const state = getSyncState(db, plan.id);
     const known = state?.watermark ?? 0;
-    const knownEpoch = state?.syncEpoch ?? plan.syncEpoch;
+    const version = plan.version ?? 0;
+    const knownEpoch = state?.syncEpoch ?? plan.syncEpoch ?? 0;
+    const epoch = plan.syncEpoch ?? knownEpoch;
 
-    if (plan.syncEpoch !== knownEpoch) epochMoved = true;
-    if (plan.version > known || plan.syncEpoch !== knownEpoch) stalePlans.push(plan);
+    if (epoch !== knownEpoch) epochMoved = true;
+    if (version > known || epoch !== knownEpoch) stalePlans.push(plan);
 
     // Cache the authorization answer so the UI can render before the first
     // round trip. Advisory only — a 403 always wins over anything stored here.
@@ -110,7 +145,14 @@ export async function fetchHeads(
     });
   }
 
-  return { heads, notModified: false, etag: response.etag, stalePlans, epochMoved };
+  return {
+    heads,
+    notModified: false,
+    etag: response.etag,
+    stalePlans,
+    lockedPlans,
+    epochMoved,
+  };
 }
 
 /**

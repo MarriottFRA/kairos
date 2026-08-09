@@ -19,6 +19,7 @@ import {
 } from "react";
 import {
   Alert,
+  AlertTitle,
   Box,
   Button,
   Snackbar,
@@ -658,11 +659,13 @@ export default function Positions() {
     writable: ReadonlySet<string> | undefined;
     planLocked: boolean;
     partial: boolean;
-  }>({ writable: undefined, planLocked: false, partial: false });
+    notShared: boolean;
+  }>({ writable: undefined, planLocked: false, partial: false, notShared: false });
   writeScopeRef.current = {
     writable: planScope.writableDepartments,
     planLocked: planScope.planLocked,
     partial: planScope.scopeKind === "PARTIAL",
+    notShared: planScope.notShared,
   };
 
   const rowWritable = useCallback((row: PositionRow): boolean => {
@@ -680,6 +683,15 @@ export default function Positions() {
   const refusalReason = useCallback((count: number): string => {
     const scope = writeScopeRef.current;
     const rows = count === 1 ? "That position is" : `${count} of those positions are`;
+    // Checked before `planLocked`, which it also sets: "an administrator is
+    // holding this plan" is a temporary situation somebody is actively working
+    // on, and this is not that.
+    if (scope.notShared) {
+      return (
+        `${rows} read-only: this plan is no longer shared with you. Ask its ` +
+        "owner to delegate the departments you need."
+      );
+    }
     if (scope.planLocked) {
       return `${rows} read-only: an administrator is holding this plan.`;
     }
@@ -701,7 +713,11 @@ export default function Positions() {
       ? [...planScope.writableDepartments]
       : [],
     lastLocalEditAt: null,
-    enabled: !planScope.unpublished,
+    // `/presence` is one of the routes a plan you cannot read refuses, and
+    // there is nobody to warn anyway — presence exists so an owner knows that
+    // withdrawing a delegation right now would strand somebody, and it already
+    // has been.
+    enabled: !planScope.unpublished && !planScope.notShared,
   });
 
   const liveSim = useMemo(() => {
@@ -1631,9 +1647,24 @@ export default function Positions() {
         </Alert>
       )}
 
+      {/* Not a locked-department case: there is no department list to show,
+          because `/department-ownership` is one of the routes refused outright.
+          The grid is read-only via `planLocked`, and this is the only place that
+          can say why — the alternative is a page that silently stopped saving. */}
+      {planScope.notShared && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <AlertTitle>This plan is no longer shared with you</AlertTitle>
+          Seeing a hotel no longer means being able to edit every plan in it. You
+          can read what is on this computer, and changes are not being saved to
+          the server. Anything you have already changed is kept — ask the plan&rsquo;s
+          owner to delegate the departments you need, and it will publish as
+          normal.
+        </Alert>
+      )}
+
       {/* Rows this user can see but not write. The grid tints them; this says
           who has them and why, which is the half a lock icon cannot carry. */}
-      {gridReady && !planScope.unpublished && (
+      {gridReady && !planScope.unpublished && !planScope.notShared && (
         <LockedDepartmentsBanner
           departments={planScope.lockedDepartments}
           planLocked={planScope.planLocked}

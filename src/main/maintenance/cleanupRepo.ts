@@ -91,9 +91,15 @@ function ids(db: Db, table: string, sql: string, ...params: unknown[]): string[]
  * encrypted-store pass needs these ids while the rows still exist, and the
  * plaintext pass then drops them.
  */
+/** One plan, addressed the way both stores key it. */
+export interface ScenarioRef {
+  id: string;
+  ou: string;
+}
+
 interface CleanupTargets {
   /** Deleted plans — their whole contents go with them. */
-  scenarios: Array<{ id: string; ou: string }>;
+  scenarios: ScenarioRef[];
   /** Deleted cost-component definitions (the compiled side of a block). */
   definitions: Array<{ id: string; ou: string }>;
   /** Removed user columns, grouped by hotel, for the extra_values scrub. */
@@ -181,6 +187,81 @@ function scrubRemovedFieldValues(secure: Db, targets: CleanupTargets): void {
 }
 
 /** Encrypted store: position values, PII, block values, manual rows, buyouts. */
+/** Every position filed under a scenario, live or soft-deleted. */
+function positionIdsInScenario(secure: Db, scenario: ScenarioRef): string[] {
+  if (!hasTable(secure, "positions")) return [];
+  return (
+    prepared(
+      secure,
+      "SELECT id FROM positions WHERE ou = ? AND scenario_id = ?"
+    ).all(scenario.ou, scenario.id) as Array<{ id: string }>
+  ).map((row) => row.id);
+}
+
+/** A position and everything that hangs off it. */
+function deletePositionTree(secure: Db, id: string, tally: CleanupTally): void {
+  tally.componentValues += del(
+    secure,
+    "component_values",
+    "DELETE FROM component_values WHERE position_id = ?",
+    id
+  );
+  tally.positionPii += del(
+    secure,
+    "position_pii",
+    "DELETE FROM position_pii WHERE position_id = ?",
+    id
+  );
+  tally.engineOutputLines += del(
+    secure,
+    "engine_output_lines",
+    "DELETE FROM engine_output_lines WHERE position_id = ?",
+    id
+  );
+  tally.positions += del(secure, "positions", "DELETE FROM positions WHERE id = ?", id);
+}
+
+/**
+ * The rest of a plan's encrypted rows, once its positions are gone.
+ *
+ * Keyed on the scenario alone — no `deleted_at` anywhere in it. That is what
+ * lets {@link purgeScenario} reuse it to remove ONE plan without touching
+ * everybody else's recycle bin, while the install-wide sweep calls the same code
+ * for each of its targets.
+ */
+function deleteScenarioTail(secure: Db, scenario: ScenarioRef, tally: CleanupTally): void {
+  tally.buyoutRows += del(
+    secure,
+    "buyout_rows",
+    "DELETE FROM buyout_rows WHERE ou = ? AND scenario_id = ?",
+    scenario.ou,
+    scenario.id
+  );
+  tally.manualInputRows += del(
+    secure,
+    "manual_input_rows",
+    "DELETE FROM manual_input_rows WHERE ou = ? AND scenario_id = ?",
+    scenario.ou,
+    scenario.id
+  );
+  tally.engineOutputLines += del(
+    secure,
+    "engine_output_lines",
+    "DELETE FROM engine_output_lines WHERE ou = ? AND scenario_id = ?",
+    scenario.ou,
+    scenario.id
+  );
+  // The run header is a cache row with no deleted_at of its own; it is
+  // meaningless once its lines are gone, so it is dropped untallied.
+  del(
+    secure,
+    "engine_runs",
+    "DELETE FROM engine_runs WHERE ou = ? AND scenario_id = ?",
+    scenario.ou,
+    scenario.id
+  );
+}
+
 function purgeSecureRows(
   secure: Db,
   targets: CleanupTargets,
@@ -193,11 +274,7 @@ function purgeSecureRows(
   const positionIds = new Set<string>();
   if (hasTable(secure, "positions")) {
     for (const scenario of targets.scenarios) {
-      const rows = prepared(
-        secure,
-        "SELECT id FROM positions WHERE ou = ? AND scenario_id = ?"
-      ).all(scenario.ou, scenario.id) as Array<{ id: string }>;
-      for (const row of rows) positionIds.add(row.id);
+      for (const id of positionIdsInScenario(secure, scenario)) positionIds.add(id);
     }
     const orphans = prepared(
       secure,
@@ -206,32 +283,7 @@ function purgeSecureRows(
     for (const row of orphans) positionIds.add(row.id);
   }
 
-  for (const id of positionIds) {
-    tally.componentValues += del(
-      secure,
-      "component_values",
-      "DELETE FROM component_values WHERE position_id = ?",
-      id
-    );
-    tally.positionPii += del(
-      secure,
-      "position_pii",
-      "DELETE FROM position_pii WHERE position_id = ?",
-      id
-    );
-    tally.engineOutputLines += del(
-      secure,
-      "engine_output_lines",
-      "DELETE FROM engine_output_lines WHERE position_id = ?",
-      id
-    );
-    tally.positions += del(
-      secure,
-      "positions",
-      "DELETE FROM positions WHERE id = ?",
-      id
-    );
-  }
+  for (const id of positionIds) deletePositionTree(secure, id, tally);
 
   // ── Values whose block/definition is gone. No cross-file FK exists, so these
   // would otherwise sit in the encrypted store forever with nothing to read them.
@@ -268,31 +320,7 @@ function purgeSecureRows(
   );
 
   // ── The rest of a deleted plan: its buyout rows and its cached engine run.
-  for (const scenario of targets.scenarios) {
-    tally.buyoutRows += del(
-      secure,
-      "buyout_rows",
-      "DELETE FROM buyout_rows WHERE ou = ? AND scenario_id = ?",
-      scenario.ou,
-      scenario.id
-    );
-    tally.engineOutputLines += del(
-      secure,
-      "engine_output_lines",
-      "DELETE FROM engine_output_lines WHERE ou = ? AND scenario_id = ?",
-      scenario.ou,
-      scenario.id
-    );
-    // The run header is a cache row with no deleted_at of its own; it is
-    // meaningless once its lines are gone, so it is dropped untallied.
-    del(
-      secure,
-      "engine_runs",
-      "DELETE FROM engine_runs WHERE ou = ? AND scenario_id = ?",
-      scenario.ou,
-      scenario.id
-    );
-  }
+  for (const scenario of targets.scenarios) deleteScenarioTail(secure, scenario, tally);
 
   tally.buyoutRows += del(
     secure,
@@ -474,6 +502,56 @@ export function purgeSoftDeleted(
   })();
   local.transaction(() => {
     purgeLocalRows(local, targets, window, tally);
+  })();
+
+  return tally;
+}
+
+/**
+ * Permanently remove ONE plan and everything in it, from both stores.
+ *
+ * The Kairos server no longer lets access to a hotel stand in for access to a
+ * colleague's plan, so a copy pulled under the old rules — or one whose
+ * delegation has since been withdrawn — is data this machine has no business
+ * holding. Soft-deleting it would not do: `softDeleteScenario` only stamps the
+ * `scenarios` row, and every position, PII sidecar and component value stays
+ * live in the encrypted store, invisible and entirely readable to anyone with
+ * the file. The whole point of the change is that those rows go.
+ *
+ * Deliberately NOT `purgeSoftDeleted` with a filter: that function is
+ * install-wide by design and would empty the user's own recycle bin as a side
+ * effect of losing access to somebody else's plan.
+ *
+ * The per-row work is the same code the sweep runs, so the two cannot drift.
+ * What differs is the absence of any `deleted_at` predicate — this is keyed on
+ * the scenario alone, which is what confines it to one plan.
+ *
+ * Same ordering rationale as the sweep: encrypted store first, plaintext parent
+ * last, so an interrupted purge leaves a plan row over missing values (visible,
+ * re-runnable) rather than orphaned values nothing explains.
+ */
+export function purgeScenario(
+  local: Db,
+  secure: Db,
+  scenario: ScenarioRef
+): CleanupTally {
+  const tally: CleanupTally = { ...EMPTY_CLEANUP_TALLY };
+
+  secure.transaction(() => {
+    for (const id of positionIdsInScenario(secure, scenario)) {
+      deletePositionTree(secure, id, tally);
+    }
+    deleteScenarioTail(secure, scenario, tally);
+  })();
+
+  local.transaction(() => {
+    tally.scenarios += del(
+      local,
+      "scenarios",
+      "DELETE FROM scenarios WHERE id = ? AND ou = ?",
+      scenario.id,
+      scenario.ou
+    );
   })();
 
   return tally;

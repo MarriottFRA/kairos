@@ -37,6 +37,7 @@ import {
   Relation,
   ScopeReport,
   UnsyncedWorkContext,
+  WriteScopeKind,
 } from "./protocol";
 import { StructureChange } from "./structureDoc";
 
@@ -121,6 +122,20 @@ export const KAIROS_SYNC_CHANNELS = {
   patchPlan: "kairosSync:patchPlan",
   /** Soft delete — the rows survive server-side so support can recover it. */
   deletePlan: "kairosSync:deletePlan",
+  /**
+   * Purge this computer's copy of a plan the server no longer shares with us.
+   *
+   * Local only — it sends no request, and could not: the server refuses to
+   * discuss the plan at all, which is precisely why the copy has to go. A hard
+   * purge, not the soft delete `deletePlan` performs, because a soft delete
+   * leaves every position and PII sidecar live in the encrypted store.
+   *
+   * Normally automatic: the status call sweeps any unreadable plan with no
+   * unpublished work. This channel is the manual form for the one case the sweep
+   * spares — a copy with local changes in it, kept in case the owner delegates
+   * again.
+   */
+  discardLocalPlan: "kairosSync:discardLocalPlan",
 
   // --------------------------------------------------------------------- lease
   lease: "kairosSync:lease",
@@ -188,8 +203,27 @@ export interface PlanSyncStatus {
   serverVersion: number;
   watermark: number;
   relation: Relation | null;
+  /**
+   * The server will answer every read of this plan with 403.
+   *
+   * Derived once, here, from the relation's capability entry — so no card
+   * re-derives it and no two disagree. False means an `OU_VISITOR` entry: the
+   * plan is discoverable and nothing about its contents is populated, which is
+   * why the counters above it are all zero rather than merely small.
+   */
+  readable: boolean;
   scopeKind: "FULL" | "PARTIAL" | null;
   departments: string[] | null;
+  /**
+   * How much of the plan this user may WRITE, which the relation cannot answer.
+   *
+   * A `canEdit: false` delegation resolves as a plain `DELEGATE` server-side and
+   * strips every write capability underneath it, so the relation alone would
+   * offer a Publish button that only ever 403s. `NONE` on a `DELEGATE` is a
+   * read-only share; on an owner it means every department is delegated away.
+   * `UNKNOWN` means `/department-ownership` has not been consulted yet.
+   */
+  writeScope: WriteScopeKind;
   /** false → a demoted owner: hide the blocks/allocations/KPI/SS editors. */
   structureEditable: boolean;
   handbacksPending: number;
@@ -221,6 +255,15 @@ export interface PlanSyncStatus {
    * somebody who has just moved machine wants.
    */
   twinPlanId: string | null;
+  /**
+   * Whether the twin on the other side can actually be downloaded.
+   *
+   * The name-clash advice is "download the server's copy instead — it replaces
+   * this one". When the clashing plan belongs to somebody else and is not shared
+   * with you, that advice cannot be followed and the only way out is to rename
+   * this one. Two different sentences, so the card has to know which.
+   */
+  twinReadable: boolean;
 }
 
 export interface SyncStatusResponse {
@@ -235,6 +278,19 @@ export interface SyncStatusResponse {
   clustersVersion: number;
   /** True when the last probe was a 304 — nothing at this property has moved. */
   upToDate: boolean;
+  /**
+   * Plans removed from this computer because the server no longer shares them.
+   *
+   * Access to the hotel is no longer access to a colleague's plan, so a copy
+   * pulled under the old rules — or one whose delegation has been withdrawn — is
+   * data this machine has no business holding. It is purged outright, not
+   * soft-deleted, unless there is unpublished work in it, in which case it is
+   * left alone and frozen instead.
+   *
+   * Reported so the page can say what happened. A plan disappearing with no
+   * explanation reads to a user as data loss.
+   */
+  removed: Array<{ planId: string; label: string; ownerEmail: string | null }>;
 }
 
 export interface ProbeResponse {
@@ -258,6 +314,22 @@ export interface PullPreview {
   deleted: number;
   /** Types this build does not understand — the server is newer than we are. */
   skippedTypes: string[];
+  /**
+   * Incoming rows that would land on top of local work that is not published.
+   *
+   * The case this exists for is routine and looks alarming without it: an owner
+   * who has delegated Rooms edits F&B, the delegate publishes Rooms, and both
+   * sides are now "ahead". The plan reads as DIVERGED and the user is offered a
+   * two-way review — but the two sets cannot touch, because a delegate writes
+   * only inside their own departments. Intersecting the ids proves it, so a
+   * download that overwrites nothing can say so instead of implying a choice.
+   *
+   * Zero with `total > 0` is the safe case. Non-zero is the one that deserves
+   * the warning the dialog currently gives unconditionally.
+   */
+  collides: number;
+  /** Departments the colliding rows are in, for naming them. */
+  collidingDepartments: string[];
 }
 
 export interface PublishPreviewResponse {

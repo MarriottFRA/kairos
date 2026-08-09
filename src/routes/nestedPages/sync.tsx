@@ -65,6 +65,7 @@ import {
   adminBundle as adminBundleCall,
   delegationCandidates as candidatesCall,
   deletePlan as deletePlanCall,
+  discardLocalPlan,
   extendLease as extendLeaseCall,
   lease as leaseCall,
   patchPlan as patchPlanCall,
@@ -102,6 +103,7 @@ import CloudPlanCard from "../../components/sync/CloudPlanCard";
 import DeletePlanDialog, {
   LocalCopyAfterDelete,
 } from "../../components/sync/DeletePlanDialog";
+import DiscardLocalPlanDialog from "../../components/sync/DiscardLocalPlanDialog";
 import PublishResultAlert from "../../components/sync/PublishResultAlert";
 import ReviewDialog from "../../components/sync/ReviewDialog";
 import LeaseBanner from "../../components/sync/LeaseBanner";
@@ -138,6 +140,11 @@ interface PullReview {
   deleted: number;
   skippedTypes: string[];
   reset: boolean;
+  /** Incoming rows that land on local work never published. See `ReviewDialog`. */
+  collides: number;
+  collidingDepartments: string[];
+  /** What this machine has waiting, so "nothing collides" can be said usefully. */
+  pendingChanges: number;
   /** The local plan of the same name this download takes over from. */
   replaceLocalPlanId: string | null;
   /** True for a plan this computer does not hold yet — a first download. */
@@ -182,6 +189,8 @@ type PlanDialog =
   | { kind: "delete"; plan: PlanSyncStatus }
   | { kind: "scope"; plan: PlanSyncStatus }
   | { kind: "claim"; plan: PlanSyncStatus }
+  /** Purge a local copy the server no longer shares. Local, hard, no undo. */
+  | { kind: "discard"; plan: PlanSyncStatus }
   | null;
 
 export default function Sync() {
@@ -202,6 +211,15 @@ export default function Sync() {
   const [structureReview, setStructureReview] = useState<StructureReview | null>(null);
   /** Set by a first download; consumed by the effect under `handleStructurePreview`. */
   const [checkSetupAfterDownload, setCheckSetupAfterDownload] = useState(false);
+
+  /**
+   * Plans the last status call purged from this computer.
+   *
+   * Persisted in state rather than fired as a toast, because a toast that
+   * vanishes after six seconds is the wrong medium for "a plan you had is gone
+   * and here is why". Dismissed by hand, like the publish result above it.
+   */
+  const [removed, setRemoved] = useState<SyncStatusResponse["removed"]>([]);
 
   const [dialog, setDialog] = useState<PlanDialog>(null);
   const [candidates, setCandidates] = useState<DelegationCandidate[]>([]);
@@ -249,6 +267,10 @@ export default function Sync() {
     } else {
       setStatus(result.data);
       setError(null);
+      // Plans the status call removed because the server no longer shares them.
+      // Said out loud: a plan that simply stopped being listed reads as data
+      // loss to somebody who was working in it yesterday.
+      if (result.data.removed.length > 0) setRemoved(result.data.removed);
     }
     setLoading(false);
   }, [ou]);
@@ -350,6 +372,9 @@ export default function Sync() {
           deleted: result.data.deleted,
           skippedTypes: result.data.skippedTypes,
           reset: result.data.reset,
+          collides: result.data.collides,
+          collidingDepartments: result.data.collidingDepartments,
+          pendingChanges: plan.pendingChanges,
           replaceLocalPlanId: plan.onThisComputer ? null : plan.twinPlanId,
           // The handler decides this, not the card: it is the one that knows
           // whether a live `scenarios` row exists, and it uses the same answer
@@ -787,6 +812,68 @@ export default function Sync() {
     });
   }, [dialog, exportReason, run]);
 
+  /**
+   * Ask a plan's owner for a delegation.
+   *
+   * Not an endpoint — there is no "request access" on the server, and inventing
+   * a workflow for it would mean somewhere for the request to sit unanswered.
+   * The owner's address is on the wire precisely so this can be a mail draft,
+   * which lands in a place they already read.
+   *
+   * The subject and body name the plan and the property because "can I have
+   * access?" arrives at somebody who owns four of them.
+   */
+  const handleRequestAccess = useCallback((plan: PlanSyncStatus) => {
+    if (!plan.ownerEmail) return;
+    const subject = `Kairos: access to ${plan.label} (${plan.year})`;
+    const body =
+      `Hello,\n\n` +
+      `Could you share the ${plan.label} plan for ${plan.year} at ${plan.ou} with me ` +
+      `in Kairos? I can see it listed but cannot open it.\n\n` +
+      `If you are still working on it, you can share it read-only from the ` +
+      `Delegation page — that lets me look without changing anything, and you keep ` +
+      `full control.\n\nThank you.`;
+    window.open(
+      `mailto:${encodeURIComponent(plan.ownerEmail)}` +
+        `?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    );
+  }, []);
+
+  const handleCopyOwnerEmail = useCallback((email: string) => {
+    void navigator.clipboard
+      .writeText(email)
+      .then(() => setToast({ severity: "success", message: `${email} copied.` }))
+      .catch(() =>
+        setToast({ severity: "error", message: "Could not reach the clipboard." })
+      );
+  }, []);
+
+  /**
+   * Throw away a frozen local copy.
+   *
+   * Reuses the delete dialog's `"none"` mode — the one that demands the plan's
+   * name be typed — because this is the same act in every way that matters: the
+   * rows go and nothing on the server can bring them back, since the server will
+   * not talk to this user about the plan at all.
+   */
+  const handleDiscardLocalCopy = useCallback(async () => {
+    if (!ou || dialog?.kind !== "discard") return;
+    const plan = dialog.plan;
+    await run(plan.planId, async () => {
+      const result = await discardLocalPlan(ou, plan.planId);
+      setDialog(null);
+      setToast(
+        syncFailed(result)
+          ? { severity: "error", message: result.error.message }
+          : {
+              severity: "success",
+              message: `${plan.label} was removed from this computer.`,
+            }
+      );
+      await refresh();
+    });
+  }, [ou, dialog, refresh, run]);
+
   // ----------------------------------------------------------- render
 
   /**
@@ -802,10 +889,21 @@ export default function Sync() {
    * Kept out of the main list on purpose: none of the states below apply to
    * them, and the only action is to download. A new machine and a fresh
    * delegation both land here.
+   *
+   * So do colleagues' plans that are not shared with this user, which have no
+   * action at all — they render as locked tiles. Same section, because the
+   * question both answer is "what else is at this hotel?", and separating them
+   * would put a heading over a list whose whole content is "nothing to do".
    */
   const cloudPlans = useMemo(
     () => (status?.plans ?? []).filter((plan) => !plan.onThisComputer),
     [status]
+  );
+
+  /** The subset with something to press. Drives the attention count only. */
+  const downloadablePlans = useMemo(
+    () => cloudPlans.filter((plan) => plan.readable),
+    [cloudPlans]
   );
 
   const localPlans = useMemo(
@@ -845,10 +943,12 @@ export default function Sync() {
     (plan) => plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE"
   );
   // Cloud-only plans count: a page that says "Up to date" above a plan waiting
-  // to be downloaded is contradicting itself.
+  // to be downloaded is contradicting itself. Locked ones do NOT — a colleague's
+  // plan you were never meant to open is not outstanding work, and counting it
+  // would leave this badge permanently lit at any hotel with two budget owners.
   const attentionCount =
     orderedPlans.filter((plan) => planState(plan, leases[plan.planId]).needsAttention)
-      .length + cloudPlans.length;
+      .length + downloadablePlans.length;
 
   const adminActionsFor = (plan: PlanSyncStatus): PlanAdminActions => ({
     onTakeLease: () => setDialog({ kind: "acquireLease", plan }),
@@ -925,6 +1025,36 @@ export default function Sync() {
         </Box>
       )}
 
+      {removed.length > 0 && (
+        // Not a toast. "A plan you had is gone" needs to survive long enough to
+        // be read twice and to be shown to somebody else, and it needs to say
+        // who to talk to — a six-second snackbar does none of that.
+        <Alert severity="info" sx={{ mb: 2 }} onClose={() => setRemoved([])}>
+          <AlertTitle>
+            {removed.length === 1
+              ? "A plan was removed from this computer"
+              : `${removed.length} plans were removed from this computer`}
+          </AlertTitle>
+          <Typography variant="body2">
+            Seeing a hotel no longer means being able to open every plan in it.
+            These belong to colleagues who have not shared them with you, so the
+            copies here were removed:
+          </Typography>
+          <Stack component="ul" sx={{ mt: 1, mb: 0, pl: 3 }} spacing={0.25}>
+            {removed.map((plan) => (
+              <Typography key={plan.planId} component="li" variant="body2">
+                <strong>{plan.label}</strong>
+                {plan.ownerEmail ? ` — ask ${plan.ownerEmail} to share it` : ""}
+              </Typography>
+            ))}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+            Nothing of your own was touched. Anything you had changed and not
+            published is kept, and those plans are still listed below.
+          </Typography>
+        </Alert>
+      )}
+
       {status && localPlans.length === 0 && cloudPlans.length === 0 && (
         <Alert severity="info">
           There are no planning scenarios for this hotel yet, and the server has
@@ -947,6 +1077,7 @@ export default function Sync() {
           onOpenDelegation={() => navigate(`/signed-in-landing/delegation?plan=${plan.planId}`)}
           onTransfer={() => setDialog({ kind: "transfer", plan })}
           onDeleteFromServer={() => setDialog({ kind: "delete", plan })}
+          onDiscardLocalCopy={() => setDialog({ kind: "discard", plan })}
         >
           {plan.revoked && (
             // The one deliberate break in denial opacity, and the reason it
@@ -996,9 +1127,11 @@ export default function Sync() {
             In the cloud, not on this computer
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Plans the server holds for you at this hotel — ones you own from
-            another machine, and ones colleagues have delegated to you. Downloading
-            brings the whole plan here; nothing changes until you do.
+            Plans the server holds at this hotel — ones you own from another
+            machine, and ones colleagues have shared with you. Downloading brings
+            the whole plan here; nothing changes until you do.
+            {cloudPlans.some((plan) => !plan.readable) &&
+              " Plans marked with a lock belong to a colleague and have not been shared with you."}
           </Typography>
           {cloudPlans.map((plan) => (
             <CloudPlanCard
@@ -1008,6 +1141,8 @@ export default function Sync() {
               twinLabel={plan.twinPlanId ? labelById.get(plan.twinPlanId) : null}
               onDownload={() => void handlePreviewPull(plan)}
               onDeleteFromServer={() => setDialog({ kind: "delete", plan })}
+              onRequestAccess={handleRequestAccess}
+              onCopyOwnerEmail={handleCopyOwnerEmail}
             />
           ))}
         </Box>
@@ -1051,6 +1186,9 @@ export default function Sync() {
         reset={pullReview?.reset ?? false}
         // A first download is worth doing even with nothing to bring down: it
         // is what makes the plan exist here.
+        collides={pullReview?.collides ?? 0}
+        collidingDepartments={pullReview?.collidingDepartments ?? []}
+        pendingChanges={pullReview?.pendingChanges ?? 0}
         allowEmpty={pullReview?.firstDownload ?? false}
         replacesLabel={
           pullReview?.replaceLocalPlanId
@@ -1194,6 +1332,16 @@ export default function Sync() {
           dialog?.plan.twinPlanId ? labelById.get(dialog.plan.twinPlanId) ?? null : null
         }
         onConfirm={() => void handleDelete()}
+        onClose={() => setDialog(null)}
+      />
+
+      <DiscardLocalPlanDialog
+        open={dialog?.kind === "discard"}
+        busy={busyPlan !== null}
+        planLabel={dialog?.plan.label ?? ""}
+        pendingChanges={dialog?.plan.pendingChanges ?? 0}
+        ownerEmail={dialog?.plan.ownerEmail ?? null}
+        onConfirm={() => void handleDiscardLocalCopy()}
         onClose={() => setDialog(null)}
       />
 

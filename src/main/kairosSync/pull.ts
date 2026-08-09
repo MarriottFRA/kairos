@@ -44,6 +44,13 @@ export interface PullSummary {
   total: number;
   deleted: number;
   pages: number;
+  /**
+   * Incoming rows that would land on a row this machine has changed and not
+   * published. See `collidesWith` on {@link PullOptions}.
+   */
+  collides: number;
+  /** Which departments those are in, so the warning can name them. */
+  collidingDepartments: string[];
 }
 
 export interface PullResult {
@@ -73,12 +80,40 @@ export interface PullOptions {
   maxBytes?: number;
   /** Write the rows. Omit or pass false to preview only. */
   apply?: boolean;
+  /**
+   * `entityType:entityId` for every row changed here and not yet published.
+   *
+   * Supplied so a preview can say whether the download would actually overwrite
+   * anything. The case this exists for is routine and looks alarming without it:
+   * an owner who has delegated Rooms edits F&B, the delegate publishes Rooms,
+   * and the plan now reads as DIVERGED — "you and the server have both changed
+   * things" — with a two-way review in front of it. Those two sets cannot touch,
+   * because a delegate writes only inside their own departments. Intersecting
+   * the ids proves it, and a download that overwrites nothing should not be
+   * presented as a choice between two versions.
+   *
+   * Omitted on an apply: the decision has already been made by then.
+   */
+  collidesWith?: ReadonlySet<string>;
 }
 
-function tally(summary: PullSummary, entities: ChangeEntity[]): void {
+function tally(
+  summary: PullSummary,
+  entities: ChangeEntity[],
+  collidesWith?: ReadonlySet<string>
+): void {
   for (const entity of entities) {
     summary.byType[entity.entityType] = (summary.byType[entity.entityType] ?? 0) + 1;
     summary.total += 1;
+    if (collidesWith?.has(`${entity.entityType}:${entity.entityId}`)) {
+      summary.collides += 1;
+      // Inherited rows carry their parent position's department, so a component
+      // value collides in the department its position lives in — which is the
+      // one the user recognises.
+      if (entity.department && !summary.collidingDepartments.includes(entity.department)) {
+        summary.collidingDepartments.push(entity.department);
+      }
+    }
     if (entity.deleted) {
       summary.deletedByType[entity.entityType] =
         (summary.deletedByType[entity.entityType] ?? 0) + 1;
@@ -133,6 +168,8 @@ async function runPull(
     total: 0,
     deleted: 0,
     pages: 0,
+    collides: 0,
+    collidingDepartments: [],
   };
   const skippedTypes = new Set<string>();
 
@@ -151,7 +188,7 @@ async function runPull(
     );
 
     summary.pages += 1;
-    tally(summary, page.entities);
+    tally(summary, page.entities, options.collidesWith);
 
     if (apply) {
       const result = applyEntities(deps, page.entities, order);

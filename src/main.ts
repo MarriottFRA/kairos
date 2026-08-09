@@ -172,7 +172,12 @@ function createMainWindow(): void {
   // Harden navigation: deny popups and block navigation away from app content.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // Open any external link in the user's browser, never a new Electron window.
-    if (/^https?:\/\//i.test(url)) {
+    // `mailto:` is included because the Sync page's "Ask for access" — the only
+    // route a user has to a plan whose owner has not shared it — is a pre-filled
+    // draft, and without this it is denied along with everything else and does
+    // nothing at all. It carries no navigation risk: the OS hands it to a mail
+    // client, and nothing is loaded into this process either way.
+    if (/^(https?|mailto):/i.test(url)) {
       void shell.openExternal(url);
     }
     return { action: "deny" };

@@ -51,59 +51,28 @@ import MoreVertIcon from "@mui/icons-material/MoreVert";
 import { PlanSyncStatus } from "../../shared/kairosSync/ipc";
 import { Lease } from "../../shared/kairosSync/protocol";
 import { PlanState, planState } from "../../shared/kairosSync/planState";
-
-/** Human wording for each relation. The user should never see the enum. */
-const RELATION_LABEL: Record<string, string> = {
-  OWNER: "You own this plan",
-  OWNER_DEGRADED: "You own this plan, but your access has lapsed",
-  DELEGATE: "Delegated to you",
-  ADMIN_LEASE: "You hold a support lease",
-  GLOBAL_ADMIN: "Administrator — read only",
-  OU_MEMBER: "Read only",
-};
+import {
+  canDelegate,
+  canDeletePlan,
+  canRead,
+  RELATION_EXPLAINER,
+  RELATION_LABEL,
+} from "../../shared/kairosSync/relations";
 
 /**
- * What each relation means for this user, in the second person.
+ * A read-only delegation, explained where the relation cannot explain it.
  *
- * The chip on its own is a dead end — "Administrator — read only" states a fact
- * and leaves the reader to guess its consequences and whether it is a mistake.
- * These are the consequences.
+ * `canEdit: false` leaves the relation a plain `DELEGATE` on the wire and strips
+ * the write capabilities underneath, so `RELATION_EXPLAINER.DELEGATE` — which
+ * promises editing and publishing — would be actively wrong for these. The chip
+ * and the popover both switch to this instead.
  */
-const RELATION_EXPLAINER: Record<string, { can: string; cannot: string; next: string }> = {
-  OWNER: {
-    can: "Edit every department, publish, delegate, transfer the plan and push it to the budget workbook.",
-    cannot: "Edit a department while it is delegated to somebody else.",
-    next: "To take one back, withdraw the delegation on the Delegation page.",
-  },
-  OWNER_DEGRADED: {
-    can: "Edit your departments and publish them.",
-    cannot:
-      "Change the plan's columns, blocks, schemes, allocations or KPI drivers — that needs full access to the hotel.",
-    next: "Your administrator can restore it by granting you all departments and write access to this hotel.",
-  },
-  DELEGATE: {
-    can: "Edit and publish the departments you were given, and download the whole plan.",
-    cannot:
-      "Edit other departments, change the plan's structure, delegate onwards, or push to the budget workbook.",
-    next: "When you have finished a department, hand it back on the Delegation page.",
-  },
-  ADMIN_LEASE: {
-    can: "Everything the owner can, for as long as the lease lasts.",
-    cannot: "Hold it indefinitely — it expires, and the hotel is locked out meanwhile.",
-    next: "Release it as soon as you are done, with a note of what you changed.",
-  },
-  GLOBAL_ADMIN: {
-    can: "See this plan, including its numbers, and download it.",
-    cannot: "Change anything, publish, or push to the budget workbook.",
-    next:
-      "If you expected to own this plan, the server does not agree — check who it is " +
-      "registered to. To change something on somebody else's plan, take a support lease.",
-  },
-  OU_MEMBER: {
-    can: "See this plan and download it.",
-    cannot: "Change anything or publish.",
-    next: "Ask the plan's owner to delegate the departments you need.",
-  },
+const VIEW_ONLY_EXPLAINER = {
+  can: "Read the whole plan, download updates as the owner publishes them, and see the departments you were given.",
+  cannot: "Change anything, publish, or hand a department back.",
+  next:
+    "The owner is still working on this plan. If you need to edit a department, " +
+    "ask them — they can switch this on without re-sharing the plan.",
 };
 
 const TONE_COLOUR: Record<PlanState["tone"], string> = {
@@ -146,6 +115,14 @@ export interface PlanSyncCardProps {
    * the same reasoning that keeps it out of one pixel from Publish.
    */
   onDeleteFromServer?: () => void;
+  /**
+   * Remove this computer's copy of a plan that is no longer shared.
+   *
+   * Only ever offered on a frozen copy — one the server has stopped sharing and
+   * the status sweep spared because it holds unpublished work. Everything clean
+   * is purged without asking, because there is nothing to ask about.
+   */
+  onDiscardLocalCopy?: () => void;
   children?: ReactNode;
 }
 
@@ -162,6 +139,7 @@ export default function PlanSyncCard({
   onOpenDelegation,
   onTransfer,
   onDeleteFromServer,
+  onDiscardLocalCopy,
   children,
 }: PlanSyncCardProps) {
   const state = planState(plan, lease);
@@ -171,15 +149,36 @@ export default function PlanSyncCard({
   // access has lapsed, and not GLOBAL_ADMIN without a lease. Offering it wider
   // than that just produces a 403 the user cannot act on.
   const canDelete =
-    plan.published &&
-    onDeleteFromServer !== undefined &&
-    (plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE");
+    plan.published && onDeleteFromServer !== undefined && canDeletePlan(plan.relation);
+  /**
+   * A delegation granted with `canEdit: false`.
+   *
+   * `writeScope` comes from `/department-ownership`, which is the same predicate
+   * a save uses, so this cannot disagree with what happens on save. `UNKNOWN`
+   * means that call has not run yet and is deliberately NOT treated as read-only
+   * — accusing a working delegate of having lost their access is worse than a
+   * button that occasionally has to explain itself.
+   */
+  const viewOnly = plan.relation === "DELEGATE" && plan.writeScope === "NONE";
+  /**
+   * The plan is here and the server will not talk about it.
+   *
+   * Only reachable with unpublished work in it — anything clean is purged by the
+   * status call before the page is built. So the card keeps its Details (the
+   * counters are the reassurance) and loses both of its buttons: Download is a
+   * 403 and Publish is a 403.
+   */
+  const frozen = plan.relation !== null && !canRead(plan.relation);
 
   const [showDetails, setShowDetails] = useState(false);
   const [relationAnchor, setRelationAnchor] = useState<HTMLElement | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
 
-  const explainer = plan.relation ? RELATION_EXPLAINER[plan.relation] : undefined;
+  const explainer = viewOnly
+    ? VIEW_ONLY_EXPLAINER
+    : plan.relation
+      ? RELATION_EXPLAINER[plan.relation]
+      : undefined;
   const closeMenu = (): void => setMenuAnchor(null);
   const runAdmin = (action: () => void) => () => {
     closeMenu();
@@ -217,7 +216,10 @@ export default function PlanSyncCard({
               // constrains you should be able to tell you how.
               <Chip
                 size="small"
-                label={RELATION_LABEL[plan.relation] ?? plan.relation}
+                label={
+                  // "Delegated to you" promises a pen this grant does not carry.
+                  viewOnly ? "Shared with you · view only" : RELATION_LABEL[plan.relation] ?? plan.relation
+                }
                 color={plan.relation === "OWNER" ? "primary" : "default"}
                 variant="outlined"
                 onClick={
@@ -227,7 +229,7 @@ export default function PlanSyncCard({
                 }
               />
             )}
-            {partial && (
+            {partial && !viewOnly && (
               // Not decoration. A partial scope silently under-reports every
               // total on the Results page and makes a BST push destructive, so
               // the user has to be able to see it from here.
@@ -328,6 +330,12 @@ export default function PlanSyncCard({
                   </Button>
                 </span>
               </Tooltip>
+            ) : frozen ? (
+              // Nothing here works any more. Both buttons are 403s, and drawing
+              // a disabled pair invites somebody to keep pressing them; the
+              // headline already says what happened and what would change it.
+              // Discarding lives in Details, quietly — see below.
+              null
             ) : (
               <>
                 {/* Both sides moved. Neither Download nor Publish is the
@@ -338,7 +346,10 @@ export default function PlanSyncCard({
                     Review both versions
                   </Button>
                 )}
-                {isOwner && (
+                {/* `plan:delegate` is OWNER and ADMIN_LEASE — a demoted owner
+                    cannot grant, so the page they would land on has nothing on
+                    it but a refusal. */}
+                {canDelegate(plan.relation) && (
                   <Button onClick={onOpenDelegation} disabled={busy}>
                     Delegation
                   </Button>
@@ -359,15 +370,20 @@ export default function PlanSyncCard({
                 >
                   Download
                 </Button>
-                <Button
-                  startIcon={<CloudUploadOutlinedIcon />}
-                  onClick={onPreviewPublish}
-                  disabled={busy}
-                  color={state.action === "publish" ? "primary" : "inherit"}
-                  variant={state.action === "publish" ? "contained" : "outlined"}
-                >
-                  Publish
-                </Button>
+                {/* Withheld rather than disabled for a view-only share. This is
+                    the grant working as the owner intended, not a fault, and a
+                    greyed-out Publish reads as something broken. */}
+                {!viewOnly && (
+                  <Button
+                    startIcon={<CloudUploadOutlinedIcon />}
+                    onClick={onPreviewPublish}
+                    disabled={busy}
+                    color={state.action === "publish" ? "primary" : "inherit"}
+                    variant={state.action === "publish" ? "contained" : "outlined"}
+                  >
+                    Publish
+                  </Button>
+                )}
               </>
             )}
           </Stack>
@@ -409,6 +425,38 @@ export default function PlanSyncCard({
               </Stack>
             </>
           )}
+
+          {frozen && onDiscardLocalCopy && (
+            // An escape hatch, not a prompt. This copy survives only because it
+            // has unpublished work in it, and that work is the reason not to
+            // remove it — the owner may delegate again, in which case it
+            // publishes normally. So the button is here, in a disclosure, with
+            // the case for keeping it stated first.
+            <>
+              <Divider sx={{ mt: 2, mb: 1.5 }} />
+              <Stack
+                direction="row"
+                spacing={2}
+                useFlexGap
+                sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
+              >
+                <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 460 }}>
+                  Kept because of the unpublished changes above. If the owner
+                  shares the plan with you again, they publish as normal.
+                  Discarding removes the plan and those changes from this
+                  computer for good.
+                </Typography>
+                <Button
+                  size="small"
+                  color="error"
+                  onClick={onDiscardLocalCopy}
+                  disabled={busy}
+                >
+                  Discard this copy
+                </Button>
+              </Stack>
+            </>
+          )}
         </Collapse>
       </CardContent>
 
@@ -421,7 +469,11 @@ export default function PlanSyncCard({
         {explainer && (
           <Box sx={{ p: 2, maxWidth: 400 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-              {plan.relation ? RELATION_LABEL[plan.relation] : ""}
+              {viewOnly
+                ? "Shared with you · view only"
+                : plan.relation
+                  ? RELATION_LABEL[plan.relation]
+                  : ""}
             </Typography>
             <Typography variant="body2" sx={{ mb: 1 }}>
               <strong>You can</strong> {explainer.can}

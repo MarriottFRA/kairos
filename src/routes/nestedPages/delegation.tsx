@@ -57,6 +57,7 @@ import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import { useSelectedHotel } from "../../store/settings";
 import {
+  amendDelegation as amendCall,
   delegatableDepartments as delegatableCall,
   delegationCandidates as candidatesCall,
   departmentOwnership as ownershipCall,
@@ -114,6 +115,15 @@ export default function DelegationPage() {
   /** Set when a bulk handback was refused because this delegate has dirty rows. */
   const [handbackUnsynced, setHandbackUnsynced] =
     useState<HandbackUnsyncedContext | null>(null);
+  /**
+   * The delegation being switched from editable to view-only.
+   *
+   * Only the narrowing direction stops to ask. Taking the pen away bumps the
+   * delegation's `generation` server-side and freezes whatever the delegate has
+   * not published; giving it back takes nothing from anybody, so it goes
+   * straight through.
+   */
+  const [makingViewOnly, setMakingViewOnly] = useState<Delegation | null>(null);
 
   const refresh = useCallback(async () => {
     if (!ou || !planId) return;
@@ -262,6 +272,38 @@ export default function DelegationPage() {
     [ou, planId, refresh]
   );
 
+  /**
+   * Flip a live delegation between editable and view-only.
+   *
+   * `PATCH` rather than withdraw-and-regrant, which matters: a re-grant bumps
+   * `generation` and stamps an override window, so it is a materially different
+   * act from amending the flag. The plumbing for this existed end to end and had
+   * no UI at all — reasonable while `canEdit` was hard-coded true, and not now
+   * that a read-only share is the only way to let a colleague look.
+   */
+  const handleSetCanEdit = useCallback(
+    async (delegation: Delegation, canEdit: boolean) => {
+      if (!ou || !planId) return;
+      setBusy(true);
+      const result = await amendCall(ou, planId, delegation.id, { canEdit });
+      setBusy(false);
+      setMakingViewOnly(null);
+
+      if (syncFailed(result)) {
+        setToast({ severity: "error", message: result.error.message });
+        return;
+      }
+      setToast({
+        severity: "success",
+        message: canEdit
+          ? `${delegation.delegateEmail} can edit again.`
+          : `${delegation.delegateEmail} can still see the plan but not change it.`,
+      });
+      await refresh();
+    },
+    [ou, planId, refresh]
+  );
+
   const handleReopen = useCallback(
     async (delegationId: string, code: string) => {
       if (!ou || !planId) return;
@@ -286,6 +328,21 @@ export default function DelegationPage() {
     if (isOwner) return [];
     return (ownership?.departments ?? []).filter((row) => row.writable);
   }, [ownership, isOwner]);
+
+  /**
+   * A delegate who was given departments to read and none to write.
+   *
+   * `canEdit: false`, in other words. Without this the page shows them a
+   * Departments table full of "No" and no explanation of why they are on it —
+   * and the "Your departments" card above, which is about handing work back,
+   * correctly does not apply and so says nothing at all.
+   */
+  const viewOnly =
+    !isOwner &&
+    ownership !== null &&
+    ownership.me.relation === "DELEGATE" &&
+    myHoldings.length === 0 &&
+    ownership.departments.length > 0;
 
   if (!ou || !planId) {
     return (
@@ -313,7 +370,8 @@ export default function DelegationPage() {
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Departments you delegate become editable by that person and read-only for
-        you until you withdraw.
+        you until you withdraw. Sharing a department <strong>view only</strong> is
+        different: they can read it, and you carry on editing as normal.
       </Typography>
 
       {loading && <LinearProgress sx={{ mb: 2 }} />}
@@ -323,6 +381,17 @@ export default function DelegationPage() {
           <AlertTitle>Your access has changed</AlertTitle>
           You still own this plan, but you no longer meet the requirements to edit
           its columns, blocks and schemes. You can still edit your own departments.
+        </Alert>
+      )}
+
+      {viewOnly && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          <AlertTitle>This plan was shared with you to look at</AlertTitle>
+          You can read{" "}
+          {ownership?.departments.map((row) => row.code).join(", ")} and download
+          updates as the owner publishes them. Editing and publishing are theirs
+          to do. If you need to change something, ask them — they can switch that
+          on without re-sharing the plan.
         </Alert>
       )}
 
@@ -460,10 +529,19 @@ export default function DelegationPage() {
                       <Typography variant="caption" color="text.secondary">
                         {delegation.effectiveDepartments.join(", ") || "no departments"}
                         {delegation.canReadPii ? " · can see employee details" : ""}
-                        {delegation.canDeleteRows ? " · can delete rows" : ""}
+                        {delegation.canEdit && delegation.canDeleteRows
+                          ? " · can delete rows"
+                          : ""}
                       </Typography>
                     </Box>
                     <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                      {/* The most consequential flag on the row, and the caption
+                          used to print the other three and omit this one. */}
+                      {!delegation.canEdit && (
+                        <Tooltip title="They can read these departments. You keep full control of them and can carry on editing.">
+                          <Chip size="small" variant="outlined" label="View only" />
+                        </Tooltip>
+                      )}
                       {!delegation.effective && (
                         // Without this an owner waits indefinitely for a publish
                         // that can never come, because the delegate's access was
@@ -487,6 +565,21 @@ export default function DelegationPage() {
                         >
                           <Chip size="small" label="Partial" />
                         </Tooltip>
+                      )}
+                      {isOwner && (
+                        // Widening goes straight through; narrowing asks. See
+                        // `handleSetCanEdit`.
+                        <Button
+                          size="small"
+                          disabled={busy}
+                          onClick={() =>
+                            delegation.canEdit
+                              ? setMakingViewOnly(delegation)
+                              : void handleSetCanEdit(delegation, true)
+                          }
+                        >
+                          {delegation.canEdit ? "Make view only" : "Let them edit"}
+                        </Button>
                       )}
                       {isOwner && (
                         <Button
@@ -586,6 +679,45 @@ export default function DelegationPage() {
             onClick={() => void handleRevoke(unsynced !== null)}
           >
             {unsynced ? "Withdraw anyway" : "Withdraw"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={makingViewOnly !== null}
+        onClose={busy ? undefined : () => setMakingViewOnly(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Make this view only</DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 2 }}>
+            {makingViewOnly?.delegateEmail} will still see{" "}
+            {makingViewOnly?.effectiveDepartments.join(", ") || "these departments"},
+            and will stop being able to change or publish them. You get them back
+            to edit yourself.
+          </DialogContentText>
+          {/* Narrowing bumps the delegation's generation server-side, which
+              freezes rows the delegate has not published. Same promise as a
+              withdrawal, and the same reason for making it explicitly. */}
+          <Alert severity="info">
+            Anything they have not published stays on their machine and is{" "}
+            <strong>not lost</strong>. If you let them edit again, it publishes as
+            normal.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMakingViewOnly(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={busy}
+            onClick={() =>
+              makingViewOnly ? void handleSetCanEdit(makingViewOnly, false) : undefined
+            }
+          >
+            Make view only
           </Button>
         </DialogActions>
       </Dialog>

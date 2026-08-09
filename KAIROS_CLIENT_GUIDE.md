@@ -163,22 +163,28 @@ Every caller resolves to exactly one relation on a given plan.
 | `DELEGATE` | Holds a live delegation for named departments |
 | `ADMIN_LEASE` | Administrator holding a support lease; acts in the owner's place |
 | `GLOBAL_ADMIN` | Administrator with no lease, on a plan they did not create |
-| `OU_MEMBER` | Has access to the hotel, on a plan that is not theirs and not delegated to them |
+| `OU_VISITOR` | Has access to the hotel, on a plan that is not theirs and not delegated to them. Sees that it exists and who owns it; **no plan data** |
 
 An unknown relation resolves to the empty capability set — it fails closed.
 
+> **Changed.** `OU_VISITOR` was previously called `OU_MEMBER` and could read the plan, filtered
+> to the caller's own departments. It can no longer read anything. See
+> [Visibility is not readability](#visibility-is-not-readability) below — this is a breaking
+> change for any client that treated the old relation as syncable.
+
 ### Capability matrix
 
-| Capability | OWNER | OWNER_DEGRADED | DELEGATE | OU_MEMBER | GLOBAL_ADMIN | ADMIN_LEASE |
+| Capability | OWNER | OWNER_DEGRADED | DELEGATE | OU_VISITOR | GLOBAL_ADMIN | ADMIN_LEASE |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|
-| `plan:read` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `plan:discover` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `plan:read` | ✅ | ✅ | ✅ | | ✅ | ✅ |
 | `plan:delegate` | ✅ | | | | | ✅ |
 | `plan:transfer` | ✅ | | | | | ✅ |
 | `plan:archive` | ✅ | | | | | ✅ |
 | `plan:delete` | ✅ | | | | | ✅ |
 | `plan:takeover` | | | | | ✅ | ✅ |
 | `plan:export` | | | | | ✅ | ✅ |
-| `structure:read` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `structure:read` | ✅ | ✅ | ✅ | | ✅ | ✅ |
 | `structure:write` | ✅ | | | | | ✅ |
 | `field_catalog:write` | ✅ | | | | | ✅ |
 | `position:write` | ✅ | ✅ | ✅ | | | ✅ |
@@ -195,13 +201,42 @@ An unknown relation resolves to the empty capability set — it fails closed.
 | `artifact:write` | ✅ | | | | | ✅ |
 | `delegation:read` | ✅ | ✅ | ✅ | | ✅ | ✅ |
 | `delegation:handback` | | | ✅ | | | |
-| `activity:read` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `activity:read` | ✅ | ✅ | ✅ | | ✅ | ✅ |
 | `placeholder:create` | ✅ | | | | | ✅ |
 | `lease:acquire` | | | | | ✅ | ✅ |
 | `lease:release` | | | | | ✅ | ✅ |
 | `scope:debug` | | | | | ✅ | ✅ |
 
-Three entries in that table are worth understanding rather than just reading:
+Four entries in that table are worth understanding rather than just reading:
+
+<a id="visibility-is-not-readability"></a>
+**`plan:read` is held by the owner, a delegate, and an administrator — nobody else.** Access to
+the hotel earns `plan:discover`, which tells you a plan exists, what it is called and who owns
+it, so you can go and ask that person for a delegation. It carries no plan data of any kind.
+
+This is a deliberate tightening. Previously hotel access alone conferred `plan:read` over
+whatever departments your own grants covered, and the arithmetic of that was worse than it
+looked: owning a plan requires **all** departments at the property (see *Owner eligibility*
+below), so every hotel admin at a hotel necessarily holds every department there — and each of
+them could therefore download every *other* hotel admin's plan in full. It also meant a
+department-grant mistake was unbounded (someone given thirty departments instead of five gained
+the property, not twenty-five extra departments), and it made delegation decorative, because the
+owner's decision about who may see their plan was overridden by a grant made elsewhere, by
+somebody else, for another purpose.
+
+Breadth of department access is therefore not the control, and never was — the owner's decision
+is. An owner who wants a colleague to *look* without *touching* grants an ordinary delegation
+with `"canEdit": false`; the owner keeps full write throughout. See
+[Delegation permission flags](#delegation-permission-flags).
+
+**What this means for a client.** A plan in `GET /kairos/plans` or `/sync/heads` is no longer
+necessarily syncable. Check `relation` before pulling: an `OU_VISITOR` entry has `version`,
+`syncEpoch`, `structureVersion`, `entityCount` and `scopeKind` all `null`, and every read
+endpoint answers **403 `kairos_plan_not_shared`** — *"This plan has not been shared with you. Ask
+its owner to delegate the departments you need."* Render it as a locked tile naming `ownerEmail`,
+not as an error. A `null` version is not version 0.
+
+
 
 **A bare administrator has no `pii:read` at all** on a plan somebody else made. They see
 positions and salaries, not names. Reading personal details there requires taking a lease,
@@ -214,15 +249,31 @@ lease.
 department in the plan into one opaque blob, so there is no column to filter on. The only
 options are handing a three-department delegate all thirty departments or none.
 
-**`bst:pull` *is* present for a delegate.** A delegate is also an ordinary member of the
-hotel, and `OU_MEMBER` holds it — excluding it would mean being delegated to *removed* an
+**`bst:pull` *is* present for a delegate — and for an `OU_VISITOR`.** The budget workbook is a
+**property** resource, not a plan resource: `GET /kairos/ou/{ou}/bst` resolves from your OU and
+department grants and filters per row, and never involves a plan at all. So it survived the
+tightening above, and excluding it from `DELEGATE` would mean being delegated to *removed* an
 access the same person already had. A delegation adds authority over a plan; it must never
-subtract authority over the property. The containment that applies to the workbook is the
+subtract authority over the property. The containment that applies to the workbook is that
 per-row department filter, which the whole-plan artifact has no equivalent of.
 
+<a id="delegation-permission-flags"></a>
 ### Delegation permission flags
 
-Three capabilities additionally require a per-delegation flag:
+`canEdit` decides whether a delegation is read/write or **read-only**:
+
+| Flag | Default | Effect when `false` |
+|---|---|---|
+| `canEdit` | `true` | Strips **every** write capability. The delegate reads their departments and changes nothing; writes answer 403 `kairos_delegate_read_only` |
+
+Setting `"canEdit": false` on `POST /kairos/plans/{planId}/delegations` is the supported way to
+say *"look at my plan, but I am still working on it"* — and, now that hotel access confers no
+read, the **only** way to let a colleague see a plan without handing over the pen. Granting it
+takes nothing away from the owner, who keeps full write while it is live. It can be flipped
+either way later with `PATCH .../delegations/{delegationId}`; turning it off is a *narrowing*
+amendment and bumps the delegation's `generation`.
+
+Three further capabilities each require their own per-delegation flag:
 
 | Capability | Flag | Default |
 |---|---|---|
@@ -558,9 +609,15 @@ Plans, structure, BST, clusters and mapping tables in one ETag'd round trip.
   "ou": "OUABC12",
   "authzVersion": 14,
   "plans": [
-    { "id": "...", "version": 42, "structureVersion": 7, "syncEpoch": 0,
-      "state": "ACTIVE", "relation": "OWNER", "scopeKind": "FULL",
-      "departments": null, "handbacksPending": 2 }
+    { "id": "...", "label": "Budget 2026", "ownerUserId": 41,
+      "ownerEmail": "anna@example.com", "state": "ACTIVE", "relation": "OWNER",
+      "version": 42, "structureVersion": 7, "syncEpoch": 0, "scopeKind": "FULL",
+      "departments": null, "handbacksPending": 2 },
+
+    { "id": "...", "label": "Rooms Budget 2026", "ownerUserId": 57,
+      "ownerEmail": "bob@example.com", "state": "ACTIVE", "relation": "OU_VISITOR",
+      "version": null, "structureVersion": null, "syncEpoch": null, "scopeKind": null,
+      "departments": null, "handbacksPending": 0 }
   ],
   "structureVersion": 7,
   "bst": { "importId": "...", "contentHash": "...", "importedAt": "2026-07-01T09:12:00Z" },
@@ -572,12 +629,20 @@ Plans, structure, BST, clusters and mapping tables in one ETag'd round trip.
 }
 ```
 
-`departments: null` means all. `handbacksPending` counts departments a delegate has handed
-back that the owner has not reopened — surfaced here so the owner's client can show "2
-departments are ready for you" without a second call on every screen.
+`departments: null` means all — but only on an entry you can read. `handbacksPending` counts
+departments a delegate has handed back that the owner has not reopened — surfaced here so the
+owner's client can show "2 departments are ready for you" without a second call on every screen.
 
-Plan heads are resolved through the **same resolver the routes use**, so a plan can never
-appear here that the caller would then be refused.
+**The second entry above is the shape to code for.** Plan heads are resolved for
+`plan:discover`, so a plan you cannot read still appears here, with everything describing its
+contents nulled. That is intentional: a plan vanishing from the probe reads to a user as data
+loss, and you cannot ask for access to something you cannot see. **Gate your sync on
+`relation`** — pulling an `OU_VISITOR` entry earns a 403, and treating its `null` version as `0`
+would make the client believe it has a plan to download for ever.
+
+`label`, `ownerUserId` and `ownerEmail` are on the head precisely because a visitor cannot call
+`GET /kairos/plans/{planId}` at all, so this is the only place the locked tile can get its
+caption from.
 
 ### Plans
 
@@ -585,6 +650,12 @@ appear here that the caller would then be refused.
 
 Plans this caller can see. **A list filters; it never 403s for scope.** Returns
 `PlanSummary[]`.
+
+Same two shapes as the probe: an entry you hold `plan:read` on is complete, and an
+`OU_VISITOR` entry carries `id`, `ou`, `year`, `label`, `state`, `ownerUserId`, `ownerEmail`,
+`ownerIneligible` and `updatedAt`, with `version`, `syncEpoch`, `structureVersion`,
+`entityCount`, `scopeKind` and `departments` all `null`. `ownerEmail` is populated on both — it
+is who to ask for a delegation.
 
 #### `POST /kairos/plans` → 201
 
@@ -605,6 +676,8 @@ long as the OU and owner match. A different owner or OU on an existing id is a 4
 #### `GET /kairos/plans/{planId}`
 
 `PlanSummary` with `relation`, `scopeKind`, and `departments` filled in for this caller.
+Requires `plan:read`, so an `OU_VISITOR` gets 403 `kairos_plan_not_shared` here — use the
+listing or the probe for what they are allowed to know about the plan.
 
 #### `PATCH /kairos/plans/{planId}`
 
@@ -625,7 +698,10 @@ See section 5. Requires `position:write`. Rate limited 240/hour.
 
 #### `GET /kairos/plans/{planId}/changes?since={n}&cursor={c}&maxBytes={n}`
 
-Delta pull; `since=0` is the full pull. Requires `plan:read`. Rate limited 600/hour.
+Delta pull; `since=0` is the full pull. Requires `plan:read` — an `OU_VISITOR` is refused with
+403 `kairos_plan_not_shared`, as they are on `/manifest`, `/manifest/diff`, `/version`,
+`/pii/summary`, `/activity`, `/department-ownership` and the artifact routes. Rate limited
+600/hour.
 
 ```json
 {
@@ -738,7 +814,9 @@ the latter.
 
 Gated on `plan:read`, not `pii:read` — a count is not a disclosure, and the person deciding
 whether to erase needs the number in front of them even if they are not entitled to read the
-contents.
+contents. Note that `plan:read` is still the floor: an `OU_VISITOR` does not get the count
+either, because for them even "there are 340 people in this plan" is more than they are
+entitled to know.
 
 ```json
 { "planId": "...", "rows": 128, "live": 124, "keyPresent": true,
@@ -1347,9 +1425,21 @@ Per user, as `requests/seconds`.
 Branch on `code`.
 
 **Access**
-`kairos_scope_empty`, `kairos_plan_not_found`, `kairos_not_owner_or_delegate`,
-`kairos_not_plan_owner`, `kairos_owner_not_eligible`, `kairos_owner_entitlement_lapsed`,
-`kairos_structure_owner_only`, `kairos_plan_not_editable`
+`kairos_scope_empty`, `kairos_plan_not_shared`, `kairos_plan_not_found`,
+`kairos_not_owner_or_delegate`, `kairos_not_plan_owner`, `kairos_owner_not_eligible`,
+`kairos_owner_entitlement_lapsed`, `kairos_structure_owner_only`, `kairos_plan_not_editable`
+
+Distinguish the first two — they look alike and mean opposite things to a user:
+
+- **`kairos_scope_empty`** is the deliberately opaque denial. It does not say whether the plan
+  exists, whether your OU grant lapsed, or whether a delegation was revoked last March, because
+  each of those distinctions is something an attacker can probe for. Show it as-is; there is no
+  action the user can take from it beyond contacting an administrator.
+- **`kairos_plan_not_shared`** is the one case where the server says more, because it already
+  said more: the plan is in this caller's listing, with its label and its owner's address, so
+  there is nothing left to conceal. It means *this specific plan exists at your hotel and its
+  owner has not delegated it to you*. Render it as an invitation to ask `ownerEmail`, not as a
+  failure.
 
 **Delegation**
 `kairos_delegate_cannot`, `kairos_delegate_read_only`, `kairos_delegate_no_create`,
@@ -1414,6 +1504,8 @@ it. A shared `commitGroupId` ties the chunks together for audit.
 loop:
   GET /kairos/sync/heads?ou={ou}  (If-None-Match)
   → 304                                  nothing to do
+  → 200, relation == OU_VISITOR           NOT YOURS: draw the locked tile from label +
+                                          ownerEmail and skip every step below for this plan
   → 200, syncEpoch changed               full refresh, server wins
   → 200, version > local watermark        GET /changes?since={watermark}, page to the end
   → 200, structureVersion changed         GET /ou/{ou}/structure
@@ -1423,6 +1515,18 @@ loop:
   after a local rebuild or a conflict storm
                                           POST /manifest/diff, then reconcile
 ```
+
+**Check `relation` first, before anything else in that loop.** An `OU_VISITOR` entry has a
+`null` version, so a client comparing it against a local watermark with `>` will simply do
+nothing (correct by luck), but one that coerces `null` to `0` will pull forever against a 403.
+`/presence` and `/activity` are refused for these plans too, so a client that posts presence
+unconditionally on plan open will see a 403 there — harmless, since a visitor has no local work
+by construction, but do not surface it as an error.
+
+A visitor's probe ETag is stable while the plan changes, because the fields that move are the
+ones being withheld. It updates when the plan's `state` changes and when `authzVersion` moves —
+and granting a delegation bumps `authzVersion`, so the moment the owner shares the plan the next
+poll returns 200 and the client sees a real relation.
 
 ---
 

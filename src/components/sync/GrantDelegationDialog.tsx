@@ -58,6 +58,24 @@
  * The row counts come along too. "3 departments" is an abstraction; "3
  * departments, 96 positions, and you will not be able to edit them until you
  * withdraw" is the sentence that stops somebody over-delegating.
+ *
+ * ## Edit, or view only
+ *
+ * `canEdit` was always on the wire and this dialog always sent `true`, with the
+ * "Edit rows" checkbox rendered ticked and disabled. That was defensible while
+ * access to the hotel conferred `plan:read`, because a colleague who only wanted
+ * to LOOK could already download the plan without asking anyone.
+ *
+ * It no longer does. A delegation is now the only way anybody but the owner sees
+ * a plan at all, so `canEdit: false` is not a corner of the permission model —
+ * it is half the reason to delegate. Hence a two-way choice at the top rather
+ * than a fourth checkbox in a list.
+ *
+ * The distinction people get wrong, and the one the summary has to state
+ * plainly: **a read-only share costs the owner nothing.** Delegating a
+ * department for editing takes it out of the owner's own write scope until they
+ * withdraw; sharing it read-only does not. An owner who believes otherwise
+ * cancels out of this dialog, which is the failure mode worth designing against.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -75,6 +93,8 @@ import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import ListItemText from "@mui/material/ListItemText";
+import Radio from "@mui/material/Radio";
+import RadioGroup from "@mui/material/RadioGroup";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
@@ -203,6 +223,7 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
 
   const [selected, setSelected] = useState<string[]>([]);
   const [person, setPerson] = useState<DelegationCandidate | null>(null);
+  const [canEdit, setCanEdit] = useState(true);
   const [canAddRows, setCanAddRows] = useState(true);
   const [canDeleteRows, setCanDeleteRows] = useState(false);
   const [canReadPii, setCanReadPii] = useState(true);
@@ -213,6 +234,7 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
     if (open) {
       setSelected([]);
       setPerson(null);
+      setCanEdit(true);
       setCanAddRows(true);
       setCanDeleteRows(false);
       setCanReadPii(true);
@@ -257,9 +279,14 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
     onSubmit({
       delegateUserId: person.userId,
       departments: selected,
-      canEdit: true,
-      canAddRows,
-      canDeleteRows,
+      canEdit,
+      // Sent as false rather than as whatever the boxes happened to hold: the
+      // server strips every write capability when `canEdit` is false, so a
+      // stored `canAddRows: true` on a view-only grant is a flag that describes
+      // nothing and would read as a permission if the delegation is later
+      // switched to editable.
+      canAddRows: canEdit && canAddRows,
+      canDeleteRows: canEdit && canDeleteRows,
       canReadPii,
       expiresAt: null,
       acknowledgeNonOverlap: acknowledge,
@@ -422,8 +449,13 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
 
                 <Typography variant="body2" sx={{ mt: 1 }}>
                   {effective.rows} {effective.rows === 1 ? "position" : "positions"} in
-                  total. You will not be able to edit these departments yourself
-                  until you withdraw the delegation.
+                  total.{" "}
+                  {canEdit
+                    ? "You will not be able to edit these departments yourself until you withdraw the delegation."
+                    : // The sentence that decides whether this feature gets
+                      // used. An owner who thinks sharing costs them the pen
+                      // will not share.
+                      "You keep full control of them — a read-only share takes nothing away from you."}
                 </Typography>
               </Alert>
             </Box>
@@ -433,15 +465,57 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
               They may
             </Typography>
-            <Stack>
+
+            {/* The one decision on this screen that changes what happens to the
+                OWNER, so it goes first and it is a choice rather than a box to
+                clear. The two lines underneath are there because "view only" is
+                widely assumed to mean "and I lose the pen", which it does not. */}
+            <RadioGroup
+              value={canEdit ? "edit" : "view"}
+              onChange={(event) => setCanEdit(event.target.value === "edit")}
+            >
               <FormControlLabel
-                control={<Checkbox checked disabled />}
-                label="Edit rows in these departments"
+                value="edit"
+                control={<Radio />}
+                label={
+                  <Box>
+                    <Typography variant="body2">Edit these departments</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      They publish changes back to you, and you cannot edit these
+                      departments until you withdraw.
+                    </Typography>
+                  </Box>
+                }
+                sx={{ alignItems: "flex-start", mb: 1, "& .MuiRadio-root": { pt: 0.25 } }}
               />
+              <FormControlLabel
+                value="view"
+                control={<Radio />}
+                label={
+                  <Box>
+                    <Typography variant="body2">View only</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      They can read the plan; you keep the pen and carry on
+                      working. The only way to let a colleague see it without
+                      handing anything over.
+                    </Typography>
+                  </Box>
+                }
+                sx={{ alignItems: "flex-start", "& .MuiRadio-root": { pt: 0.25 } }}
+              />
+            </RadioGroup>
+
+            <Stack sx={{ mt: 1 }}>
+              {/* Both of these are write capabilities the server strips outright
+                  when `canEdit` is false, so leaving them live would offer
+                  settings that provably do nothing. `canReadPii` stays: seeing
+                  a name is a read, and it is a real choice on a view-only
+                  share. */}
               <FormControlLabel
                 control={
                   <Checkbox
-                    checked={canAddRows}
+                    checked={canEdit && canAddRows}
+                    disabled={!canEdit}
                     onChange={(event) => setCanAddRows(event.target.checked)}
                   />
                 }
@@ -450,7 +524,8 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
               <FormControlLabel
                 control={
                   <Checkbox
-                    checked={canDeleteRows}
+                    checked={canEdit && canDeleteRows}
+                    disabled={!canEdit}
                     onChange={(event) => setCanDeleteRows(event.target.checked)}
                   />
                 }
@@ -482,7 +557,7 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
                 be recorded but will do nothing until their access is widened.
               </Typography>
               <Typography variant="body2">
-                They will be able to edit:{" "}
+                They will be able to {canEdit ? "edit" : "see"}:{" "}
                 <strong>{overlap.effective.join(", ") || "nothing"}</strong>.
               </Typography>
               {overlap.remedy && (
@@ -511,8 +586,10 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
           startIcon={busy ? <CircularProgress size={16} /> : undefined}
         >
           {overlap || effective.ineffective.length > 0
-            ? `Delegate ${effective.effective.length} of ${selected.length}`
-            : "Delegate"}
+            ? `${canEdit ? "Delegate" : "Share"} ${effective.effective.length} of ${selected.length}`
+            : canEdit
+              ? "Delegate"
+              : "Share read-only"}
         </Button>
       </DialogActions>
     </Dialog>

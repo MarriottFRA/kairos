@@ -23,6 +23,25 @@
  * becomes the plan, the local one is soft-deleted. That is said here in full
  * before anything is pressed, because it is the one irreversible-looking part of
  * an otherwise safe action.
+ *
+ * ## The locked tile
+ *
+ * Access to a hotel is no longer access to every plan in it. A plan whose owner
+ * has not delegated to you arrives here as an `OU_VISITOR` entry — discoverable,
+ * with its version, row count and scope all withheld — and this card renders it
+ * as a lock rather than an error.
+ *
+ * It stays visible on purpose. A plan that simply vanished would read as data
+ * loss to somebody who knows it exists, and you cannot ask for access to
+ * something you cannot see. So the tile carries the two facts that make the next
+ * step obvious — what it is called, and who to ask — and offers that ask
+ * directly. What it does NOT carry is any number: `serverRows` and the version
+ * are null for these, and rendering "0 rows" would be a confident lie about a
+ * plan with three thousand.
+ *
+ * The chip is grey, not amber. This is the correct, ordinary state of a
+ * colleague's plan; colouring it as a fault teaches people to raise tickets
+ * about the system working.
  */
 
 import Alert from "@mui/material/Alert";
@@ -35,17 +54,11 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import CloudDownloadOutlinedIcon from "@mui/icons-material/CloudDownloadOutlined";
+import ContentCopyOutlinedIcon from "@mui/icons-material/ContentCopyOutlined";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import MailOutlinedIcon from "@mui/icons-material/MailOutlined";
 import { PlanSyncStatus } from "../../shared/kairosSync/ipc";
-
-/** Human wording for each relation, in the second person. */
-const RELATION_LABEL: Record<string, string> = {
-  OWNER: "You own this plan",
-  OWNER_DEGRADED: "You own this plan, but your access has lapsed",
-  DELEGATE: "Delegated to you",
-  ADMIN_LEASE: "You hold a support lease",
-  GLOBAL_ADMIN: "Administrator — read only",
-  OU_MEMBER: "Read only",
-};
+import { canDeletePlan, RELATION_LABEL } from "../../shared/kairosSync/relations";
 
 export interface CloudPlanCardProps {
   plan: PlanSyncStatus;
@@ -59,6 +72,16 @@ export interface CloudPlanCardProps {
    * frees the name so the local plan of that name can finally be published.
    */
   onDeleteFromServer?: () => void;
+  /**
+   * Ask the owner for a delegation.
+   *
+   * The only move available on a locked tile, and the reason `ownerEmail` is on
+   * the wire at all. Handled by the page rather than here because opening a mail
+   * draft is a shell action.
+   */
+  onRequestAccess?: (plan: PlanSyncStatus) => void;
+  /** Put the owner's address on the clipboard, for estates that block mailto. */
+  onCopyOwnerEmail?: (email: string) => void;
 }
 
 export default function CloudPlanCard({
@@ -67,13 +90,24 @@ export default function CloudPlanCard({
   twinLabel,
   onDownload,
   onDeleteFromServer,
+  onRequestAccess,
+  onCopyOwnerEmail,
 }: CloudPlanCardProps) {
   const departments = plan.departments?.length ?? 0;
   // `plan:delete` is OWNER and ADMIN_LEASE only. A delegate looking at a plan
-  // that has been shared with them must never be offered this.
-  const canDelete =
-    onDeleteFromServer !== undefined &&
-    (plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE");
+  // that has been shared with them must never be offered this — and neither
+  // must somebody who cannot even open it.
+  const canDelete = onDeleteFromServer !== undefined && canDeletePlan(plan.relation);
+
+  if (!plan.readable) {
+    return (
+      <LockedPlanCard
+        plan={plan}
+        onRequestAccess={onRequestAccess}
+        onCopyOwnerEmail={onCopyOwnerEmail}
+      />
+    );
+  }
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2, mb: 2 }}>
@@ -154,6 +188,93 @@ export default function CloudPlanCard({
             </Button>
           </Stack>
         </Stack>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * A plan you can see and cannot open.
+ *
+ * Everything quantitative is deliberately absent — see the note at the top of
+ * this file. What is left is the label, the owner, and the one thing that
+ * changes the situation.
+ */
+function LockedPlanCard({
+  plan,
+  onRequestAccess,
+  onCopyOwnerEmail,
+}: {
+  plan: PlanSyncStatus;
+  onRequestAccess?: (plan: PlanSyncStatus) => void;
+  onCopyOwnerEmail?: (email: string) => void;
+}) {
+  const owner = plan.ownerEmail;
+
+  return (
+    <Card variant="outlined" sx={{ borderRadius: 2, mb: 2 }}>
+      <CardContent>
+        <Stack
+          direction="row"
+          spacing={2}
+          sx={{ alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" }}
+        >
+          <Stack direction="row" spacing={1.5} sx={{ alignItems: "flex-start", minWidth: 0 }}>
+            <LockOutlinedIcon fontSize="small" sx={{ mt: 0.5, color: "text.disabled" }} />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                {plan.label}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {plan.year} · {plan.ou}
+                {owner ? ` · owned by ${owner}` : ""}
+              </Typography>
+            </Box>
+          </Stack>
+
+          {/* Grey, not amber. Nothing has gone wrong here. */}
+          <Chip
+            size="small"
+            variant="outlined"
+            label={RELATION_LABEL[plan.relation ?? ""] ?? "Not shared with you"}
+          />
+        </Stack>
+
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 2, maxWidth: 620 }}>
+          {owner ? <strong>{owner}</strong> : "Its owner"} has not given you access
+          to this plan. You can see that it exists; you cannot open it or see any
+          of its numbers. Ask them to delegate the departments you need — they can
+          share it read-only and carry on working on it themselves.
+        </Typography>
+
+        {onRequestAccess && owner && (
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ mt: 2, justifyContent: "flex-end", flexWrap: "wrap" }}
+          >
+            {/* Two routes to the same address, because estates differ on
+                whether an app may open a mail client. One of them always
+                works, and a tile that cannot say who to ask is a dead end. */}
+            {onCopyOwnerEmail && (
+              <Button
+                size="small"
+                startIcon={<ContentCopyOutlinedIcon fontSize="small" />}
+                onClick={() => onCopyOwnerEmail(owner)}
+              >
+                Copy email
+              </Button>
+            )}
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<MailOutlinedIcon fontSize="small" />}
+              onClick={() => onRequestAccess(plan)}
+            >
+              Ask for access
+            </Button>
+          </Stack>
+        )}
       </CardContent>
     </Card>
   );

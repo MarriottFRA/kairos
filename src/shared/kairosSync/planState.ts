@@ -24,9 +24,18 @@
  */
 
 import { PlanSyncStatus } from "./ipc";
-import { Lease, Relation } from "./protocol";
+import { Lease } from "./protocol";
+import { canRead, canWrite } from "./relations";
 
 export type PlanStateKind =
+  /**
+   * The server holds it and will not show it to you.
+   *
+   * Access to the hotel is not access to a colleague's plan. You can see that it
+   * exists and who owns it; every read endpoint answers 403. Above CLOUD_ONLY,
+   * because "download it" is the one thing that cannot happen here.
+   */
+  | "NOT_SHARED"
   /** The server has it; this computer does not. A new machine, or a delegation. */
   | "CLOUD_ONLY"
   /** Unpublished, and a plan of the same name is already on the server. */
@@ -48,7 +57,15 @@ export type PlanStateKind =
   /** A delegation was withdrawn. The work survives but cannot be published. */
   | "REVOKED";
 
-export type PlanAction = "publish" | "pull" | "review" | "register" | "download" | null;
+export type PlanAction =
+  | "publish"
+  | "pull"
+  | "review"
+  | "register"
+  | "download"
+  /** Ask the owner for a delegation. The only move on a plan you cannot read. */
+  | "request"
+  | null;
 
 export interface PlanState {
   kind: PlanStateKind;
@@ -62,14 +79,6 @@ export interface PlanState {
   /** True when this plan should stay expanded in a list of several. */
   needsAttention: boolean;
 }
-
-/** Relations that can write at least one department of the plan. */
-const CAN_WRITE = new Set<Relation>([
-  "OWNER",
-  "OWNER_DEGRADED",
-  "DELEGATE",
-  "ADMIN_LEASE",
-]);
 
 export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState {
   const behind = plan.published ? Math.max(0, plan.serverVersion - plan.watermark) : 0;
@@ -105,6 +114,46 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
     };
   }
 
+  // Above CLOUD_ONLY, because the counters are not merely meaningless here —
+  // they are withheld. The server sends null for version, epoch and scope on a
+  // plan it will not show you, and offering "download" would be offering a 403.
+  //
+  // Deliberately neutral and not attention-worthy. A colleague's plan you were
+  // never meant to open is not a problem with your Sync page; colouring it as
+  // one makes the "needs attention" count permanently non-zero at any hotel
+  // with two budget owners, which is most of them.
+  if (plan.relation !== null && !canRead(plan.relation)) {
+    // A copy still on this computer only survives the sweep when it has
+    // unpublished work in it. That work is the whole story on this card, and it
+    // is a different story from a colleague's plan you have simply noticed.
+    if (plan.onThisComputer && ahead > 0) {
+      return {
+        kind: "NOT_SHARED",
+        headline: "This plan is no longer shared with you",
+        detail:
+          `${count(ahead, "change")} of yours are still on this computer and are ` +
+          "not lost. You cannot download updates or publish while " +
+          `${plan.ownerEmail ?? "its owner"} has not delegated to you. If they ` +
+          "delegate again, these will publish normally.",
+        action: null,
+        tone: "blocked",
+        needsAttention: true,
+      };
+    }
+    return {
+      kind: "NOT_SHARED",
+      headline: "Not shared with you",
+      detail: plan.ownerEmail
+        ? `${plan.ownerEmail} owns this plan and has not given you access to it. ` +
+          "They can share it read-only and carry on working on it themselves."
+        : "This plan's owner has not given you access to it. Ask them to " +
+          "delegate the departments you need.",
+      action: "request",
+      tone: "neutral",
+      needsAttention: false,
+    };
+  }
+
   // Nothing else can be said about a plan this computer does not hold: there is
   // no local copy to be ahead, behind or level with. Downloading is the only
   // move, and it is the same move whether you own it or hold one department.
@@ -129,10 +178,15 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
     return {
       kind: "NAME_TAKEN",
       headline: "A plan with this name is already on the server",
-      detail:
-        "Publishing this copy would create a second plan of the same name. Download " +
-        "the server's copy instead — it replaces this one — or rename this plan to " +
-        "publish it alongside.",
+      detail: plan.twinReadable
+        ? "Publishing this copy would create a second plan of the same name. Download " +
+          "the server's copy instead — it replaces this one — or rename this plan to " +
+          "publish it alongside."
+        : // The clashing plan belongs to somebody else and is not shared, so
+          // "download it instead" is advice that cannot be followed. Renaming is
+          // the only way out, and saying so beats sending them to a locked tile.
+          "It belongs to a colleague and has not been shared with you, so you cannot " +
+          "download it. Rename this plan to publish it alongside theirs.",
       action: null,
       tone: "blocked",
       needsAttention: true,
@@ -154,17 +208,28 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
     };
   }
 
-  // Read-only is checked after publication state so an OU_MEMBER still learns
+  // Read-only is checked after publication state so a reader still learns
   // whether what they are looking at is current.
-  if (plan.relation !== null && !CAN_WRITE.has(plan.relation)) {
+  //
+  // Two ways to land here, and they are told apart by `writeScope` rather than
+  // by the relation: an administrator without a lease, and a delegate whose
+  // grant was made with `canEdit: false`. The second resolves as a plain
+  // DELEGATE on the wire — the server strips the write capabilities underneath —
+  // so the relation alone would offer them a Publish button that only ever 403s.
+  const readOnlyRelation = plan.relation !== null && !canWrite(plan.relation);
+  const readOnlyGrant = plan.relation === "DELEGATE" && plan.writeScope === "NONE";
+  if (readOnlyRelation || readOnlyGrant) {
     return {
       kind: "READ_ONLY",
-      headline: readOnlyHeadline(plan.relation),
+      headline: readOnlyGrant ? "Shared with you to look at" : readOnlyHeadline(plan.relation),
       detail:
         behind > 0
           ? `The server has moved on by ${count(behind, "change")}. Download them to ` +
               "see what changed."
-          : "You can see this plan and download it, but not change it.",
+          : readOnlyGrant
+            ? "The owner is still working on this plan. You can read it and download " +
+              "updates; changing it is theirs to do."
+            : "You can see this plan and download it, but not change it.",
       action: behind > 0 ? "pull" : null,
       tone: "neutral",
       needsAttention: false,
@@ -218,7 +283,7 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
   };
 }
 
-function readOnlyHeadline(relation: Relation): string {
+function readOnlyHeadline(relation: string | null): string {
   if (relation === "GLOBAL_ADMIN") return "Read only — you are not this plan's owner";
   return "Read only";
 }

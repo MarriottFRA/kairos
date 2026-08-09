@@ -102,6 +102,19 @@ export function ensureSyncState(db: Db, planId: string, ou: string): void {
 }
 
 /**
+ * Forget everything we track about a plan.
+ *
+ * The counterpart to a hard purge of the local copy. Leaving the state row
+ * behind would leave a watermark for rows that no longer exist, and `published`
+ * on the Sync page is derived partly from the row's mere existence — so a purged
+ * plan would come back as a phantom "published, 0 rows" entry on the next
+ * status call.
+ */
+export function deleteSyncState(db: Db, planId: string): void {
+  prepared(db, `DELETE FROM kairos_sync_state WHERE plan_id = ?`).run(planId);
+}
+
+/**
  * Patch the state row. Only the named columns move — a partial update must not
  * silently reset a watermark it was not asked about.
  */

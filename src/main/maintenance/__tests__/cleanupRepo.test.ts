@@ -18,7 +18,7 @@ import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
 import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
-import { purgeSoftDeleted, scanSoftDeleted } from "../cleanupRepo";
+import { purgeScenario, purgeSoftDeleted, scanSoftDeleted } from "../cleanupRepo";
 
 type Db = InstanceType<typeof Database>;
 
@@ -456,5 +456,113 @@ describe("scanSoftDeleted", () => {
 
     const scan = scanSoftDeleted(local, secure);
     expect(Object.values(scan).every((value) => value === 0)).toBe(true);
+  });
+});
+
+/**
+ * One plan, removed for real, with nothing else touched.
+ *
+ * The Kairos server stopped letting access to a hotel stand in for access to a
+ * colleague's plan, so a copy taken under the old rules has to go — and a soft
+ * delete will not do it. `softDeleteScenario` stamps the `scenarios` row and
+ * leaves every position, PII sidecar and component value live in the encrypted
+ * store, which is exactly the data the server has just stopped serving.
+ *
+ * The two properties worth pinning: it removes everything belonging to its
+ * scenario, and it touches NOTHING belonging to anybody else — including the
+ * user's own recycle bin, which the install-wide sweep would have emptied.
+ */
+describe("purgeScenario", () => {
+  it("removes the plan and everything filed under it", () => {
+    addScenario("plan-gone");
+    addPosition("pos-a", "plan-gone");
+    addPosition("pos-b", "plan-gone");
+    addComponentValue("pos-a", "def-1", "plan-gone");
+    secure
+      .prepare(
+        `INSERT INTO buyout_rows (id, ou, scenario_id, updated_at)
+         VALUES ('buy-1', ?, 'plan-gone', ?)`
+      )
+      .run(OU, NOW);
+    secure
+      .prepare(
+        `INSERT INTO manual_input_rows (id, ou, scenario_id, created_at, updated_at)
+         VALUES ('man-1', ?, 'plan-gone', ?, ?)`
+      )
+      .run(OU, NOW, NOW);
+
+    const tally = purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+
+    expect(tally).toMatchObject({
+      scenarios: 1,
+      positions: 2,
+      positionPii: 2,
+      componentValues: 1,
+      buyoutRows: 1,
+      manualInputRows: 1,
+    });
+    expect(count(local, "scenarios")).toBe(0);
+    expect(count(secure, "positions")).toBe(0);
+    // The one that a soft delete leaves behind, and the reason this exists.
+    expect(count(secure, "position_pii")).toBe(0);
+    expect(count(secure, "component_values")).toBe(0);
+    expect(count(secure, "buyout_rows")).toBe(0);
+    expect(count(secure, "manual_input_rows")).toBe(0);
+  });
+
+  it("leaves another plan at the same hotel completely alone", () => {
+    addScenario("plan-gone");
+    addScenario("plan-mine");
+    addPosition("pos-theirs", "plan-gone");
+    addPosition("pos-mine", "plan-mine");
+    addComponentValue("pos-mine", "def-1", "plan-mine");
+
+    purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+
+    expect(count(local, "scenarios", "id = 'plan-mine'")).toBe(1);
+    expect(count(secure, "positions", "id = 'pos-mine'")).toBe(1);
+    expect(count(secure, "position_pii", "position_id = 'pos-mine'")).toBe(1);
+    expect(count(secure, "component_values")).toBe(1);
+  });
+
+  it("does not empty the recycle bin on its way past", () => {
+    // The reason this is not `purgeSoftDeleted` with a filter. Losing access to
+    // somebody else's plan must not permanently destroy the user's own deleted
+    // columns, blocks and plans, which are still restorable.
+    addScenario("plan-gone");
+    addScenario("plan-binned", GONE);
+    addPosition("pos-binned", "plan-binned");
+    addField("goneCol", GONE);
+    addDefinition("def-binned", GONE);
+
+    purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+
+    expect(count(local, "scenarios", "id = 'plan-binned'")).toBe(1);
+    expect(count(secure, "positions", "id = 'pos-binned'")).toBe(1);
+    expect(count(local, "field_catalog")).toBe(1);
+    expect(count(local, "cost_component_definitions")).toBe(1);
+  });
+
+  it("ignores a plan at a different hotel with the same id", () => {
+    // The id is the local scenario id and is unique in practice, but the OU is
+    // part of every key in both stores and skipping it here would make a
+    // mistyped property destructive.
+    addScenario("plan-gone");
+    addPosition("pos-a", "plan-gone");
+
+    const tally = purgeScenario(local, secure, { id: "plan-gone", ou: "OU99999" });
+
+    expect(tally.scenarios).toBe(0);
+    expect(count(secure, "positions")).toBe(1);
+  });
+
+  it("is idempotent — a retry after a partial failure is safe", () => {
+    addScenario("plan-gone");
+    addPosition("pos-a", "plan-gone");
+
+    purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+    const second = purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+
+    expect(Object.values(second).every((value) => value === 0)).toBe(true);
   });
 });

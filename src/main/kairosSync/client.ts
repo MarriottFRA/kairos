@@ -68,7 +68,26 @@ export class KairosApiError extends Error {
 
 /** Codes the client acts on rather than merely reporting. */
 export const KAIROS_ERRORS = {
+  /**
+   * The deliberately opaque denial. It does not say whether the plan exists,
+   * whether an OU grant lapsed, or whether a delegation was revoked last March,
+   * because each of those is something an attacker can probe for. Show it as-is;
+   * there is no action the user can take beyond contacting an administrator.
+   */
   SCOPE_EMPTY: "kairos_scope_empty",
+  /**
+   * The opposite, and they look alike. This plan exists at your hotel and its
+   * owner has not delegated it to you — which the server already told you, in
+   * the listing, with the label and the owner's address. There is nothing left
+   * to conceal, so render it as an invitation to ask rather than a failure.
+   */
+  PLAN_NOT_SHARED: "kairos_plan_not_shared",
+  /**
+   * A delegation granted with `canEdit: false`. Every write is refused; reads
+   * are not. The relation on the wire stays a plain `DELEGATE`, so this code is
+   * the only in-band notice that the grant is view-only.
+   */
+  DELEGATE_READ_ONLY: "kairos_delegate_read_only",
   PLAN_NOT_FOUND: "kairos_plan_not_found",
   OWNER_NOT_ELIGIBLE: "kairos_owner_not_eligible",
   OWNER_ENTITLEMENT_LAPSED: "kairos_owner_entitlement_lapsed",

@@ -62,6 +62,21 @@ export interface PlanScope {
   planLocked: boolean;
   /** True while the plan has never been published — the local file is the copy. */
   unpublished: boolean;
+  /**
+   * The server holds this plan and will not show it to us.
+   *
+   * Kept strictly apart from `unpublished`, which is the PERMISSIVE default:
+   * an unpublished plan has no server-side authority to consult, so consumers
+   * read it as "no restriction" and the grid is fully editable — exactly right
+   * for a hotel that never opted in. Folding a 403 into that flag would make
+   * losing access to a colleague's plan look identical to never having synced,
+   * and hand the grid an unrestricted local copy of data the server has just
+   * stopped serving.
+   *
+   * Reachable only with unpublished local work in it; anything clean is purged
+   * by the Sync page's status call.
+   */
+  notShared: boolean;
   /** Rows the user can see but not edit, with the reason, for the grid banner. */
   lockedDepartments: DepartmentOwnershipRow[];
   loading: boolean;
@@ -69,6 +84,15 @@ export interface PlanScope {
   error: string | null;
   refresh: () => void;
 }
+
+/**
+ * "This plan exists at your hotel and its owner has not shared it with you."
+ *
+ * Deliberately not in `UNPUBLISHED_CODES` below, and the distinction is the
+ * whole point: those codes mean the app should behave as though sync does not
+ * exist, which is permissive. This one means the opposite.
+ */
+const NOT_SHARED_CODE = "kairos_plan_not_shared";
 
 /** Codes that mean "there is no plan on the server", not "something broke". */
 const UNPUBLISHED_CODES = new Set([
@@ -89,6 +113,7 @@ export function usePlanScope(
 ): PlanScope {
   const [ownership, setOwnership] = useState<DepartmentOwnership | null>(null);
   const [unpublished, setUnpublished] = useState(true);
+  const [notShared, setNotShared] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -99,6 +124,7 @@ export function usePlanScope(
     if (!ou || !planId) {
       setOwnership(null);
       setUnpublished(true);
+      setNotShared(false);
       setError(null);
       return;
     }
@@ -110,12 +136,19 @@ export function usePlanScope(
       .then((result) => {
         if (cancelled) return;
         if (syncFailed(result)) {
+          const locked = result.error.code === NOT_SHARED_CODE;
           // Offline, signed out, or simply not published: the app is standalone
           // first, so none of these is a failure the user needs to see.
           setOwnership(null);
-          setUnpublished(true);
+          // NOT `unpublished` for a locked plan. That flag is the permissive
+          // default and would hand the grid an unrestricted copy of exactly the
+          // data the server has stopped serving.
+          setUnpublished(!locked);
+          setNotShared(locked);
           setError(
-            UNPUBLISHED_CODES.has(result.error.code) || result.error.code === "local"
+            locked ||
+              UNPUBLISHED_CODES.has(result.error.code) ||
+              result.error.code === "local"
               ? null
               : result.error.message
           );
@@ -126,6 +159,7 @@ export function usePlanScope(
         // client has no cached copy and the server answered 304 — rare, and
         // treated as "ask again" rather than "unrestricted".
         setUnpublished(result.data === null);
+        setNotShared(false);
         setError(null);
       })
       .finally(() => {
@@ -139,28 +173,35 @@ export function usePlanScope(
 
   return useMemo<PlanScope>(() => {
     const departments = ownership?.departments ?? [];
+    // A plan the server refuses to discuss has no writable departments and no
+    // readable ones. An EMPTY set, never `undefined` — the two mean opposite
+    // things here, and `undefined` is the one that unlocks the grid.
+    const empty: ReadonlySet<string> = new Set<string>();
     return {
       ownership,
       // Sets, not arrays: the grid consults these for every rendered cell.
-      writableDepartments:
-        ownership === null
+      writableDepartments: notShared
+        ? empty
+        : ownership === null
           ? undefined
           : new Set(departments.filter((row) => row.writable).map((row) => row.code)),
-      readableDepartments:
-        ownership === null
+      readableDepartments: notShared
+        ? empty
+        : ownership === null
           ? undefined
           : new Set(departments.filter((row) => row.readable).map((row) => row.code)),
       relation: ownership?.me.relation ?? null,
       scopeKind: ownership?.me.scopeKind ?? null,
       // Unpublished plans keep the full editor — the demotion only applies to a
-      // plan the server has an opinion about.
-      structureEditable: ownership ? ownership.structureEditableByMe : true,
-      planLocked: ownership?.me.relation === "GLOBAL_ADMIN",
+      // plan the server has an opinion about. A locked one is not unpublished.
+      structureEditable: notShared ? false : ownership ? ownership.structureEditableByMe : true,
+      planLocked: notShared || ownership?.me.relation === "GLOBAL_ADMIN",
       unpublished,
+      notShared,
       lockedDepartments: departments.filter((row) => row.readable && !row.writable),
       loading,
       error,
       refresh,
     };
-  }, [ownership, unpublished, loading, error, refresh]);
+  }, [ownership, unpublished, notShared, loading, error, refresh]);
 }

@@ -60,8 +60,34 @@ const HEADS: SyncHeads = {
   applyOrder: ["calendar", "position"],
 } as SyncHeads;
 
+/**
+ * A plan at this hotel that this caller may see and not read.
+ *
+ * Every field describing its contents is null — that is the shape the server
+ * sends for `OU_VISITOR`, and it is the shape the arithmetic below has to
+ * survive.
+ */
+const LOCKED_PLAN = "plan-2";
+const WITH_LOCKED: SyncHeads = {
+  ...HEADS,
+  plans: [
+    ...HEADS.plans,
+    {
+      id: LOCKED_PLAN,
+      version: null,
+      structureVersion: null,
+      syncEpoch: null,
+      state: "ACTIVE",
+      relation: "OU_VISITOR",
+      scopeKind: null,
+      departments: null,
+      handbacksPending: 0,
+    },
+  ],
+};
+
 /** A client that answers 200 once, then 304 to the ETag it just handed out. */
-function stubClient(answers: Array<{ status: 200 | 304 }>) {
+function stubClient(answers: Array<{ status: 200 | 304 }>, body: SyncHeads = HEADS) {
   let call = 0;
   const seen: Array<string | null> = [];
   return {
@@ -71,7 +97,7 @@ function stubClient(answers: Array<{ status: 200 | 304 }>) {
         seen.push(etag);
         const answer = answers[Math.min(call++, answers.length - 1)];
         return answer.status === 200
-          ? { status: 200 as const, body: HEADS, etag: ETAG }
+          ? { status: 200 as const, body, etag: ETAG }
           : { status: 304 as const, body: null, etag: ETAG };
       }),
     } as never,
@@ -138,5 +164,68 @@ describe("fetchHeads", () => {
     const state = getSyncState(db, PLAN);
     expect(state?.relation).toBe("OWNER");
     expect(state?.scopeKind).toBe("FULL");
+  });
+
+  /**
+   * A plan this caller may see and not read.
+   *
+   * The server sends `version`, `syncEpoch`, `structureVersion` and `scopeKind`
+   * as null for these, and the loop's arithmetic is not merely uninformative on
+   * a null — it is wrong. `null !== 0` is true, so a locked plan with a state
+   * row would set `epochMoved` and enter `stalePlans` on EVERY probe, for ever,
+   * driving a full re-pull against an endpoint that only ever answers 403.
+   */
+  describe("a plan that is not shared with this caller", () => {
+    it("is reported separately rather than treated as a plan to sync", async () => {
+      const db = makeDb();
+      const { client } = stubClient([{ status: 200 }], WITH_LOCKED);
+
+      const result = await fetchHeads(db, client, OU);
+
+      expect(result.lockedPlans.map((plan) => plan.id)).toEqual([LOCKED_PLAN]);
+      expect(result.stalePlans.map((plan) => plan.id)).toEqual([PLAN]);
+    });
+
+    it("never moves the epoch, however many times it is probed", async () => {
+      const db = makeDb();
+      const { client } = stubClient([{ status: 200 }], WITH_LOCKED);
+
+      await fetchHeads(db, client, OU);
+      const second = await fetchHeads(db, client, OU);
+      const third = await fetchHeads(db, client, OU);
+
+      expect(second.epochMoved).toBe(false);
+      expect(third.epochMoved).toBe(false);
+      // plan-1 IS legitimately stale every time — a probe never advances a
+      // watermark, only a completed pull does. The locked one must never be.
+      expect(third.stalePlans.map((plan) => plan.id)).not.toContain(LOCKED_PLAN);
+    });
+
+    it("gets no sync state row — there is no watermark to keep", async () => {
+      // Creating one is what made the epoch comparison reachable at all, and a
+      // row here also makes the Sync page report the plan as "published" and
+      // therefore local.
+      const db = makeDb();
+      const { client } = stubClient([{ status: 200 }], WITH_LOCKED);
+
+      await fetchHeads(db, client, OU);
+
+      expect(getSyncState(db, LOCKED_PLAN)).toBeNull();
+      expect(getSyncState(db, PLAN)).not.toBeNull();
+    });
+
+    it("is still reported on a 304, because the ETag will not move on its own", async () => {
+      // A visitor's probe ETag is stable precisely BECAUSE the fields that
+      // change are the withheld ones. A purge gated on a 200 would wait for a
+      // change that never comes.
+      const db = makeDb();
+      const { client } = stubClient([{ status: 200 }, { status: 304 }], WITH_LOCKED);
+
+      await fetchHeads(db, client, OU);
+      const second = await fetchHeads(db, client, OU);
+
+      expect(second.notModified).toBe(true);
+      expect(second.lockedPlans.map((plan) => plan.id)).toEqual([LOCKED_PLAN]);
+    });
   });
 });
