@@ -279,14 +279,24 @@ export function pushStructure(
 /**
  * The grid's lock list. ETag'd server-side, so this is cheap enough to call on
  * every grid mount; `writable` is authoritative and cannot disagree with a save.
+ *
+ * `unconditional` bypasses `If-None-Match`, and belongs on a user action only.
+ * It exists because the change that matters most here — a delegate handing a
+ * department back — happens on somebody else's machine, so a viewer who
+ * believes a lock is wrong has no other way to make this computer stop
+ * believing its cache. Automatic paths must leave it off: the conditional
+ * request is the cheapest thing in the feature and re-asking on every window
+ * focus would make it the most expensive.
  */
 export function departmentOwnership(
   ou: string,
-  planId: string
+  planId: string,
+  options: { unconditional?: boolean } = {}
 ): Promise<SyncOutcome<DepartmentOwnership | null>> {
   return call<DepartmentOwnership | null>(KAIROS_SYNC_CHANNELS.departmentOwnership, {
     ou,
     planId,
+    unconditional: options.unconditional === true,
   });
 }
 

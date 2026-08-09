@@ -297,6 +297,17 @@ export default function ReviewDialog(props: ReviewDialogProps) {
               computer, so it can be opened on the Positions page and published
               from here.
             </Alert>
+          ) : direction === "pull" && highlightDepartments.length > 0 ? (
+            // Started from somebody's card, and there is nothing of theirs left.
+            // The generic sentence below is true here and reads as a fault —
+            // the owner pressed "get their work" and was told about the server's
+            // version numbers. Say the thing they actually wanted to know.
+            <Typography color="text.secondary">
+              You already have their work — everything published into this plan is
+              on this computer. A department stays handed back until you reopen
+              it, so it can be finished and collected and still be listed as
+              theirs.
+            </Typography>
           ) : (
             <Typography color="text.secondary">
               {direction === "pull"

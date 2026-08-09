@@ -81,7 +81,14 @@ export const KAIROS_SYNC_CHANNELS = {
   /** PUT /ou/{ou}/structure. Owner-eligible only. */
   pushStructure: "kairosSync:pushStructure",
 
-  /** The grid's lock list. ETag'd — safe to call per render. */
+  /**
+   * The grid's lock list. ETag'd — safe to call per render.
+   *
+   * Takes an optional `unconditional` on the request, which bypasses the ETag.
+   * User actions only: a handback happens on the delegate's machine, so it is
+   * the only way somebody looking at a lock nobody holds can make this computer
+   * stop trusting its cached answer.
+   */
   departmentOwnership: "kairosSync:departmentOwnership",
   delegatableDepartments: "kairosSync:delegatableDepartments",
   delegationCandidates: "kairosSync:delegationCandidates",

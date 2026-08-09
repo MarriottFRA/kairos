@@ -38,7 +38,6 @@
  */
 
 import { DEPARTMENT_CODE_KEY } from "./fields";
-import type { PositionRow } from "./rowModel";
 
 export interface PositionWriteScope {
   /** `undefined` = no server opinion. An empty Set = nothing writable. */
@@ -47,9 +46,35 @@ export interface PositionWriteScope {
   planLocked?: boolean;
 }
 
+/**
+ * Any grid row that carries a department code.
+ *
+ * Structural rather than `PositionRow`, because Manual Input rows are
+ * department-scoped in exactly the same way — `manual_input_row` is in
+ * `DEPARTMENT_ENTITY_TYPES` and the publish filter treats it identically — and a
+ * second copy of this predicate for a second grid is precisely what the module
+ * note above says went wrong the first time. `ManualGridRow` names the field
+ * explicitly; `PositionRow` supplies it through its index signature.
+ */
+export interface DepartmentScopedRow {
+  /**
+   * Declared so this is not a "weak type".
+   *
+   * With `departmentCode` optional and nothing else on the interface, TypeScript
+   * rejects every argument whose declared members do not overlap — including
+   * `PositionRow`, which supplies the field through an index signature. Every
+   * grid row has an id, so requiring it costs nothing and makes the structural
+   * match work in both directions.
+   */
+  readonly id: string;
+  readonly departmentCode?: unknown;
+}
+
 /** The row's department code, or `""`. The one place this coercion happens. */
-export function departmentCodeOf(row: PositionRow | undefined): string {
-  const value = row?.[DEPARTMENT_CODE_KEY];
+export function departmentCodeOf(row: DepartmentScopedRow | undefined): string {
+  const value = (row as unknown as Record<string, unknown> | undefined)?.[
+    DEPARTMENT_CODE_KEY
+  ];
   return typeof value === "string" ? value : "";
 }
 
@@ -61,7 +86,7 @@ export function departmentCodeOf(row: PositionRow | undefined): string {
  * is just how that hotel works.
  */
 export function departmentUnassigned(
-  row: PositionRow | undefined,
+  row: DepartmentScopedRow | undefined,
   scope: PositionWriteScope
 ): boolean {
   if (scope.writableDepartments === undefined) return false;
@@ -69,7 +94,7 @@ export function departmentUnassigned(
 }
 
 export function rowDepartmentWritable(
-  row: PositionRow | undefined,
+  row: DepartmentScopedRow | undefined,
   scope: PositionWriteScope
 ): boolean {
   if (!row) return true;

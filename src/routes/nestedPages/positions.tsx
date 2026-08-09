@@ -50,6 +50,7 @@ import {
 } from "../../shared/positions/rowModel";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import { departmentPickList } from "../../shared/positions/departmentPickList";
+import { lockReasonsByDepartment } from "../../shared/kairosSync/lockReason";
 import { buildCalendarContext } from "../../shared/engine/calendarContext";
 import { CalendarContext } from "../../shared/engine/types";
 import { CalendarYear } from "../../shared/calendar";
@@ -137,7 +138,6 @@ import DeleteClusterPositionDialog, {
   PendingPositionDelete,
 } from "../../components/positions/DeleteClusterPositionDialog";
 import PositionFormDialog from "../../components/positions/PositionFormDialog";
-import LockedDepartmentsBanner from "../../components/positions/LockedDepartmentsBanner";
 import { uuidv7 } from "../../shared/engine/ids";
 
 /**
@@ -731,6 +731,35 @@ export default function Positions() {
   const departmentPicks = useMemo(
     () => departmentPickList(departments, planScope.ownership, planScope.scopeKind),
     [departments, planScope.ownership, planScope.scopeKind]
+  );
+
+  /**
+   * Why each locked department is locked, for the row menu.
+   *
+   * There is deliberately no banner listing them (see the note below the grid),
+   * so this is the only place the grid explains itself — and the wording depends
+   * on which side of the grant is reading, which is the whole reason it is
+   * derived centrally rather than written out here.
+   */
+  const lockReasonByDepartment = useMemo(
+    () => lockReasonsByDepartment(planScope.ownership),
+    [planScope.ownership]
+  );
+
+  /**
+   * The escape hatch, on the screen where somebody hits the wall.
+   *
+   * Bypasses the ETag, so it is on a user action and nothing else. Offered only
+   * from a locked row's menu — a lock that is correct needs no re-check, and a
+   * lock that is wrong is indistinguishable from here without asking.
+   */
+  // Keyed on `refresh` rather than on `planScope`, which is a fresh object every
+  // time the answer is recomputed — depending on it would rebuild the grid's
+  // columns on each one.
+  const planScopeRefresh = planScope.refresh;
+  const recheckAccess = useCallback(
+    () => planScopeRefresh({ unconditional: true }),
+    [planScopeRefresh]
   );
 
   // Read inside `addPositions`, which is deliberately dependency-free — see the
@@ -1747,19 +1776,25 @@ export default function Positions() {
         </Alert>
       )}
 
-      {/* Rows this user can see but not write. The grid tints them; this says
-          who has them and why, which is the half a lock icon cannot carry. */}
-      {gridReady && !planScope.unpublished && !planScope.notShared && (
-        <LockedDepartmentsBanner
-          departments={planScope.lockedDepartments}
-          planLocked={planScope.planLocked}
-        />
-      )}
+      {/* The whole plan is read-only — every row is greyed, so the greying
+          cannot be the explanation. Kept for that reason, and for that reason
+          only. */}
+      {gridReady &&
+        !planScope.unpublished &&
+        !planScope.notShared &&
+        planScope.planLocked && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            <AlertTitle>This plan is read-only for you</AlertTitle>
+            You can see everything and download it, but nothing here can be
+            edited. The Sync page explains why.
+          </Alert>
+        )}
 
-      {/* No mirror banner naming the departments a delegate DOES hold. Handing
-          work back is a Sync-page act and is taught as one; a permanent
-          info box on the page where the work happens is a standing
-          interruption that says nothing the grid does not already show. */}
+      {/* No banner listing the departments somebody else holds, and no mirror of
+          it naming the ones a delegate DOES hold. The grid greys what it cannot
+          write, which answers "why will this cell not open?" on the row where
+          the question is asked, and the Sync page answers who has it and why.
+          A standing info box on the page where the work happens repeats both. */}
 
       {/* Structure problems (e.g. blocks referencing each other in a loop)
           pause the block totals; everything else keeps working. */}
@@ -1838,6 +1873,8 @@ export default function Positions() {
             writableDepartments={planScope.writableDepartments}
             departmentPicks={departmentPicks}
             planLocked={planScope.planLocked}
+            lockReasonByDepartment={lockReasonByDepartment}
+            onRecheckAccess={recheckAccess}
             structureEditable={planScope.structureEditable}
             groupByDept={groupByDept}
             showInactive={showInactive}

@@ -173,4 +173,60 @@ describe("delegationCardState", () => {
     const state = delegationCardState(delegation({ canEdit: false }), presence(0));
     expect(state.headline).toBe("Working now");
   });
+
+  // ------------------------------------------------- already collected
+
+  it("stops offering the download once the work is on this computer", () => {
+    // The bug this closes: a handback stands until the owner reopens the
+    // department, so the card kept saying "ready to download" after the
+    // download — and pressing it produced a dialog with nothing in it and no
+    // way forward.
+    const state = delegationCardState(
+      delegation({ departments: [handedBack("ROOMS"), active("FB")] }),
+      null,
+      { serverAhead: false }
+    );
+    expect(state.collectable).toBe(false);
+    expect(state.tone).toBe("neutral");
+    expect(state.headline).toBe("Handed back ROOMS — you already have their work");
+  });
+
+  it("says the same about a delegation that handed everything back", () => {
+    const state = delegationCardState(
+      delegation({ departments: [handedBack("ROOMS"), handedBack("FB")] }),
+      null,
+      { serverAhead: false }
+    );
+    expect(state.collectable).toBe(false);
+    expect(state.headline).toBe("Handed everything back — you already have their work");
+  });
+
+  it("offers it again the moment they publish something new", () => {
+    const state = delegationCardState(
+      delegation({ departments: [handedBack("ROOMS")] }),
+      null,
+      { serverAhead: true }
+    );
+    expect(state.collectable).toBe(true);
+    expect(state.headline).toBe("Handed everything back — ready to download");
+  });
+
+  it("keeps offering the download when the caller cannot tell", () => {
+    // Unknown must not read as collected. Offering a download that turns out to
+    // be empty costs a dialog; hiding one that was not costs the work.
+    const state = delegationCardState(delegation({ departments: [handedBack("ROOMS")] }), null);
+    expect(state.collectable).toBe(true);
+  });
+
+  it("what they are doing now outranks a handback already collected", () => {
+    // Reversed from the uncollected case on purpose: "you can collect this" is
+    // a thing to do and outranks presence, but "you have collected this" is not.
+    const state = delegationCardState(
+      delegation({ departments: [handedBack("ROOMS"), active("FB")] }),
+      presence(2),
+      { serverAhead: false }
+    );
+    expect(state.headline).toBe("Working now · 2 unpublished changes");
+    expect(state.collectable).toBe(false);
+  });
 });

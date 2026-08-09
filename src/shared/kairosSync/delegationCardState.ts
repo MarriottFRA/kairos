@@ -23,6 +23,21 @@
  * same reason: "they have finished and you can collect it" is a thing to do,
  * where "they are typing" is a thing to know.
  *
+ * ## A handback is a state; collecting is an event
+ *
+ * `HANDED_BACK` survives until the owner reopens the department — it means "this
+ * is mine again", not "there is a parcel waiting". So a card built from the
+ * handback alone offered "Get their work" for ever: download it, and the button
+ * came back, because nothing about the delegation had changed. Pressing it again
+ * produced a review dialog saying nothing had changed on the server and no way
+ * forward, which is the worst answer a call to action can give.
+ *
+ * `context.serverAhead` is the missing half. It is the plan's own watermark
+ * against the server's version — advanced by a pull and by nothing else, so
+ * false means every published row is already here. With it, "ready to download"
+ * becomes a fact about the server rather than a fact about the grant, and once
+ * the work is collected the card says so and stops asking.
+ *
  * ## What is deliberately NOT here
  *
  * A last-published time. `ActivityEntry.seenAt` is a presence ping written while
@@ -59,6 +74,20 @@ export interface DelegationCardState {
   collectable: boolean;
 }
 
+/** What the delegation itself cannot say: is anything actually waiting? */
+export interface DelegationContext {
+  /**
+   * Does the server hold rows this computer has not downloaded?
+   *
+   * Omitted when the caller genuinely does not know — a card that has not been
+   * told falls back to the old behaviour and offers the download, which is the
+   * safe way to be wrong: the review dialog will say plainly that there is
+   * nothing to bring down. Passing `false` is a claim, so only pass it from the
+   * plan's own watermark.
+   */
+  serverAhead?: boolean;
+}
+
 /** "Rooms", "Rooms and F&B", "Rooms, F&B and 2 more". */
 function listCodes(codes: string[]): string {
   if (codes.length === 0) return "";
@@ -70,12 +99,16 @@ function listCodes(codes: string[]): string {
 
 export function delegationCardState(
   delegation: Delegation,
-  presence: ActivityEntry | null
+  presence: ActivityEntry | null,
+  context: DelegationContext = {}
 ): DelegationCardState {
   const handedBack = delegation.departments
     .filter((department) => department.state === "HANDED_BACK")
     .map((department) => department.code);
-  const collectable = handedBack.length > 0;
+  // Handed back AND already downloaded. Still their work, still their handback —
+  // just nothing left to fetch, so it stops being an action and becomes a fact.
+  const collected = handedBack.length > 0 && context.serverAhead === false;
+  const collectable = handedBack.length > 0 && !collected;
 
   // Nothing below can happen if the server is not honouring the grant, so this
   // outranks everything — including a handback, which in this state is the last
@@ -119,6 +152,21 @@ export function delegationCardState(
 
   if (presence) {
     return { tone: "good", headline: "Working now", collectable };
+  }
+
+  // Below presence on purpose. A handback whose work is already here is not a
+  // thing to do, so anything the delegate is doing NOW outranks it — and when
+  // there is nothing else to say, this is the sentence that stops the owner
+  // wondering whether they missed a download.
+  if (collected) {
+    return {
+      tone: "neutral",
+      headline:
+        handedBack.length === delegation.departments.length
+          ? "Handed everything back — you already have their work"
+          : `Handed back ${listCodes(handedBack)} — you already have their work`,
+      collectable,
+    };
   }
 
   if (!delegation.canEdit) {

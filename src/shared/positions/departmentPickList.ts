@@ -12,8 +12,9 @@
  * reason beside it. Removing it outright answers a different question from the
  * one being asked: somebody looking for Rooms and not finding it concludes the
  * reference data is broken, not that a colleague is holding it. The reasons come
- * from `LOCK_REASON`, the same map the grid's banner uses, so the two surfaces
- * cannot word it differently.
+ * from `lockReasonsByDepartment`, the same derivation the row menu and the
+ * Delegation table use, so the surfaces cannot word it differently — including
+ * the part that depends on who is reading.
  *
  * ## Why an owner and a delegate need different rules
  *
@@ -35,7 +36,7 @@
 
 import type { DepartmentOption } from "../mappingTables/types";
 import type { DepartmentOwnership } from "../kairosSync/protocol";
-import { LOCK_REASON } from "../kairosSync/lockReason";
+import { lockReasonsByDepartment } from "../kairosSync/lockReason";
 
 export interface LockedDepartmentOption extends DepartmentOption {
   /** Why it cannot be chosen, in the words the grid's banner already uses. */
@@ -62,14 +63,14 @@ export function departmentPickList(
   if (!ownership) return UNRESTRICTED(all);
 
   const writable = new Set<string>();
-  const reasonByCode = new Map<string, string>();
   for (const row of ownership.departments) {
-    if (row.writable) {
-      writable.add(row.code);
-    } else if (row.readable) {
-      reasonByCode.set(row.code, LOCK_REASON[row.reason ?? ""] ?? "Not yours to edit");
-    }
+    if (row.writable) writable.add(row.code);
   }
+  // Readable-but-not-writable, worded for whoever is being refused: an owner
+  // must not be told a department was "handed back to the owner". Derived by
+  // `lockReasonsByDepartment` rather than here so the picker, the row menu and
+  // the Delegation table cannot word the same reason three ways.
+  const reasonByCode = lockReasonsByDepartment(ownership);
 
   // A revoked delegate holds nothing. Everything they can still see is locked,
   // and offering them a choice would be a lie about what a save would do.

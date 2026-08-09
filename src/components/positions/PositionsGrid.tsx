@@ -21,6 +21,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlined";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import ViewColumnOutlinedIcon from "@mui/icons-material/ViewColumnOutlined";
 import {
   DataGridPremium,
@@ -54,6 +55,7 @@ import { BlockDto } from "../../shared/blocks/ipc";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
 import {
+  departmentCodeOf,
   departmentUnassigned,
   rowDepartmentWritable,
 } from "../../shared/positions/writeScope";
@@ -313,6 +315,28 @@ export interface PositionsGridProps {
   /** An administrator holds a support lease, or the plan is archived. */
   planLocked?: boolean;
   /**
+   * Why each locked department is locked, in the words for whoever is reading.
+   *
+   * The grid greys what it cannot write and there is deliberately no banner
+   * listing the departments somebody else holds — the Sync page answers who has
+   * them and why. But the row menu was already going to say something, and
+   * "not yours to edit" is the one sentence that fits every case and explains
+   * none of them. Same map the department picker uses, so the two cannot drift.
+   *
+   * Omit for no restriction; a code that is not in the map falls back.
+   */
+  lockReasonByDepartment?: ReadonlyMap<string, string>;
+  /**
+   * Ask the server again, ignoring anything this computer remembers.
+   *
+   * Offered on locked rows only, and it disappears the moment the row is
+   * writable. A lock that is wrong is invisible from here — the grid cannot tell
+   * a stale cached answer from a current one — so the escape hatch belongs on
+   * the screen where somebody actually hits the wall, not only on the Sync page
+   * they would have to think to visit.
+   */
+  onRecheckAccess?: () => void;
+  /**
    * May this user change the hotel's setup — columns, blocks, schemes?
    *
    * Used here only to decide whether an unassigned row is worth flagging: a row
@@ -481,6 +505,8 @@ export default function PositionsGrid({
   writableDepartments,
   departmentPicks,
   planLocked,
+  lockReasonByDepartment,
+  onRecheckAccess,
   structureEditable = true,
   groupByDept,
   showInactive,
@@ -721,11 +747,19 @@ export default function PositionsGrid({
         // DEPARTMENT_OUT_OF_SCOPE. Disabling here rather than at save time means
         // the answer is the same one the server would give, given now.
         const writable = rowWritable(params.row);
+        // The reason, not the fact. A greyed row already says it cannot be
+        // edited; what the menu can add is which of the several quite different
+        // situations this is — and, when the answer is one nobody should be
+        // seeing, the way to make this computer ask again.
+        const lockReason = writable
+          ? null
+          : lockReasonByDepartment?.get(departmentCodeOf(params.row)) ??
+            "not yours to edit";
         const items = [
           <GridActionsCellItem
             key="edit"
             icon={<EditOutlinedIcon fontSize="small" />}
-            label={writable ? "Edit position (Alt+Enter)" : "Edit position — not yours to edit"}
+            label={writable ? "Edit position (Alt+Enter)" : `Cannot edit — ${lockReason}`}
             onClick={() => onEditRow(params.row)}
             disabled={!writable}
             showInMenu
@@ -747,6 +781,17 @@ export default function PositionsGrid({
             showInMenu
           />,
         ];
+        if (!writable && onRecheckAccess) {
+          items.push(
+            <GridActionsCellItem
+              key="recheck"
+              icon={<RefreshIcon fontSize="small" />}
+              label="Re-check my access"
+              onClick={() => onRecheckAccess()}
+              showInMenu
+            />
+          );
+        }
         actionItems.set(params.row, items);
         return items;
       },
@@ -764,7 +809,7 @@ export default function PositionsGrid({
     const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable]);
+  }, [catalog, controlKeys, masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable, lockReasonByDepartment, onRecheckAccess]);
 
   const columnGroupingModel = useMemo(
     () => [

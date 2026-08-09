@@ -120,6 +120,35 @@ describe("departmentPickList", () => {
       ]),
       "FULL"
     );
-    expect(picks.locked[0].reason).toBe("Not yours to edit");
+    // The code itself, which is not a sentence but is the one thing that lets a
+    // support call name what the server actually said. This used to flatten to
+    // "Not yours to edit", against the intent this test's own title states.
+    expect(picks.locked[0].reason).toBe("SOMETHING_NEW");
+  });
+
+  it("words HANDED_BACK for whoever is being refused", () => {
+    // The same reason code, the two sides of the grant. "Handed back to the
+    // owner" is a complete explanation on the delegate's screen and a
+    // contradiction on the owner's, next to a chip saying they cannot edit it.
+    const delegate = departmentPickList(
+      ALL,
+      ownership("PARTIAL", "DELEGATE", [
+        { code: "D0410", readable: true, writable: true },
+        { code: "D0610", readable: true, writable: false, reason: "HANDED_BACK" },
+      ]),
+      "PARTIAL"
+    );
+    expect(delegate.locked[0].reason).toBe("Handed back to the owner");
+
+    const owner = departmentPickList(
+      ALL,
+      ownership("FULL", "OWNER", [
+        { code: "D0410", readable: true, writable: false, reason: "HANDED_BACK" },
+        { code: "D0610", readable: true, writable: true },
+      ]),
+      "FULL"
+    );
+    expect(owner.locked[0].reason).toContain("Handed back to you");
+    expect(owner.locked[0].reason).toContain("withdraw the delegation");
   });
 });

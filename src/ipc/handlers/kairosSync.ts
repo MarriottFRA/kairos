@@ -34,6 +34,7 @@ import type { ApiClient } from "../../main/auth/apiClient";
 import { KAIROS_ERRORS, KairosApiError, KairosClient } from "../../main/kairosSync/client";
 import { fetchHeads, limitsFrom } from "../../main/kairosSync/heads";
 import { contentHash } from "../../main/kairosSync/hash";
+import { fetchOwnership, invalidateOwnership } from "../../main/kairosSync/ownership";
 import { pullPlan } from "../../main/kairosSync/pull";
 import { previewPublish, publishPlan } from "../../main/kairosSync/publish";
 import { rebuildShadowFromServer, reconcilePlan } from "../../main/kairosSync/reconcile";
@@ -899,38 +900,21 @@ export function createKairosSyncHandlers(
 
     [KAIROS_SYNC_CHANNELS.departmentOwnership]: async (
       _event,
-      request: { ou: string; planId: string }
+      request: { ou: string; planId: string; unconditional?: boolean }
     ) => {
       return envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          const db = secureDb();
-          const state = getSyncState(db, request.planId);
-          const result = await delegation.fetchDepartmentOwnership(
-            client,
-            request.planId,
-            state?.ownershipEtag ?? null
-          );
-
-          if (result.ownership) {
-            updateSyncState(db, request.planId, {
-              ownershipEtag: result.etag,
-              ownershipJson: JSON.stringify(result.ownership),
-              structureEditable: result.ownership.structureEditableByMe,
-              relation: result.ownership.me.relation,
-              scopeKind: result.ownership.me.scopeKind,
-              // The write scope the grid locks against, and the same set the
-              // publish filter uses — one answer, stored once.
-              scopeDepartments: result.ownership.departments
-                .filter((row) => row.writable)
-                .map((row) => row.code),
-            });
-            return result.ownership;
-          }
-
-          // 304 — serve the cached body rather than a null the grid would read
-          // as "nothing is writable".
-          return state?.ownershipJson ? JSON.parse(state.ownershipJson) : null;
+          // `unconditional` is the human escape hatch, and it is on no automatic
+          // path: it bypasses `If-None-Match` so somebody staring at a lock
+          // nobody holds can settle in one click whether this computer is
+          // serving a stale body or the server really is saying no. Every other
+          // caller stays conditional — see `fetchOwnership`, which spends the
+          // same request by itself when the cached answer contradicts itself.
+          const result = await fetchOwnership(secureDb(), client, request.planId, {
+            unconditional: request.unconditional === true,
+          });
+          return result.ownership;
         }, request.planId)
       );
     },
@@ -979,7 +963,13 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.grantDelegation(client, request.planId, request.body);
+          const result = await delegation.grantDelegation(
+            client,
+            request.planId,
+            request.body
+          );
+          forgetOwnership(request.planId);
+          return result;
         })
       ),
 
@@ -995,12 +985,14 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.amendDelegation(
+          const result = await delegation.amendDelegation(
             client,
             request.planId,
             request.delegationId,
             request.patch
           );
+          forgetOwnership(request.planId);
+          return result;
         })
       ),
 
@@ -1017,13 +1009,15 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.revokeDelegation(
+          const result = await delegation.revokeDelegation(
             client,
             request.planId,
             request.delegationId,
             request.reason,
             request.force === true
           );
+          forgetOwnership(request.planId);
+          return result;
         })
       ),
 
@@ -1034,12 +1028,14 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.handBack(
+          const result = await delegation.handBack(
             client,
             request.planId,
             request.departmentCode,
             request.note
           );
+          forgetOwnership(request.planId);
+          return result;
         })
       ),
 
@@ -1050,7 +1046,13 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.handBackAll(client, request.planId, request.force === true);
+          const result = await delegation.handBackAll(
+            client,
+            request.planId,
+            request.force === true
+          );
+          forgetOwnership(request.planId);
+          return result;
         }, request.planId)
       ),
 
@@ -1067,13 +1069,15 @@ export function createKairosSyncHandlers(
       envelope(
         await attempt(async () => {
           resolveOuScope(request.ou);
-          return delegation.reopen(
+          const result = await delegation.reopen(
             client,
             request.planId,
             request.delegationId,
             request.departmentCode,
             request.reason
           );
+          forgetOwnership(request.planId);
+          return result;
         })
       ),
 
@@ -1682,31 +1686,41 @@ export function createKairosSyncHandlers(
    * It is ETag'd server-side and cached here, so in the steady state this is a
    * 304 and a few hundred bytes. A failure is not fatal: the cached answer, or
    * the head fallback, is what `writeScopeFor` already degrades to.
+   *
+   * This used to carry its own copy of the cache-write block, which is how the
+   * publish path came to share the channel's defect — a 200 with an empty body
+   * read as "unchanged" and left the filter on a stale scope, withholding rows
+   * with nothing on screen to say so. One implementation now, in `ownership.ts`.
    */
   async function refreshOwnership(planId: string): Promise<void> {
-    const db = secureDb();
     try {
-      const state = getSyncState(db, planId);
-      const result = await delegation.fetchDepartmentOwnership(
-        client,
-        planId,
-        state?.ownershipEtag ?? null
-      );
-      if (!result.ownership) return;
-      updateSyncState(db, planId, {
-        ownershipEtag: result.etag,
-        ownershipJson: JSON.stringify(result.ownership),
-        structureEditable: result.ownership.structureEditableByMe,
-        relation: result.ownership.me.relation,
-        scopeKind: result.ownership.me.scopeKind,
-        scopeDepartments: result.ownership.departments
-          .filter((row) => row.writable)
-          .map((row) => row.code),
-      });
+      await fetchOwnership(secureDb(), client, planId);
     } catch {
       // Offline, or a plan the server will not discuss. Both are already
       // handled downstream — this is an accuracy improvement, not a gate.
     }
+  }
+
+  /**
+   * Drop the cached write scope after a call that just changed it.
+   *
+   * `transferPlan`, `acquireLease` and `releaseLease` have always done this. The
+   * six delegation mutations did not — and they are the ones that change this
+   * answer most often — so the client depended entirely on the server folding
+   * delegation state into the ETag, with no fallback and nothing to press. The
+   * visible cost was a toast reading "Delegation withdrawn. You can edit those
+   * departments again." over a grid still locked from the cache.
+   *
+   * `handBack` and `handBackAll` run on the DELEGATE's machine and invalidate
+   * theirs: the mirror-image bug, where a grid stays editable after its holder
+   * has given the department away.
+   *
+   * Note the knock-on: with the ETag gone, the `refreshOwnership` before the
+   * next publish makes an unconditional request and cannot be answered 304, so
+   * the publish filter self-heals after any locally-initiated grant change.
+   */
+  function forgetOwnership(planId: string): void {
+    invalidateOwnership(secureDb(), planId);
   }
 
   /** Does this computer hold a live scenario row for the plan? */

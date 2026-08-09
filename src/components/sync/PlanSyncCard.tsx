@@ -70,7 +70,7 @@ import { PlanDelegationSummary } from "../../shared/kairosSync/delegationSummary
 import { ActivityEntry, Delegation, Lease } from "../../shared/kairosSync/protocol";
 import PlanPeopleSection from "./PlanPeopleSection";
 import { TONE_COLOUR } from "./tone";
-import { planState } from "../../shared/kairosSync/planState";
+import { changesWaiting, planState } from "../../shared/kairosSync/planState";
 import { syncAssurance } from "../../shared/kairosSync/syncAssurance";
 import {
   canDeletePlan,
@@ -362,6 +362,10 @@ export default function PlanSyncCard({
             summary={summary}
             relation={plan.relation}
             departments={plan.departments}
+            // Whether a handback still has anything behind it. The grant cannot
+            // answer that — it stays HANDED_BACK until the owner reopens it —
+            // and the plan's own watermark can.
+            serverAhead={changesWaiting(plan) > 0}
             busy={busy}
             onDownloadFor={onDownloadForDelegation ?? (() => undefined)}
             onOpenDelegation={onOpenDelegation}

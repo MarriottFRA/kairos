@@ -22,6 +22,7 @@ import {
 } from "@mui/x-data-grid-premium";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { AccountFilter } from "../../shared/positions/fields";
+import type { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import type { ManualGridRow } from "./rowModel";
 
@@ -30,19 +31,49 @@ const filterDepartments = createFilterOptions<DepartmentOption>({
   stringify: (option) => `${option.code} ${option.name}`,
 });
 
-/** Type-ahead editor for the Department (name) cell — stores the name, commits on pick. */
+/**
+ * Type-ahead editor for the Department (name) cell — stores the name, commits on pick.
+ *
+ * `picks` narrows it to what a save would actually accept. Offering a department
+ * this user cannot write is offering to lose the row at publish, silently, since
+ * `filterToWriteScope` withholds rather than rejects. Unavailable departments are
+ * still listed, greyed, with the server's own reason underneath — removing them
+ * answers a different question from the one being asked, per the module note on
+ * `departmentPickList`. `picks` omitted means no restriction.
+ */
 export function DepartmentEditCell(
-  props: GridRenderEditCellParams<ManualGridRow> & { options: DepartmentOption[] }
+  props: GridRenderEditCellParams<ManualGridRow> & {
+    options: DepartmentOption[];
+    picks?: DepartmentPickList;
+  }
 ) {
-  const { id, field, value, options, hasFocus } = props;
+  const { id, field, value, options, picks, hasFocus } = props;
   const apiRef = useGridApiContext();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const name = typeof value === "string" ? value : "";
-  const known = name ? options.find((option) => option.name === name) : null;
-  const orphan = name && !known ? { code: "", name } : null;
-  const current = known ?? orphan;
-  const selectable = orphan ? [orphan, ...options] : options;
+  const offered = picks ? picks.selectable : options;
+  const locked = picks?.locked ?? [];
+  // Widest-last, so the cell never renders blank: something they may pick, then
+  // something they may see but not pick, then whatever reference data knows,
+  // then a name that exists only on this row.
+  const current = name
+    ? offered.find((option) => option.name === name) ??
+      locked.find((option) => option.name === name) ??
+      options.find((option) => option.name === name) ?? { code: "", name }
+    : null;
+  const currentIsOffered =
+    current !== null && offered.some((option) => option.name === current.name);
+  const selectable = [
+    ...(current && !currentIsOffered ? [current] : []),
+    ...offered,
+    ...locked,
+  ];
+  const disabledNames = new Set<string>(locked.map((option) => option.name));
+  // The row's own value when it is not one they may choose: shown so the cell
+  // reads correctly, disabled so re-picking it is not offered as a fresh choice.
+  if (current && !currentIsOffered) disabledNames.add(current.name);
+  const reasonByName = new Map(locked.map((option) => [option.name, option.reason]));
 
   useEffect(() => {
     if (hasFocus) inputRef.current?.focus();
@@ -58,11 +89,28 @@ export function DepartmentEditCell(
       filterOptions={filterDepartments}
       getOptionLabel={(option) => option.name}
       isOptionEqualToValue={(option, picked) => option.name === picked.name}
-      renderOption={(optionProps, option) => (
-        <Box component="li" {...optionProps} key={option.code || option.name}>
-          {option.name}
-        </Box>
-      )}
+      // By name, not identity: `filterOptions` hands back new array entries.
+      getOptionDisabled={(option) => disabledNames.has(option.name)}
+      renderOption={(optionProps, option) => {
+        const reason = reasonByName.get(option.name);
+        return (
+          <Box component="li" {...optionProps} key={option.code || option.name}>
+            <Box sx={{ minWidth: 0 }}>
+              <Box component="span" sx={{ display: "block" }}>
+                {option.name}
+              </Box>
+              {reason && (
+                <Box
+                  component="span"
+                  sx={{ display: "block", fontSize: 12, color: "text.secondary" }}
+                >
+                  {reason}
+                </Box>
+              )}
+            </Box>
+          </Box>
+        );
+      }}
       onChange={(_event, picked) => {
         void Promise.resolve(
           apiRef.current.setEditCellValue({ id, field, value: picked?.name ?? "" })

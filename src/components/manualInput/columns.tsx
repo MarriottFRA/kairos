@@ -21,6 +21,7 @@ import type {
 import { MONTH_LABELS } from "../../shared/calendar";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { AccountFilter } from "../../shared/positions/fields";
+import type { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import { MANUAL_INPUT_PERIOD_COUNT } from "../../shared/manualInput/ipc";
 import {
   AccountEditCell,
@@ -42,6 +43,14 @@ export type ManualViewMode = "stats" | "amount" | "both";
 
 export interface ManualColumnsContext {
   departments: DepartmentOption[];
+  /**
+   * Which departments the picker may OFFER, and which it shows greyed.
+   *
+   * Separate from `departments`, which stays the hotel's full reference data:
+   * this answers "what may I turn a row into", and the two differ the moment a
+   * department is delegated away. Omit for no restriction.
+   */
+  departmentPicks?: DepartmentPickList;
   accounts: AccountOption[];
   /** Which accounts the Cost Account picker offers; null = all. */
   accountFilter?: AccountFilter | null;
@@ -138,7 +147,11 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
       editable: true,
       renderEditCell: hasDepartments
         ? (params) => (
-            <DepartmentEditCell {...params} options={ctx.departments} />
+            <DepartmentEditCell
+              {...params}
+              options={ctx.departments}
+              picks={ctx.departmentPicks}
+            />
           )
         : undefined,
     },

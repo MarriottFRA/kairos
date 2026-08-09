@@ -20,6 +20,7 @@ import {
   DialogContentText,
   DialogTitle,
   Stack,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
@@ -61,6 +62,38 @@ export default function Allocations() {
   // Server-side `scope.kind` is what makes that detectable, and this is the gate.
   const planScope = usePlanScope(selectedHotelOu, planningScenarioId);
   const partialScope = planScope.scopeKind === "PARTIAL";
+
+  /**
+   * Why writing here would be refused, or null when it would not.
+   *
+   * Separate from `partialScope`, which is about the ANSWER being wrong. These
+   * two are about not being allowed to write at all, and the page used to read
+   * neither: an administrator with no lease, and somebody whose share of the
+   * plan had been withdrawn, both got a fully working Add / Edit / Delete that
+   * failed at save. Worded as the positions page words them, so a user does not
+   * have to work out whether two sentences mean the same thing.
+   *
+   * Handback does not reach this page — allocations gate on the scope KIND, not
+   * on which departments are writable — so it is deliberately not consulted.
+   */
+  const writeRefusal = useMemo((): string | null => {
+    if (planScope.notShared) {
+      return (
+        "This plan is no longer shared with you. You can read what is here, " +
+        "but allocations cannot be changed."
+      );
+    }
+    if (planScope.planLocked) {
+      return "An administrator is holding this plan, so nothing can be changed.";
+    }
+    if (!planScope.structureEditable) {
+      return (
+        "Allocations are part of the plan's setup, which needs full access to " +
+        "the hotel. Your administrator can restore it."
+      );
+    }
+    return null;
+  }, [planScope.notShared, planScope.planLocked, planScope.structureEditable]);
 
   const [scenario, setScenario] = useState<ScenarioDto | null>(null);
   const [view, setView] = useState<AllocationsViewResponse>(EMPTY);
@@ -165,6 +198,12 @@ export default function Allocations() {
 
   const handleSave = async (input: AllocationInput) => {
     if (!selectedHotelOu || !scenario) return;
+    // The backstop for the dialog, which can be open when the answer changes
+    // under it — the scope revalidates on window focus.
+    if (writeRefusal) {
+      setError(writeRefusal);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -181,6 +220,11 @@ export default function Allocations() {
 
   const handleDelete = async () => {
     if (!selectedHotelOu || !scenario || !pendingDelete) return;
+    if (writeRefusal) {
+      setError(writeRefusal);
+      setPendingDelete(null);
+      return;
+    }
     try {
       setView(await deleteAllocation(selectedHotelOu, scenario.id, pendingDelete.id));
     } catch (err) {
@@ -210,17 +254,29 @@ export default function Allocations() {
             100 by its chosen driver{scenario ? ` · ${scenario.label}` : ""}.
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={openCreate}
-          disabled={!scenario || loading || partialScope}
-        >
-          Add allocation
-        </Button>
+        <Tooltip title={writeRefusal ?? ""}>
+          <span>
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={openCreate}
+              disabled={
+                !scenario || loading || partialScope || writeRefusal !== null
+              }
+            >
+              Add allocation
+            </Button>
+          </span>
+        </Tooltip>
       </Stack>
 
       {error && <Alert severity="error">{error}</Alert>}
+
+      {/* Said once, above the grid. The grid itself stays readable — the numbers
+          are correct, they just are not yours to change. */}
+      {writeRefusal && !partialScope && (
+        <Alert severity="info">{writeRefusal}</Alert>
+      )}
 
       {partialScope && (
         <PartialScopeAlert
@@ -261,6 +317,7 @@ export default function Allocations() {
             <AllocationsGrid
               view={view}
               loading={loading}
+              readOnly={writeRefusal !== null}
               onEdit={openEdit}
               onDelete={setPendingDelete}
             />

@@ -31,6 +31,13 @@
  * A plan has exactly one OU, so "delegate this person across all my hotels" is N
  * grants on N plans, driven from here. Never a server-side fan-out: one request
  * must not write into properties it never named.
+ *
+ * ## `/department-ownership` is not here
+ *
+ * It reads as though it belongs — it is the answer every mutation below changes
+ * — but it is the one route in the feature with a cache, and it left when that
+ * cache grew a correction path of its own. See `ownership.ts`. Every mutation
+ * here must invalidate that cache; the handler does it in one named place.
  */
 
 import { KairosApiError, KAIROS_ERRORS, KairosClient, query } from "./client";
@@ -41,7 +48,6 @@ import {
   DelegationCandidates,
   DelegationCreate,
   DelegationList,
-  DepartmentOwnership,
   HandbackResult,
   MyDelegationList,
   PartialOverlapContext,
@@ -280,28 +286,6 @@ export function reopen(
     )}/departments/${encodeURIComponent(departmentCode)}/reopen`,
     { reason: reason ?? null }
   );
-}
-
-/**
- * The grid's lock list — which departments this caller may read and write.
- *
- * ETag'd and cheap, so it is safe to call per render. `writable` is
- * authoritative: it IS the server's write predicate, so the grid can never
- * disagree with what a save will actually do.
- */
-export async function fetchDepartmentOwnership(
-  client: KairosClient,
-  planId: string,
-  etag: string | null
-): Promise<{ ownership: DepartmentOwnership | null; etag: string | null }> {
-  const response = await client.getConditional<DepartmentOwnership>(
-    `${plan(planId)}/department-ownership`,
-    etag
-  );
-  return {
-    ownership: response.status === 304 ? null : response.body,
-    etag: response.etag,
-  };
 }
 
 /**

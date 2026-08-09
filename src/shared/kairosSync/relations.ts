@@ -151,6 +151,24 @@ export function canDeletePlan(relation: string | null | undefined): boolean {
   return capabilities(relation).deletePlan;
 }
 
+/**
+ * Is this caller the plan's own side of a delegation, rather than a holder?
+ *
+ * The question two pieces of wording ask and one predicate answers: when a
+ * department comes back, who does it come back TO. Deliberately not
+ * `canDelegate` — an `OWNER_DEGRADED` cannot grant and is still that person, so
+ * a check built on the granting capability tells them a delegate's sentence.
+ *
+ * Named rather than inlined because `relation === "OWNER" || relation ===
+ * "ADMIN_LEASE"` already exists in `delegation.tsx` as a slightly different set,
+ * and two nearly-identical inline comparisons is how the wording drifts.
+ */
+export function ownsPlan(relation: string | null | undefined): boolean {
+  return (
+    relation === "OWNER" || relation === "OWNER_DEGRADED" || relation === "ADMIN_LEASE"
+  );
+}
+
 /** Human wording for each relation, in the second person. */
 export const RELATION_LABEL: Record<string, string> = {
   OWNER: "You own this plan",

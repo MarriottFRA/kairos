@@ -73,6 +73,14 @@ export interface DelegationCardProps {
   presence: ActivityEntry | null;
   /** Whether the viewer may act on this delegation at all. */
   isOwner: boolean;
+  /**
+   * Does the server hold rows this computer has not downloaded?
+   *
+   * A handback stays HANDED_BACK until the owner reopens the department, so it
+   * cannot say by itself whether there is anything left to collect. Undefined
+   * while the plan's status is still being fetched — see `delegationCardState`.
+   */
+  serverAhead?: boolean;
   busy: boolean;
   onMakeViewOnly: (delegation: Delegation) => void;
   onLetThemEdit: (delegation: Delegation) => void;
@@ -89,6 +97,7 @@ export default function DelegationCard({
   delegation,
   presence,
   isOwner,
+  serverAhead,
   busy,
   onMakeViewOnly,
   onLetThemEdit,
@@ -97,7 +106,7 @@ export default function DelegationCard({
   onReopenAll,
   onDownload,
 }: DelegationCardProps) {
-  const state = delegationCardState(delegation, presence);
+  const state = delegationCardState(delegation, presence, { serverAhead });
 
   const stateByCode = new Map(
     delegation.departments.map((department) => [department.code, department])

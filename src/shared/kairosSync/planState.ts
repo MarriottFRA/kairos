@@ -80,8 +80,22 @@ export interface PlanState {
   needsAttention: boolean;
 }
 
+/**
+ * Rows the server holds that this computer has not downloaded.
+ *
+ * Exported because it is not only the Sync card's question. A delegate's handback
+ * is a standing state — it survives until the owner reopens the department — so
+ * "they have finished" cannot on its own mean "there is something to collect".
+ * This is the fact that separates them, and there must be exactly one definition
+ * of it: the watermark is advanced by a pull and by nothing else, so zero here
+ * means every published row is already on this machine.
+ */
+export function changesWaiting(plan: PlanSyncStatus): number {
+  return plan.published ? Math.max(0, plan.serverVersion - plan.watermark) : 0;
+}
+
 export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState {
-  const behind = plan.published ? Math.max(0, plan.serverVersion - plan.watermark) : 0;
+  const behind = changesWaiting(plan);
   const ahead = plan.pendingChanges;
 
   if (plan.revoked) {

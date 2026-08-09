@@ -95,14 +95,33 @@ describe("department write scope", () => {
     ).toBe(false);
   });
 
-  it("locks a department the OWNER has delegated away", () => {
+  it("locks a department the OWNER has delegated to an ACTIVE delegate", () => {
     // The server reports writable:false for it, and the owner's route back is to
     // withdraw the delegation. Per the brief, and not a bug.
+    //
+    // ACTIVE is the load-bearing word — see the next test.
     const asOwnerWithRoomsDelegated = ctx({
       writableDepartments: new Set(["D0610", "D0710"]),
     });
     expect(cellEditable(row("D0410"), column, asOwnerWithRoomsDelegated)).toBe(false);
     expect(cellEditable(row("D0610"), column, asOwnerWithRoomsDelegated)).toBe(true);
+  });
+
+  it("unlocks a department for the OWNER once the delegate hands it back", () => {
+    // The case this file used to name and decline to cover, on the reasoning
+    // that there was nothing here to test. There is: it is the behaviour a real
+    // owner reported missing, and the reason it was missing is that the SET
+    // arriving here was stale, not that this predicate was wrong.
+    //
+    // Once the last ACTIVE holder goes the server returns the department as
+    // `writable: true, reason: null`, so it arrives in the set like any other
+    // and no withdrawal is needed. The grid must not second-guess that in
+    // either direction — a client that unlocked on its own would produce edits
+    // `filterToWriteScope` withholds at publish without a word.
+    const afterHandback = ctx({
+      writableDepartments: new Set(["D0410", "D0610", "D0710"]),
+    });
+    expect(cellEditable(row("D0410"), column, afterHandback)).toBe(true);
   });
 
   it("leaves a row with no department editable so a delegate can give it one", () => {

@@ -53,11 +53,19 @@ describe("delegationSummary", () => {
           reason: "DELEGATED",
           assignedTo: [holder("alice@example.com", "ACTIVE")],
         },
+        // Writable, and with no reason. This fixture used to model
+        // `writable: false, reason: "HANDED_BACK"` on an OWNER's answer — a
+        // state the guide forbids, since `writable` flips back the moment the
+        // last ACTIVE holder goes and `HANDED_BACK` as a reason is what the
+        // DELEGATE is told. It passed, because this function reads only
+        // `assignedTo` for an owner, so the wrong belief sat here uncaught and
+        // any code written against it would have been written against a
+        // fiction. See `ownershipContradiction`, which now detects the shape.
         {
           code: "D0610",
           readable: true,
-          writable: false,
-          reason: "HANDED_BACK",
+          writable: true,
+          reason: null,
           assignedTo: [holder("bob@example.com", "HANDED_BACK")],
         },
         { code: "D0710", readable: true, writable: true, reason: null, assignedTo: [] },
@@ -68,6 +76,9 @@ describe("delegationSummary", () => {
     expect(summary.delegatedOut).toEqual([
       { code: "D0410", email: "alice@example.com", delegationId: "del-1" },
     ]);
+    // Derived from the HOLDER STATE, not from `writable` — which is what makes
+    // the corrected fixture safe: a handed-back department the owner can once
+    // again edit is still a handback, and still their cue to download.
     expect(summary.handedBack).toEqual([
       { code: "D0610", email: "bob@example.com", delegationId: "del-1" },
     ]);

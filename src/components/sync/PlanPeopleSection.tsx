@@ -70,6 +70,13 @@ export interface PlanPeopleSectionProps {
   relation: Relation | null;
   /** Departments this user may see, for a view-only delegate's own row. */
   departments: string[] | null;
+  /**
+   * Does the server hold anything this computer has not downloaded?
+   *
+   * What decides whether a handback is still collectable. Without it the
+   * download button outlived the download — see `delegationCardState`.
+   */
+  serverAhead: boolean;
   busy: boolean;
   onDownloadFor: (delegation: Delegation) => void;
   onOpenDelegation: (delegationId?: string) => void;
@@ -81,6 +88,7 @@ export default function PlanPeopleSection({
   summary,
   relation,
   departments,
+  serverAhead,
   busy,
   onDownloadFor,
   onOpenDelegation,
@@ -148,8 +156,11 @@ export default function PlanPeopleSection({
   const ordered = [...delegations].sort((a, b) => {
     const collectable = (delegation: Delegation): number =>
       Number(
-        delegationCardState(delegation, presenceByUserId[delegation.delegateUserId] ?? null)
-          .collectable
+        delegationCardState(
+          delegation,
+          presenceByUserId[delegation.delegateUserId] ?? null,
+          { serverAhead }
+        ).collectable
       );
     const lead = collectable(b) - collectable(a);
     return lead !== 0 ? lead : a.delegateEmail.localeCompare(b.delegateEmail);
@@ -165,6 +176,7 @@ export default function PlanPeopleSection({
             key={delegation.id}
             delegation={delegation}
             presence={presenceByUserId[delegation.delegateUserId] ?? null}
+            serverAhead={serverAhead}
             busy={busy}
             onDownload={() => onDownloadFor(delegation)}
             onOpen={() => onOpenDelegation(delegation.id)}
@@ -245,17 +257,19 @@ function Frame({
 function PersonRow({
   delegation,
   presence,
+  serverAhead,
   busy,
   onDownload,
   onOpen,
 }: {
   delegation: Delegation;
   presence: ActivityEntry | null;
+  serverAhead: boolean;
   busy: boolean;
   onDownload: () => void;
   onOpen: () => void;
 }) {
-  const state = delegationCardState(delegation, presence);
+  const state = delegationCardState(delegation, presence, { serverAhead });
   const stateByCode = new Map(
     delegation.departments.map((department) => [department.code, department])
   );
@@ -312,7 +326,18 @@ function PersonRow({
             {codes.map((code) => {
               const department = stateByCode.get(code);
               if (department?.state === "HANDED_BACK") {
-                return <Chip key={code} size="small" color="info" label={code} />;
+                // Filled only while it is still an invitation. Once the work is
+                // downloaded the department is simply the owner's again, and a
+                // coloured chip that never settles reads as unfinished business.
+                return (
+                  <Chip
+                    key={code}
+                    size="small"
+                    color={state.collectable ? "info" : "default"}
+                    variant={state.collectable ? "filled" : "outlined"}
+                    label={code}
+                  />
+                );
               }
               if (!delegation.effectiveDepartments.includes(code)) {
                 return (

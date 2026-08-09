@@ -33,6 +33,14 @@ interface GridRow {
 export interface AllocationsGridProps {
   view: AllocationsViewResponse;
   loading?: boolean;
+  /**
+   * The numbers are readable and not changeable.
+   *
+   * Offering Edit and Delete to somebody the save will refuse is the failure
+   * this flag exists to prevent — the page explains why in a banner, and the
+   * menu items go quiet rather than opening a dialog that ends in an error.
+   */
+  readOnly?: boolean;
   onEdit: (allocation: AllocationDto) => void;
   onDelete: (allocation: AllocationDto) => void;
 }
@@ -46,10 +54,12 @@ function formatPercent(value: number | null | undefined): string {
 /** Column header: allocation name + spread base, with an Edit/Delete menu. */
 function AllocationHeader({
   allocation,
+  readOnly,
   onEdit,
   onDelete,
 }: {
   allocation: AllocationDto;
+  readOnly?: boolean;
   onEdit: (allocation: AllocationDto) => void;
   onDelete: (allocation: AllocationDto) => void;
 }) {
@@ -80,6 +90,7 @@ function AllocationHeader({
       </IconButton>
       <Menu anchorEl={anchor} open={!!anchor} onClose={() => setAnchor(null)}>
         <MenuItem
+          disabled={readOnly}
           onClick={() => {
             setAnchor(null);
             onEdit(allocation);
@@ -88,6 +99,7 @@ function AllocationHeader({
           Edit
         </MenuItem>
         <MenuItem
+          disabled={readOnly}
           onClick={() => {
             setAnchor(null);
             onDelete(allocation);
@@ -103,6 +115,7 @@ function AllocationHeader({
 export default function AllocationsGrid({
   view,
   loading,
+  readOnly,
   onEdit,
   onDelete,
 }: AllocationsGridProps) {
@@ -151,6 +164,7 @@ export default function AllocationsGrid({
         renderHeader: () => (
           <AllocationHeader
             allocation={allocation}
+            readOnly={readOnly}
             onEdit={onEdit}
             onDelete={onDelete}
           />
@@ -160,7 +174,7 @@ export default function AllocationsGrid({
       })
     );
     return [deptColumn, ...allocColumns];
-  }, [view.allocations, onEdit, onDelete]);
+  }, [view.allocations, readOnly, onEdit, onDelete]);
 
   return (
     <DataGridPremium

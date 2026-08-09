@@ -1206,9 +1206,19 @@ to guess and never disagrees with what happens on save.
 
 Reasons: `DELEGATED`, `HANDED_BACK`, `NOT_IN_WRITE_SCOPE`.
 
-**A department that is delegated is not writable by the owner.** The delegate is the one
-editing it; the owner's route back is to withdraw the delegation, which is a deliberate,
+**A department with an `ACTIVE` delegate is not writable by the owner.** The delegate is the
+one editing it; the owner's route back is to withdraw the delegation, which is a deliberate,
 audited act rather than a silent override.
+
+**A `HANDED_BACK` department is writable by the owner again.** The delegate has declared it
+finished, so nobody else is editing it — the grant survives to keep their read access and to
+make reopening one update, not to keep holding the department. `writable` flips back to `true`
+for the owner the moment the last `ACTIVE` holder goes, and `reason` becomes `null`; the
+`HANDED_BACK` reason is what the *delegate* is told about their own lost write access.
+Reopening is the opposite move, and hands it back to the delegate.
+
+Both transitions change this response without moving `planVersion`, so re-request it (and
+honour the `ETag`) after any handback, reopen or withdrawal rather than after plan edits only.
 
 `structureEditableByMe` is how a demoted owner learns they have lost the columns-and-blocks UI
 instead of discovering it as a 403 at save time.

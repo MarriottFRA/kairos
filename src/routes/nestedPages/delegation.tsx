@@ -59,6 +59,7 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AssignmentReturnOutlinedIcon from "@mui/icons-material/AssignmentReturnOutlined";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
 import { useSelectedHotel } from "../../store/settings";
 import {
@@ -77,6 +78,7 @@ import {
   pull as pullCall,
   reopenDepartment as reopenCall,
   revokeDelegation as revokeCall,
+  syncStatus as statusCall,
 } from "../../services/kairosSyncService";
 import {
   PublishResponse,
@@ -95,7 +97,9 @@ import {
   PartialOverlapContext,
   UnsyncedWorkContext,
 } from "../../shared/kairosSync/protocol";
-import { LOCK_REASON } from "../../shared/kairosSync/lockReason";
+import { lockReasonText } from "../../shared/kairosSync/lockReason";
+import { contradictoryDepartments } from "../../shared/kairosSync/ownershipContradiction";
+import { changesWaiting } from "../../shared/kairosSync/planState";
 import { formatWhen } from "../../shared/kairosSync/formatWhen";
 import { useAdminTools } from "../../hooks/useAdminTools";
 import { usePlanIdentity } from "../../hooks/usePlanIdentity";
@@ -198,13 +202,32 @@ export default function DelegationPage() {
    */
   const [showRoutine, setShowRoutine] = useState(false);
   const [pullReview, setPullReview] = useState<PullReview | null>(null);
+  /**
+   * Is there anything left on the server to collect?
+   *
+   * `undefined` until the status answers, and deliberately not derived from the
+   * delegations: a department stays HANDED_BACK until the owner reopens it, so
+   * the grant would keep saying "ready to download" long after the download.
+   * This is the plan's own watermark, refetched after every action here —
+   * including the pull, which is the moment it has to change.
+   */
+  const [serverAhead, setServerAhead] = useState<boolean | undefined>(undefined);
 
-  const refresh = useCallback(async () => {
+  /**
+   * Re-read everything this page draws.
+   *
+   * `unconditional` reaches only `ownershipCall`, and only from the button: it
+   * is the one call here with a cache, and the one whose answer is changed by
+   * something that happens on somebody else's machine. Every post-mutation
+   * `refresh()` stays conditional on purpose — the mutation has already dropped
+   * the cached body in the main process, so a flag here would be redundant.
+   */
+  const refresh = useCallback(async (options?: { unconditional?: boolean }) => {
     if (!ou || !planId) return;
     setLoading(true);
-    const [ownershipResult, listResult, departmentsResult, activityResult] =
+    const [ownershipResult, listResult, departmentsResult, activityResult, statusResult] =
       await Promise.all([
-        ownershipCall(ou, planId),
+        ownershipCall(ou, planId, { unconditional: options?.unconditional === true }),
         listCall(ou, planId),
         delegatableCall(ou, planId),
         // Fully plumbed since delegation shipped and never rendered anywhere.
@@ -212,12 +235,20 @@ export default function DelegationPage() {
         // owner presses Withdraw rather than as a refusal afterwards, which is
         // the entire reason `usePresenceReporter` runs every sixty seconds.
         activityCall(ou, planId),
+        statusCall(ou),
       ]);
     if (!syncFailed(ownershipResult)) setOwnership(ownershipResult.data);
     if (!syncFailed(listResult)) setDelegations(listResult.data.delegations);
     if (!syncFailed(departmentsResult)) setDepartments(departmentsResult.data.departments);
     // Presence is advisory. Failing to fetch it is not worth a word on screen.
     setActivity(syncFailed(activityResult) ? [] : activityResult.data.present);
+    // Left `undefined` if the status could not be read or does not know this
+    // plan. Not-known must not read as nothing-to-collect: the download stays on
+    // offer and the review dialog is the one that says there is nothing in it.
+    const plan = syncFailed(statusResult)
+      ? undefined
+      : statusResult.data.plans.find((candidate) => candidate.planId === planId);
+    setServerAhead(plan ? changesWaiting(plan) > 0 : undefined);
     setLoading(false);
   }, [ou, planId]);
 
@@ -330,6 +361,52 @@ export default function DelegationPage() {
     }
     return rows;
   }, [delegations]);
+
+  /**
+   * Departments the server is refusing to give back, named.
+   *
+   * A handback returns a department to the owner — `writable` flips to true and
+   * `reason` to null the moment the last ACTIVE holder goes. When it does not,
+   * the owner is left looking at a "No" with no explanation that fits, and the
+   * one thing they cannot tell from the screen is whether this computer is
+   * remembering an old answer or the server is giving a new one.
+   *
+   * Two independent sources have to agree before this says anything. The
+   * contradiction inside the ownership body is checked by
+   * `contradictoryDepartments`; `handedBackRows` comes from the delegation list,
+   * which has no cache at all. Costing no request is the point — the page has
+   * both already, and a diagnosis that needed a third call would not be worth
+   * drawing.
+   */
+  const disputed = useMemo(() => {
+    if (!isOwner) return [];
+    const contradicted = new Set(contradictoryDepartments(ownership));
+    const handedBack = new Set(handedBackRows.map((row) => row.code));
+    return [...contradicted].filter((code) => handedBack.has(code)).sort();
+  }, [isOwner, ownership, handedBackRows]);
+
+  /**
+   * Settle it once, automatically, before saying anything about it.
+   *
+   * The warning below tells the owner this is the server's answer and not
+   * something their computer can fix. That has to be earned: the main process
+   * only re-asks by itself when the contradictory body arrives from a cache it
+   * did not fetch this session, so a page that drew the warning on the strength
+   * of the contradiction alone would sometimes be blaming the server for its
+   * own stale copy.
+   *
+   * Once per plan per visit. The ref is the guard rather than the state, so a
+   * second dispute after the forced read does not start a loop; the state is
+   * what lets the warning appear only after the answer has been earned.
+   */
+  const forcedFor = useRef<string | null>(null);
+  const [proven, setProven] = useState<string | null>(null);
+  useEffect(() => {
+    if (!planId || disputed.length === 0) return;
+    if (forcedFor.current === planId) return;
+    forcedFor.current = planId;
+    void refresh({ unconditional: true }).then(() => setProven(planId));
+  }, [planId, disputed, refresh]);
 
   const searchCandidates = useCallback(
     async (query: string) => {
@@ -876,18 +953,55 @@ export default function DelegationPage() {
             </Typography>
           ))}
           <Typography variant="body2" sx={{ mt: 1 }}>
-            Their work is on the server. Use <strong>Download their work</strong> on
-            their card below to bring it onto this computer, or reopen a department
-            if they are not finished after all.
+            {serverAhead === false ? (
+              // Already collected. The handback itself does not expire — it
+              // stands until a department is reopened — so this banner outlived
+              // the download and kept sending owners to a button that had
+              // nothing left to fetch.
+              <>
+                Their work is already on this computer; there is nothing left to
+                download. Reopen a department if they are not finished after all.
+              </>
+            ) : (
+              <>
+                Their work is on the server. Use{" "}
+                <strong>Download their work</strong> on their card below to bring
+                it onto this computer, or reopen a department if they are not
+                finished after all.
+              </>
+            )}
           </Typography>
         </Alert>
       )}
 
       <Card variant="outlined" sx={{ borderRadius: 2, mb: 3 }}>
         <CardContent>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
-            Departments
-          </Typography>
+          <Stack
+            direction="row"
+            sx={{ alignItems: "center", justifyContent: "space-between", mb: 0.5 }}
+          >
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              Departments
+            </Typography>
+            {/* The one control on this page that ignores the cache.
+                It exists because the change that matters here — somebody
+                handing a department back — happens on their computer, not this
+                one, so a stale answer has no local event to correct it. One
+                click settles whether a lock is this computer's memory or the
+                server's answer. */}
+            <Tooltip title="Ask the server again, ignoring anything this computer remembers.">
+              <span>
+                <Button
+                  size="small"
+                  startIcon={<RefreshIcon />}
+                  disabled={loading || busy || !planId}
+                  onClick={() => void refresh({ unconditional: true })}
+                >
+                  Re-check my access
+                </Button>
+              </span>
+            </Tooltip>
+          </Stack>
           {/* Said once, here, rather than on a card of its own: this table is
               now where a delegate gives work back from. */}
           {myHoldings.length > 0 && (
@@ -917,6 +1031,7 @@ export default function DelegationPage() {
                   <DepartmentRow
                     key={row.code}
                     row={row}
+                    relation={ownership?.me.relation ?? null}
                     busy={busy}
                     onHandBack={
                       myHoldings.length > 0
@@ -972,6 +1087,7 @@ export default function DelegationPage() {
                       <DepartmentRow
                         key={row.code}
                         row={row}
+                        relation={ownership?.me.relation ?? null}
                         busy={busy}
                         onHandBack={
                           myHoldings.length > 0
@@ -990,6 +1106,27 @@ export default function DelegationPage() {
             <Typography variant="body2" color="text.secondary">
               No departments to show. Add positions with a department code first.
             </Typography>
+          )}
+
+          {/* Only drawn when it is provably true: two sources that do not share
+              a cache disagree (see `disputed`), AND the answer has been re-read
+              without the cache since (see `proven`). A "the server might be
+              wrong" warning that fired on a hunch would be worse than the
+              silence it replaces. */}
+          {disputed.length > 0 && proven === planId && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              <AlertTitle>
+                {disputed.join(", ")} {disputed.length === 1 ? "has" : "have"} been
+                handed back to you, but the server still lists{" "}
+                {disputed.length === 1 ? "it" : "them"} as not yours to edit
+              </AlertTitle>
+              Kairos has asked again without using its cached copy, so this is the
+              server&apos;s current answer and not something this computer can fix.
+              Withdrawing the delegation returns{" "}
+              {disputed.length === 1 ? "the department" : "those departments"} to you
+              now; the delegate keeps their copy of the work, and you can share it
+              again afterwards.
+            </Alert>
           )}
 
           {/* Under the table, not above it: the bulk verb only makes sense once
@@ -1043,6 +1180,7 @@ export default function DelegationPage() {
               // somebody's afternoon.
               presence={presenceByUser.get(delegation.delegateUserId) ?? null}
               isOwner={isOwner}
+              serverAhead={serverAhead}
               busy={busy}
               // Widening goes straight through; narrowing asks. See
               // `handleSetCanEdit`.
@@ -1300,10 +1438,13 @@ export default function DelegationPage() {
  */
 function DepartmentRow({
   row,
+  relation,
   busy,
   onHandBack,
 }: {
   row: DepartmentOwnershipRow;
+  /** Whose side of the grant is reading. The lock wording depends on it. */
+  relation: string | null;
   busy?: boolean;
   onHandBack?: () => void;
 }) {
@@ -1336,7 +1477,7 @@ function DepartmentRow({
         {row.writable ? (
           <Chip size="small" color="success" label="Yes" />
         ) : (
-          <Tooltip title={LOCK_REASON[row.reason ?? ""] ?? ""}>
+          <Tooltip title={lockReasonText(row.reason, relation)}>
             <Chip size="small" label="No" />
           </Tooltip>
         )}

@@ -19,20 +19,43 @@
  * `writable` comes straight from `/department-ownership`, where it IS the
  * server's write predicate — so the grid can never disagree with what a save
  * will actually do. Notably an OWNER is reported as unable to write a department
- * they have DELEGATED; their route back is to withdraw the delegation.
+ * held by an ACTIVE delegate; their route back is to withdraw the delegation.
+ *
+ * "Actively delegated" is the exact bar, and the imprecise version of that
+ * sentence cost a round of misdiagnosis. A HANDED_BACK department has no active
+ * holder, so it goes back to `writable: true`, `reason: null` for the owner —
+ * the grant survives only to keep the delegate's read access and make reopening
+ * one update. `HANDED_BACK` as a *reason* is what the delegate is told about
+ * their own lost write access; an owner never sees it.
+ *
+ * That last sentence is now checked rather than trusted. An owner-side answer
+ * that breaks the rule is caught by `ownershipContradiction`, and `ownership.ts`
+ * settles it by asking again without the ETag — because a handback happens on
+ * the DELEGATE's machine, so the owner has no local event to invalidate on and
+ * would otherwise be answered 304 for ever. What must never happen is this hook
+ * deciding it knows better and reporting a department as writable: the publish
+ * filter reads the same field, so those edits would be withheld without a word.
  *
  * The call is ETag'd server-side and cached in the encrypted store, so a refresh
  * costs a conditional request rather than a rebuild.
+ *
+ * ## Handback, reopen and withdrawal do not move `planVersion`
+ *
+ * They change this answer without touching the plan, so nothing about the
+ * plan's own state can be the trigger to re-ask. This used to be fetched on
+ * mount and never again, which was wrong in both directions: an owner sitting
+ * on the grid stayed locked out of a department that had just been handed back
+ * to them, and — the silent one — kept an editable grid for a department
+ * REOPENED to the delegate, whose rows `filterToWriteScope` then withheld at
+ * publish rather than the cell blocking up front.
+ *
+ * So it revalidates on window focus as well. See `useRevalidateOnFocus`.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { departmentOwnership, listDelegations } from "../services/kairosSyncService";
 import { syncFailed } from "../shared/kairosSync/ipc";
-import {
-  DepartmentOwnership,
-  DepartmentOwnershipRow,
-  Relation,
-} from "../shared/kairosSync/protocol";
+import { DepartmentOwnership, Relation } from "../shared/kairosSync/protocol";
 
 export interface PlanScope {
   /** Null until the first answer arrives, or when the plan is unpublished. */
@@ -91,12 +114,19 @@ export interface PlanScope {
    * by the Sync page's status call.
    */
   notShared: boolean;
-  /** Rows the user can see but not edit, with the reason, for the grid banner. */
-  lockedDepartments: DepartmentOwnershipRow[];
   loading: boolean;
   /** Non-null only for a real failure; an unpublished plan is not an error. */
   error: string | null;
-  refresh: () => void;
+  /**
+   * Ask again.
+   *
+   * `{ unconditional: true }` bypasses the ETag, and belongs on a user action
+   * only — it is what somebody staring at a lock nobody holds presses to make
+   * this computer stop trusting its cached answer. The flag is consumed by the
+   * one request it triggers; the next automatic revalidate goes back to being
+   * conditional.
+   */
+  refresh: (options?: { unconditional?: boolean }) => void;
 }
 
 /**
@@ -121,6 +151,47 @@ const UNPUBLISHED_CODES = new Set([
   "device_required",
 ]);
 
+/**
+ * Re-ask when the window comes back to the front.
+ *
+ * Focus is the honest trigger for a permission that can change while nobody is
+ * looking: it is the moment before the user acts on a lock — or on the absence
+ * of one. Polling would ask a hundred times to catch the same transition once,
+ * and there is no push channel to subscribe to.
+ *
+ * Cheap by construction rather than by luck. The server folds the delegation's
+ * (department, holder, state) triples into the ETag, so an unchanged grant is a
+ * 304 with no body and a handback, reopen or withdrawal is a 200 carrying the
+ * new answer. Returning to the app costs one conditional request.
+ *
+ * `focus` and `visibilitychange` both fire when switching back from another
+ * application, so the pair is collapsed — two identical requests a second apart
+ * would be the kind of small, permanent waste that is hard to notice later.
+ */
+function useRevalidateOnFocus(enabled: boolean, revalidate: () => void): void {
+  const lastAt = useRef(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const onFocus = () => {
+      // A visibilitychange to "hidden" is the app going away, not coming back.
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastAt.current < 1000) return;
+      lastAt.current = now;
+      revalidate();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [enabled, revalidate]);
+}
+
 export function usePlanScope(
   ou: string | null,
   planId: string | null
@@ -131,9 +202,32 @@ export function usePlanScope(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [canAddRows, setCanAddRows] = useState<boolean | undefined>(undefined);
-  const [nonce, setNonce] = useState(0);
+  /**
+   * The re-ask trigger, carrying whether that particular ask ignores the cache.
+   *
+   * The flag rides with the nonce rather than sitting in its own state so it is
+   * consumed exactly once — a `unconditional` left standing would turn every
+   * subsequent focus revalidate into a full request, which is the opposite of
+   * what the ETag is for.
+   */
+  const [nonce, setNonce] = useState({ n: 0, unconditional: false });
 
-  const refresh = useCallback(() => setNonce((value) => value + 1), []);
+  const refresh = useCallback(
+    (options?: { unconditional?: boolean }) =>
+      setNonce((value) => ({
+        n: value.n + 1,
+        unconditional: options?.unconditional === true,
+      })),
+    []
+  );
+
+  // No argument, deliberately: coming back to the window is the commonest event
+  // in the feature and it must stay a conditional request. The cache corrects
+  // itself without help — see `fetchOwnership`, which spends one unconditional
+  // request of its own when the replayed answer cannot justify its own lock.
+  const revalidate = useCallback(() => refresh(), [refresh]);
+
+  useRevalidateOnFocus(Boolean(ou && planId), revalidate);
 
   useEffect(() => {
     if (!ou || !planId) {
@@ -147,7 +241,7 @@ export function usePlanScope(
     let cancelled = false;
     setLoading(true);
 
-    departmentOwnership(ou, planId)
+    departmentOwnership(ou, planId, { unconditional: nonce.unconditional })
       .then((result) => {
         if (cancelled) return;
         if (syncFailed(result)) {
@@ -247,7 +341,6 @@ export function usePlanScope(
       planLocked: notShared || ownership?.me.relation === "GLOBAL_ADMIN",
       unpublished,
       notShared,
-      lockedDepartments: departments.filter((row) => row.readable && !row.writable),
       loading,
       error,
       refresh,
