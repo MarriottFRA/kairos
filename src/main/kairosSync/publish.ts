@@ -74,6 +74,16 @@ import {
 
 type Db = InstanceType<typeof Database>;
 
+/**
+ * A `synced_at` that keeps a row in the pending set.
+ *
+ * Written for a hash we adopted from a conflict rather than one the server
+ * confirmed it holds for us. Every local `updated_at` sorts after it, so the row
+ * stays a candidate and the badge keeps counting it until the two sides really
+ * do agree.
+ */
+const NEVER_AGREED = "";
+
 export interface PublishOptions {
   planId: string;
   ou: string;
@@ -101,8 +111,21 @@ export interface PublishResult {
   chunks: number;
   /** Rows outside this caller's write scope, never sent. */
   withheld: number;
-  /** Rows we hard-deleted locally after publishing, sent as `op: "purge"`. */
+  /**
+   * Rows the server actually deleted for us, having been sent `op: "purge"`.
+   *
+   * Counted from the response, not from what was sent. A purge the server
+   * refused deleted nothing, and reporting it as "1 deletion recorded" told the
+   * user their publish had removed data it had not touched.
+   */
   purged: number;
+  /**
+   * `ALREADY_EXISTS` conflicts whose server hash we have now adopted.
+   *
+   * These resolve themselves on the next publish; the alert says so rather than
+   * repeating an instruction the user has already followed.
+   */
+  adopted: number;
   /** Broken rows on THIS computer that were never sent. Not server refusals. */
   localProblems: LocalProblem[];
   /** True when nothing was sent because nothing had changed. */
@@ -155,7 +178,7 @@ export function previewPublish(
   db: Db,
   options: PublishOptions
 ): PublishPreview {
-  const { entities, unpublishable } = collectLocalEntities(deps, {
+  const { entities, unpublishable, scannedTypes } = collectLocalEntities(deps, {
     ou: options.ou,
     planId: options.planId,
     includePii: options.includePii,
@@ -164,7 +187,14 @@ export function previewPublish(
   const shadow = loadShadowMap(db, options.planId);
   const commits = [
     ...toCommitEntities(publishable, shadow),
-    ...purgesFor(publishable, shadow),
+    // The FULL collected set, not `publishable` — a row withheld by write scope
+    // is one we hold and may not send, which is the opposite of one we deleted.
+    // See the header on `purgesFor`.
+    ...purgesFor(entities, shadow, {
+      scannedTypes,
+      unpublishable,
+      canWriteStructure: options.scope.canWriteStructure,
+    }),
   ];
 
   const byType: Record<string, number> = {};
@@ -216,7 +246,7 @@ export async function publishPlan(
   const startBaseVersion = options.baseVersion;
   const watermarkBefore = getSyncState(db, planId)?.watermark ?? 0;
 
-  const { entities, unpublishable } = collectLocalEntities(deps, {
+  const { entities, unpublishable, scannedTypes } = collectLocalEntities(deps, {
     ou,
     planId,
     includePii: options.includePii,
@@ -225,7 +255,12 @@ export async function publishPlan(
   const shadow = loadShadowMap(db, planId);
 
   const updates = toCommitEntities(publishable, shadow);
-  const purges = purgesFor(publishable, shadow);
+  // The FULL collected set — see the header on `purgesFor`.
+  const purges = purgesFor(entities, shadow, {
+    scannedTypes,
+    unpublishable,
+    canWriteStructure: options.scope.canWriteStructure,
+  });
   const commits = [...updates, ...purges];
 
   const result: PublishResult = {
@@ -243,7 +278,8 @@ export async function publishPlan(
     withheld: withheld.filter(
       (entity) => !PLAN_WIDE_ENTITY_TYPES.has(entity.entityType)
     ).length,
-    purged: purges.length,
+    purged: 0,
+    adopted: 0,
     localProblems: summariseUnpublishable(unpublishable),
     noop: commits.length === 0,
     dryRun: options.dryRun === true,
@@ -277,23 +313,66 @@ export async function publishPlan(
       bootstrap: bootstrap && index === 0,
     });
 
+    const now = new Date().toISOString();
+    // Keyed through shadowKey so the publish path and the shadow can never
+    // disagree about what identifies a row. Built before the tallies, because
+    // "was this accepted row a deletion?" is a question only the sent entity
+    // can answer.
+    const byKey = new Map(
+      chunks[index].map((entity) => [
+        shadowKey(entity.entityType, entity.entityId),
+        entity,
+      ])
+    );
+
     result.committedVersion = response.committedVersion;
     result.syncEpoch = response.syncEpoch;
     result.scope = response.scope;
     result.accepted += response.accepted.length;
     result.unchanged += response.unchanged.length;
     result.overrodeBase += response.accepted.filter((row) => row.overrodeBase).length;
+    result.purged += response.accepted.filter(
+      (row) => byKey.get(shadowKey(row.entityType, row.entityId))?.op === "purge"
+    ).length;
     result.conflicts.push(...response.conflicts);
     result.rejected.push(...response.rejected);
 
-    const now = new Date().toISOString();
-    // Keyed through shadowKey so the publish path and the shadow can never
-    // disagree about what identifies a row.
-    const byKey = new Map(
-      chunks[index].map((entity) => [
-        shadowKey(entity.entityType, entity.entityId),
-        entity,
-      ])
+    /**
+     * `ALREADY_EXISTS` is the one conflict that never clears itself.
+     *
+     * It means we sent a row as new — `baseHash: null`, because the shadow had
+     * no entry — and the server already had it. Leaving the shadow alone leaves
+     * it with no entry, so the next publish sends the same row as new again and
+     * gets the same answer, for ever. Downloading does not help either: it is
+     * how `position_pii` behaves by construction, because PII is never served by
+     * `/changes` and so a pull cannot teach the shadow about it.
+     *
+     * §5 of the API guide says what to do — adopt the server's hash and send it
+     * as an ordinary update — and the conflict carries exactly that. One
+     * deliberate exception to "conflicts leave the shadow alone", and it is the
+     * difference between a warning that means something and one the user has no
+     * way to clear.
+     */
+    const adopted = response.conflicts.filter(
+      (row) => row.reason === "ALREADY_EXISTS" && row.serverHash !== null
+    );
+    result.adopted += adopted.length;
+    writeShadow(
+      db,
+      planId,
+      adopted.map((row) => ({
+        entityType: row.entityType,
+        entityId: row.entityId,
+        hash: row.serverHash as string,
+        serverSeq: row.serverSeq ?? 0,
+        deleted: false,
+      })),
+      // NOT `now`. `synced_at` is what the Publish badge's candidate query
+      // compares `updated_at` against, and a current timestamp would drop these
+      // rows out of the count while the two sides still disagree about their
+      // contents — the row would be silently pending. They are adopted, not
+      // agreed.
+      NEVER_AGREED
     );
 
     writeShadow(

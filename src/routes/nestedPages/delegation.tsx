@@ -39,6 +39,7 @@ import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import Collapse from "@mui/material/Collapse";
 import Dialog from "@mui/material/Dialog";
+import Divider from "@mui/material/Divider";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogContentText from "@mui/material/DialogContentText";
@@ -56,9 +57,9 @@ import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import AssignmentReturnOutlinedIcon from "@mui/icons-material/AssignmentReturnOutlined";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
-import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import { useSelectedHotel } from "../../store/settings";
 import {
   activity as activityCall,
@@ -712,9 +713,8 @@ export default function DelegationPage() {
    * A delegate who was given departments to read and none to write.
    *
    * `canEdit: false`, in other words. Without this the page shows them a
-   * Departments table full of "No" and no explanation of why they are on it —
-   * and the "Your departments" card above, which is about handing work back,
-   * correctly does not apply and so says nothing at all.
+   * Departments table full of "No", no Hand back button on any row, and no
+   * explanation of why they are on the page at all.
    */
   const viewOnly =
     !isOwner &&
@@ -838,41 +838,12 @@ export default function DelegationPage() {
         </Alert>
       )}
 
-      {myHoldings.length > 0 && (
-        <Card variant="outlined" sx={{ borderRadius: 2, mb: 3 }}>
-          <CardContent>
-            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
-              Your departments
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Hand a department back when you are finished with it. You keep being
-              able to see it, and the owner can give it back to you in one click.
-            </Typography>
-            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-              {myHoldings.map((row) => (
-                <Chip
-                  key={row.code}
-                  label={row.code}
-                  onDelete={() => void openHandback(row.code)}
-                  deleteIcon={<LockOutlinedIcon />}
-                  disabled={busy}
-                />
-              ))}
-            </Stack>
-
-            {myHoldings.length > 1 && (
-              <Button
-                size="small"
-                sx={{ mt: 2 }}
-                disabled={busy}
-                onClick={() => void openHandback(null)}
-              >
-                Hand everything back
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {/* There is no separate "Your departments" card. It listed the delegate's
+          holdings as chips whose delete slot carried a padlock — a control that
+          reads as "lock this department" and in fact handed it back. The
+          Departments table below already lists every department this user can
+          see, so the handback lives there, on the row it belongs to, spelled
+          out in words. */}
 
       {/* The owner's cue. A handback means somebody has finished and their work
           is on the server waiting — which is a thing to go and DO, not a state
@@ -914,9 +885,18 @@ export default function DelegationPage() {
 
       <Card variant="outlined" sx={{ borderRadius: 2, mb: 3 }}>
         <CardContent>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
             Departments
           </Typography>
+          {/* Said once, here, rather than on a card of its own: this table is
+              now where a delegate gives work back from. */}
+          {myHoldings.length > 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Hand a department back when you are finished with it. You keep
+              being able to see it, and the owner can give it back to you in one
+              click.
+            </Typography>
+          )}
 
           {/* Only the rows that carry information. When and why a department
               moved now lives on the delegation it belongs to, so this table
@@ -929,11 +909,21 @@ export default function DelegationPage() {
                   <TableCell>Department</TableCell>
                   <TableCell>Edited by</TableCell>
                   <TableCell>You can edit</TableCell>
+                  {myHoldings.length > 0 && <TableCell />}
                 </TableRow>
               </TableHead>
               <TableBody>
                 {interestingRows.map((row) => (
-                  <DepartmentRow key={row.code} row={row} />
+                  <DepartmentRow
+                    key={row.code}
+                    row={row}
+                    busy={busy}
+                    onHandBack={
+                      myHoldings.length > 0
+                        ? () => void openHandback(row.code)
+                        : undefined
+                    }
+                  />
                 ))}
               </TableBody>
             </Table>
@@ -974,11 +964,21 @@ export default function DelegationPage() {
                       <TableCell>Department</TableCell>
                       <TableCell>Edited by</TableCell>
                       <TableCell>You can edit</TableCell>
+                      {myHoldings.length > 0 && <TableCell />}
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {routineRows.map((row) => (
-                      <DepartmentRow key={row.code} row={row} />
+                      <DepartmentRow
+                        key={row.code}
+                        row={row}
+                        busy={busy}
+                        onHandBack={
+                          myHoldings.length > 0
+                            ? () => void openHandback(row.code)
+                            : undefined
+                        }
+                      />
                     ))}
                   </TableBody>
                 </Table>
@@ -990,6 +990,24 @@ export default function DelegationPage() {
             <Typography variant="body2" color="text.secondary">
               No departments to show. Add positions with a department code first.
             </Typography>
+          )}
+
+          {/* Under the table, not above it: the bulk verb only makes sense once
+              you have seen the rows it applies to. Same dialog as a single
+              handback, in its "everything" form — which is the one the server
+              refuses outright when there is unpublished work. */}
+          {myHoldings.length > 1 && (
+            <>
+              <Divider sx={{ my: 1.5 }} />
+              <Button
+                size="small"
+                disabled={busy}
+                startIcon={<AssignmentReturnOutlinedIcon />}
+                onClick={() => void openHandback(null)}
+              >
+                Hand all {myHoldings.length} back
+              </Button>
+            </>
           )}
         </CardContent>
       </Card>
@@ -1274,8 +1292,21 @@ export default function DelegationPage() {
  * that carry information and once inside the disclosure for the rows that do
  * not. When and why a department moved is deliberately absent: that belongs to
  * the delegation it came from, and it is on that card.
+ *
+ * `onHandBack` is passed only when the viewer holds departments as a delegate,
+ * and the button appears only on the rows they can actually write. It replaced a
+ * chip whose delete slot rendered a padlock — a control that read as "lock this"
+ * and in fact gave the department away.
  */
-function DepartmentRow({ row }: { row: DepartmentOwnershipRow }) {
+function DepartmentRow({
+  row,
+  busy,
+  onHandBack,
+}: {
+  row: DepartmentOwnershipRow;
+  busy?: boolean;
+  onHandBack?: () => void;
+}) {
   const holders = row.assignedTo.filter((holder) => holder.state === "ACTIVE");
   const handedBack = row.assignedTo.filter((holder) => holder.state === "HANDED_BACK");
 
@@ -1310,6 +1341,22 @@ function DepartmentRow({ row }: { row: DepartmentOwnershipRow }) {
           </Tooltip>
         )}
       </TableCell>
+      {onHandBack !== undefined && (
+        <TableCell align="right" sx={{ whiteSpace: "nowrap" }}>
+          {row.writable && (
+            <Tooltip title="Tell the owner you are finished with this one. You keep being able to see it, and they can give it back to you in one click.">
+              <Button
+                size="small"
+                disabled={busy}
+                startIcon={<AssignmentReturnOutlinedIcon />}
+                onClick={onHandBack}
+              >
+                Hand back
+              </Button>
+            </Tooltip>
+          )}
+        </TableCell>
+      )}
     </TableRow>
   );
 }

@@ -1621,6 +1621,7 @@ export function createKairosSyncHandlers(
       rejected: result.rejected,
       withheld: result.withheld,
       purged: result.purged,
+      adopted: result.adopted,
       localProblems: result.localProblems,
       // Both carried so the result alert can tell "you did something wrong"
       // apart from "the app sent something only an owner may send". A reason
@@ -1751,6 +1752,46 @@ export function createKairosSyncHandlers(
       collidesWith: apply ? undefined : pendingEntityKeys(request.planId, scope.ou),
     });
 
+    /**
+     * The other half of the download.
+     *
+     * `/changes` never carries `position_pii` — it is sealed per plan and served
+     * by its own paginated stream with its own watermark (see `pii.ts`). Nothing
+     * called that stream, so employee names and numbers went UP with every
+     * publish and never came back DOWN: a delegate's details reached the server
+     * and neither the owner nor any other delegate ever saw them, and the plan
+     * looked like "everything syncs except the people".
+     *
+     * It also left the shadow with no `position_pii` entry, ever. A publish
+     * therefore sent every local PII row as new, the server answered
+     * `ALREADY_EXISTS` because it had them, and the count never moved however
+     * many times the user downloaded and published — the one conflict a download
+     * could not settle, because the download was not fetching the rows.
+     *
+     * Only on apply. A dry run would double the reads, and every PII read writes
+     * an audit row server-side.
+     */
+    let piiResult: Awaited<ReturnType<typeof pii.pullPii>> | null = null;
+    if (apply) {
+      try {
+        const state = getSyncState(db, request.planId);
+        piiResult = await pii.pullPii(
+          db,
+          db,
+          client,
+          request.planId,
+          // A full pull of entities is a full pull of details too, or the two
+          // halves of the plan end up describing different moments.
+          onThisComputer ? state?.piiWatermark ?? 0 : 0,
+          { apply: true }
+        );
+      } catch {
+        // Not fatal, and deliberately not a failed download: the rows that did
+        // arrive are written and the watermark is already recorded. The next
+        // download picks the details up from the same watermark.
+      }
+    }
+
     // The plan's own row, if the server never had one to send. Before the twin
     // is soft-deleted below, so a failure here cannot leave the property with
     // the local plan gone and the downloaded one still not listed.
@@ -1798,6 +1839,21 @@ export function createKairosSyncHandlers(
       collidingDepartments: result.summary.collidingDepartments,
       applied: result.applied,
       reset: result.reset,
+      /**
+       * Employee details, counted separately because they arrive separately.
+       *
+       * `unreadable` is not a blank: it is a record whose key has been erased.
+       * Rendering those as empty name fields would look like a hotel that never
+       * entered anybody.
+       */
+      pii: piiResult
+        ? {
+            applied: piiResult.applied,
+            deleted: piiResult.deleted,
+            unreadable: piiResult.unreadable,
+            disabled: piiResult.disabled,
+          }
+        : null,
     };
   }
 

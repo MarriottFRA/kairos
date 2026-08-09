@@ -449,16 +449,41 @@ export default function Sync() {
         return;
       }
       setPullReview(null);
+      // Employee details arrive on their own stream and are not in `total`, so
+      // saying "42 rows" when six of them were people's names and numbers would
+      // under-report the download every time.
+      const people = result.data.pii;
+      const withPeople = (message: string): string =>
+        people && people.applied > 0
+          ? `${message} ${people.applied} employee ${
+              people.applied === 1 ? "detail" : "details"
+            } came with them.`
+          : message;
       setToast({
         severity: "success",
-        message: result.data.replacedLocalPlan
-          ? `Downloaded ${result.data.total} rows. This is now the plan of that name on ` +
-            "this computer; the copy it replaced is no longer listed."
-          : pullReview.firstDownload
-            ? `Downloaded ${result.data.total} rows. The plan is now on this computer — ` +
-              "open it from the Positions page."
-            : `Downloaded ${result.data.total} rows.`,
+        message: withPeople(
+          result.data.replacedLocalPlan
+            ? `Downloaded ${result.data.total} rows. This is now the plan of that name on ` +
+              "this computer; the copy it replaced is no longer listed."
+            : pullReview.firstDownload
+              ? `Downloaded ${result.data.total} rows. The plan is now on this computer — ` +
+                "open it from the Positions page."
+              : `Downloaded ${result.data.total} rows.`
+        ),
       });
+      // Not blanks. A record whose key has been erased is unrecoverable, and
+      // rendering it as an empty name field looks like a hotel that never
+      // entered anybody.
+      if (people && people.unreadable > 0) {
+        setToast({
+          severity: "warning",
+          message:
+            `${people.unreadable} employee ${
+              people.unreadable === 1 ? "record" : "records"
+            } could not be read — the personal details for this plan have been ` +
+            "erased on the server. The positions themselves are unaffected.",
+        });
+      }
       // Only meaningful on a first download, and only when the server had no
       // plan record of its own to send. Said out loud because it is the answer
       // to "why is this plan empty?" — the rows exist, nobody published them.

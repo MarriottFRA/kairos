@@ -134,6 +134,15 @@ export interface CollectResult {
   entities: LocalEntity[];
   /** Never sent. Reported so the user can be told, not so they can retry. */
   unpublishable: UnpublishableRow[];
+  /**
+   * The types actually read out of the local stores on this pass.
+   *
+   * `position_pii` is missing from it when the property has personal-data
+   * storage switched off — and a type that was never looked at cannot support
+   * the inference "the shadow has it, we do not, therefore it was deleted". See
+   * `purgesFor`, which is where that inference used to destroy them.
+   */
+  scannedTypes: ReadonlySet<PublishedEntityType>;
 }
 
 /**
@@ -174,9 +183,11 @@ export function collectLocalEntities(
   const departmentByPosition = new Map<string, string | null>();
   const out: LocalEntity[] = [];
   const unpublishable: UnpublishableRow[] = [];
+  const scannedTypes = new Set<PublishedEntityType>();
 
   for (const entityType of PUBLISH_ORDER) {
     if (entityType === "position_pii" && !includePii) continue;
+    scannedTypes.add(entityType);
 
     for (const row of rowsFor(deps, entityType, ou, planId)) {
       const mapped = toEntity(entityType, row);
@@ -241,7 +252,7 @@ export function collectLocalEntities(
     }
   }
 
-  return { entities: out, unpublishable };
+  return { entities: out, unpublishable, scannedTypes };
 }
 
 /** What a caller may write. `null` departments means all of them. */
@@ -323,24 +334,78 @@ export function toCommitEntities(
 }
 
 /**
+ * What makes an absence a deletion rather than a blind spot.
+ *
+ * Every field here exists because a row was missing from the collected set for a
+ * reason that had nothing to do with anybody deleting it.
+ */
+export interface PurgeGuard {
+  /**
+   * The types actually read this pass — `CollectResult.scannedTypes`.
+   *
+   * With personal-data storage switched off, `position_pii` is never read, so
+   * every PII row the shadow remembers looked deleted and every publish sent a
+   * purge for it. The switch means "stop sending these", not "destroy the ones
+   * already there" — erasure is a separate, deliberate act (see `pii.ts`).
+   */
+  scannedTypes?: ReadonlySet<string>;
+  /** Rows that ARE here but could not be mapped. Local damage, not a deletion. */
+  unpublishable?: readonly UnpublishableRow[];
+  /** False for a delegate: the plan's own rows are not theirs to delete. */
+  canWriteStructure?: boolean;
+}
+
+/**
  * Rows the server holds that we have hard-deleted locally.
  *
  * The 30-day tombstone cleanup in Settings removes rows outright, and a plain
  * absence is indistinguishable from "never existed" — so the server keeps
  * serving them and every client resurrects them. `op: "purge"` is how the death
  * gets recorded. Only ever emitted for rows the shadow says we published.
+ *
+ * ## The inference is only safe if we actually looked
+ *
+ * "In the shadow, not in this list" reads as a deletion, and that is true only
+ * when the list is everything this computer holds. Pass a list narrowed by
+ * anything else and the narrowing becomes a delete instruction:
+ *
+ * - **Write scope.** Called with the post-scope `publishable` set, a delegate's
+ *   every publish sent purges for the plan's own `scenario` and `engine_run`
+ *   rows and for every position outside their departments — rows they had
+ *   downloaded, not deleted. The server refused them, so nothing was lost, but
+ *   each one was still counted and reported to the user as a deletion. That is
+ *   the "2 deletions recorded" on a publish that deleted nothing. Pass the FULL
+ *   collected set; the guard below covers what scope still has to say.
+ * - **A type that was not read at all** — see `scannedTypes`.
+ * - **A row that is present but broken** — see `unpublishable`. An orphaned
+ *   sidecar is damage on this computer, and answering it by deleting the
+ *   server's copy destroys the only intact one left.
  */
 export function purgesFor(
   entities: LocalEntity[],
-  shadow: Map<string, ShadowRow>
+  shadow: Map<string, ShadowRow>,
+  guard: PurgeGuard = {}
 ): CommitEntity[] {
   const present = new Set(
     entities.map((entity) => shadowKey(entity.entityType, entity.entityId))
   );
+  for (const row of guard.unpublishable ?? []) {
+    present.add(shadowKey(row.entityType, row.entityId));
+  }
   const out: CommitEntity[] = [];
 
   for (const [key, known] of shadow) {
     if (present.has(key) || known.deleted) continue;
+    if (guard.scannedTypes && !guard.scannedTypes.has(known.entityType)) continue;
+    // A delegate re-running the engine replaces `engine_run` rows under new ids,
+    // which leaves the old ones absent locally and looking exactly like a
+    // deletion — of a plan-wide row that was never theirs to delete.
+    if (
+      guard.canWriteStructure === false &&
+      PLAN_WIDE_ENTITY_TYPES.has(known.entityType as PublishedEntityType)
+    ) {
+      continue;
+    }
     out.push({
       entityType: known.entityType,
       entityId: known.entityId,

@@ -193,6 +193,18 @@ export function pull(
       replacedLocalPlan: boolean;
       createdLocalPlan: boolean;
       firstDownload: boolean;
+      /**
+       * Employee details, which travel on their own stream and are therefore
+       * counted on their own. Null when the download was a preview.
+       */
+      pii: {
+        applied: number;
+        deleted: number;
+        /** Records whose key has been erased. Not blanks — say so. */
+        unreadable: number;
+        /** The property has personal-data storage switched off. */
+        disabled: boolean;
+      } | null;
     }
   >
 > {

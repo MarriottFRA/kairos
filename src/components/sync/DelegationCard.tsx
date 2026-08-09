@@ -13,15 +13,26 @@
  * those departments is in, and the one thing worth pressing. The state sentence
  * comes from `delegationCardState`, which is pure and separately tested.
  *
- * ## Why the actions are behind a menu
+ * ## Why the actions are inline
  *
- * Withdrawing and taking the pen away are both consequential and both rare —
- * the common case is reading the card and doing nothing. Putting them inline
- * gave every row two buttons of equal weight and no primary action, so the one
- * thing an owner actually comes here to do (collect finished work) looked
- * exactly like the one thing they must not do by accident. Now there is at most
- * one contained button per card, and it only appears when there is something to
- * collect.
+ * They were behind an overflow menu, on the theory that withdrawing is
+ * consequential enough to hide. It is — but a menu is not what makes it safe:
+ * withdrawal opens a dialog that will not proceed without a typed reason, so a
+ * stray click costs a glance, not a delegation. What the menu did cost was every
+ * ordinary action — reopen, view-only, give the pen back — one extra click and
+ * one guess about where it lives. So the buttons are on the card, ranked:
+ * contained for the thing you came to do, plain text for the rest, and Withdraw
+ * last and in error colour so it never reads as a peer of the others.
+ *
+ * ## Departments are rows, not chips
+ *
+ * A chip's delete slot rendered with an Undo icon reads as "remove this
+ * department" — the opposite of reopening it. Each department now gets a line
+ * saying what state it is in and a button that says what it does.
+ *
+ * There is deliberately no per-department Download. `/changes` takes a watermark
+ * and a cursor and nothing else: every download is whole-plan. A button offering
+ * one department's data would be describing something the protocol cannot do.
  *
  * ## The timestamp is not a publish time
  *
@@ -33,23 +44,18 @@
  * downloaded yet, which is exactly what a withdrawal would strand.
  */
 
-import { useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
-import Divider from "@mui/material/Divider";
-import IconButton from "@mui/material/IconButton";
-import ListItemText from "@mui/material/ListItemText";
-import Menu from "@mui/material/Menu";
-import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
-import MoreVertIcon from "@mui/icons-material/MoreVert";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import UndoOutlinedIcon from "@mui/icons-material/UndoOutlined";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 
 import { ActivityEntry, Delegation } from "../../shared/kairosSync/protocol";
 import { delegationCardState } from "../../shared/kairosSync/delegationCardState";
@@ -91,13 +97,6 @@ export default function DelegationCard({
   onReopenAll,
   onDownload,
 }: DelegationCardProps) {
-  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
-  const closeMenu = (): void => setMenuAnchor(null);
-  const run = (action: () => void) => () => {
-    closeMenu();
-    action();
-  };
-
   const state = delegationCardState(delegation, presence);
 
   const stateByCode = new Map(
@@ -117,6 +116,10 @@ export default function DelegationCard({
       ...delegation.requestedDepartments,
     ])
   );
+
+  const handedBackCount = delegation.departments.filter(
+    (department) => department.state === "HANDED_BACK"
+  ).length;
 
   /**
    * Did the headline already say how much unpublished work there is?
@@ -184,85 +187,25 @@ export default function DelegationCard({
               {state.headline}
             </Typography>
           </Box>
-
-          {isOwner && (
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
-              {state.collectable && (
-                <Button
-                  size="small"
-                  variant="contained"
-                  startIcon={<DownloadOutlinedIcon />}
-                  disabled={busy}
-                  onClick={() => onDownload(delegation)}
-                >
-                  Download their work
-                </Button>
-              )}
-              <Tooltip title="Change or end this delegation">
-                <IconButton size="small" onClick={(event) => setMenuAnchor(event.currentTarget)}>
-                  <MoreVertIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </Stack>
-          )}
         </Stack>
 
         {/* What they hold, and what state each one is in — the fact that used to
-            live in a table two sections away from the delegation it belongs to. */}
+            live in a table two sections away from the delegation it belongs to.
+            One line each, so the department that needs something doing to it can
+            carry the button that does it. */}
         {codes.length > 0 && (
-          <Stack
-            direction="row"
-            spacing={1}
-            useFlexGap
-            sx={{ flexWrap: "wrap", mt: 2, ml: 3 }}
-          >
-            {codes.map((code) => {
-              const department = stateByCode.get(code);
-
-              if (department?.state === "HANDED_BACK") {
-                const note = department.handedBackNote
-                  ? ` — “${department.handedBackNote}”`
-                  : "";
-                const when = department.handedBackAt
-                  ? formatWhen(department.handedBackAt)
-                  : "at some point";
-                return (
-                  <Tooltip
-                    key={code}
-                    title={`Handed back ${when}${note}${
-                      isOwner ? ". Press the arrow to give it back to them." : ""
-                    }`}
-                  >
-                    <Chip
-                      size="small"
-                      color="info"
-                      label={code}
-                      disabled={busy}
-                      onDelete={isOwner ? () => onReopen(delegation.id, code) : undefined}
-                      deleteIcon={isOwner ? <UndoOutlinedIcon /> : undefined}
-                    />
-                  </Tooltip>
-                );
-              }
-
-              if (!delegation.effectiveDepartments.includes(code)) {
-                return (
-                  <Tooltip
-                    key={code}
-                    title="Recorded, but not in effect — they do not have access to this department. It starts working if their access is widened."
-                  >
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      label={code}
-                      sx={{ color: "text.disabled", borderStyle: "dashed" }}
-                    />
-                  </Tooltip>
-                );
-              }
-
-              return <Chip key={code} size="small" variant="outlined" label={code} />;
-            })}
+          <Stack sx={{ mt: 1.5, ml: 3 }}>
+            {codes.map((code) => (
+              <DepartmentLine
+                key={code}
+                code={code}
+                department={stateByCode.get(code) ?? null}
+                inEffect={delegation.effectiveDepartments.includes(code)}
+                isOwner={isOwner}
+                busy={busy}
+                onReopen={() => onReopen(delegation.id, code)}
+              />
+            ))}
           </Stack>
         )}
 
@@ -276,39 +219,146 @@ export default function DelegationCard({
           </Typography>
         )}
 
-        <Menu anchorEl={menuAnchor} open={menuAnchor !== null} onClose={closeMenu}>
-          {delegation.canEdit ? (
-            <MenuItem disabled={busy} onClick={run(() => onMakeViewOnly(delegation))}>
-              <ListItemText
-                primary="Make view only"
-                secondary="Freezes anything they have not published"
-              />
-            </MenuItem>
-          ) : (
-            <MenuItem disabled={busy} onClick={run(() => onLetThemEdit(delegation))}>
-              <ListItemText primary="Let them edit" secondary="Gives the pen back" />
-            </MenuItem>
-          )}
+        {/* Ranked, not equal: one contained button for the thing an owner comes
+            here to do, plain text for the rest, and Withdraw last and in error
+            colour. It opens a dialog that will not proceed without a typed
+            reason, which is what actually makes it safe to show. */}
+        {isOwner && (
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ mt: 2, ml: 3, flexWrap: "wrap", alignItems: "center" }}
+          >
+            {state.collectable && (
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<DownloadOutlinedIcon />}
+                disabled={busy}
+                onClick={() => onDownload(delegation)}
+              >
+                Download their work
+              </Button>
+            )}
 
-          {state.collectable && (
-            <MenuItem disabled={busy} onClick={run(() => onReopenAll(delegation))}>
-              <ListItemText
-                primary="Reopen handed-back departments"
-                secondary="If they are not finished after all"
-              />
-            </MenuItem>
-          )}
+            {handedBackCount > 1 && (
+              <Tooltip title="Give every department they handed back to them again">
+                <Button
+                  size="small"
+                  startIcon={<UndoOutlinedIcon />}
+                  disabled={busy}
+                  onClick={() => onReopenAll(delegation)}
+                >
+                  Reopen all {handedBackCount}
+                </Button>
+              </Tooltip>
+            )}
 
-          <Divider />
+            {delegation.canEdit ? (
+              <Tooltip title="They keep seeing these departments and stop being able to change them. Freezes anything they have not published.">
+                <Button
+                  size="small"
+                  startIcon={<VisibilityOutlinedIcon />}
+                  disabled={busy}
+                  onClick={() => onMakeViewOnly(delegation)}
+                >
+                  Make view only
+                </Button>
+              </Tooltip>
+            ) : (
+              <Tooltip title="Gives the pen back. Anything they held unpublished can publish again.">
+                <Button
+                  size="small"
+                  startIcon={<EditOutlinedIcon />}
+                  disabled={busy}
+                  onClick={() => onLetThemEdit(delegation)}
+                >
+                  Let them edit
+                </Button>
+              </Tooltip>
+            )}
 
-          <MenuItem disabled={busy} onClick={run(() => onWithdraw(delegation))}>
-            <ListItemText
-              primary={<Typography color="error.main">Withdraw delegation</Typography>}
-              secondary="They lose access immediately"
-            />
-          </MenuItem>
-        </Menu>
+            <Box sx={{ flexGrow: 1 }} />
+
+            <Tooltip title="Ends this delegation. They lose access immediately and you get the departments back.">
+              <Button size="small" color="error" disabled={busy} onClick={() => onWithdraw(delegation)}>
+                Withdraw
+              </Button>
+            </Tooltip>
+          </Stack>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * One department of one grant: what state it is in, and the button for it.
+ *
+ * Below the default export and unexported, per the house convention for a
+ * presentational fragment private to its parent.
+ */
+function DepartmentLine({
+  code,
+  department,
+  inEffect,
+  isOwner,
+  busy,
+  onReopen,
+}: {
+  code: string;
+  department: Delegation["departments"][number] | null;
+  inEffect: boolean;
+  isOwner: boolean;
+  busy: boolean;
+  onReopen: () => void;
+}) {
+  const handedBack = department?.state === "HANDED_BACK";
+
+  const note = handedBack && department.handedBackNote
+    ? ` — “${department.handedBackNote}”`
+    : "";
+  const status = handedBack
+    ? `Handed back ${
+        department.handedBackAt ? formatWhen(department.handedBackAt) : "at some point"
+      }${note}`
+    : !inEffect
+      ? // Recorded as intent, refused in practice. It starts working by itself
+        // if their department access is widened, which is why it is shown at all
+        // rather than filtered out.
+        "Recorded, but not in effect — they do not have access to this one"
+      : "Theirs to edit";
+
+  return (
+    <Stack
+      direction="row"
+      spacing={1}
+      sx={{ alignItems: "center", minHeight: 32, flexWrap: "wrap" }}
+    >
+      <Typography
+        variant="body2"
+        sx={{ fontWeight: 600, minWidth: 72, color: inEffect ? undefined : "text.disabled" }}
+      >
+        {code}
+      </Typography>
+      <Typography
+        variant="body2"
+        color={handedBack ? "info.main" : "text.secondary"}
+        sx={{ flexGrow: 1, minWidth: 0 }}
+      >
+        {status}
+      </Typography>
+      {handedBack && isOwner && (
+        <Button
+          size="small"
+          startIcon={<UndoOutlinedIcon />}
+          disabled={busy}
+          onClick={onReopen}
+        >
+          Reopen
+        </Button>
+      )}
+    </Stack>
   );
 }

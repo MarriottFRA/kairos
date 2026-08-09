@@ -138,7 +138,6 @@ import DeleteClusterPositionDialog, {
 } from "../../components/positions/DeleteClusterPositionDialog";
 import PositionFormDialog from "../../components/positions/PositionFormDialog";
 import LockedDepartmentsBanner from "../../components/positions/LockedDepartmentsBanner";
-import DelegateHoldingsBanner from "../../components/positions/DelegateHoldingsBanner";
 import { uuidv7 } from "../../shared/engine/ids";
 
 /**
@@ -1757,28 +1756,10 @@ export default function Positions() {
         />
       )}
 
-      {/* The other half of the same fact: which departments ARE yours, and the
-          route to handing them back — which had no discoverable entry point at
-          all before, because the only link to the Delegation page was gated on
-          the granting capability. */}
-      {gridReady && planScope.relation === "DELEGATE" && scenario && (
-        <DelegateHoldingsBanner
-          departments={[...(planScope.writableDepartments ?? [])]}
-          onHandBack={() =>
-            navigate(`/signed-in-landing/delegation?plan=${scenario.id}`, {
-              state: {
-                plan: {
-                  planId: scenario.id,
-                  label: scenario.label,
-                  year: scenario.year,
-                  ou: selectedHotelOu,
-                  ownerEmail: null,
-                },
-              },
-            })
-          }
-        />
-      )}
+      {/* No mirror banner naming the departments a delegate DOES hold. Handing
+          work back is a Sync-page act and is taught as one; a permanent
+          info box on the page where the work happens is a standing
+          interruption that says nothing the grid does not already show. */}
 
       {/* Structure problems (e.g. blocks referencing each other in a loop)
           pause the block totals; everything else keeps working. */}

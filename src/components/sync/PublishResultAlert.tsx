@@ -135,6 +135,25 @@ const CONFLICT_TEXT: Record<string, string> = {
   DELETED_REMOTELY: "deleted by somebody else — the deletion wins",
 };
 
+/**
+ * What to do about each conflict, which is not the same for all three.
+ *
+ * "Download the latest version, check the rows, then publish again" was printed
+ * under every one of them. For `ALREADY_EXISTS` that instruction was not merely
+ * unhelpful, it was impossible to follow to a conclusion: the row was one a
+ * download does not carry, so the same message came back however many times the
+ * user did as they were told.
+ */
+const CONFLICT_ADVICE: Record<string, string> = {
+  STALE: "Download the latest version, check the rows, then publish again.",
+  ALREADY_EXISTS:
+    "Nothing to do — the app has taken the server's version as the starting " +
+    "point, so publishing again sends yours as an ordinary change.",
+  DELETED_REMOTELY:
+    "These rows were deleted by somebody else and stay deleted. Add them again " +
+    "if they should not have been.",
+};
+
 const LOCAL_PROBLEM_TEXT: Record<LocalProblem["reason"], string> = {
   ORPHANED_LOCALLY:
     "Details were found for positions that are no longer on this computer, so there was " +
@@ -178,7 +197,18 @@ export default function PublishResultAlert({ result }: { result: PublishResponse
    * fired on rows that were never theirs. This asks the question the headline
    * claims to answer.
    */
-  const yoursLanded = result.conflicts.length === 0 && actionable.length === 0;
+  /**
+   * Every conflict resolved itself, so there is nothing left to do about them.
+   *
+   * `adopted` counts the `ALREADY_EXISTS` rows whose server hash the client has
+   * taken on board; the next publish sends them as ordinary updates. Telling
+   * somebody to go and look at rows that will sort themselves out is how a
+   * working publish reads as a broken one.
+   */
+  const settled =
+    result.conflicts.length > 0 && result.adopted >= result.conflicts.length;
+  const yoursLanded =
+    (result.conflicts.length === 0 || settled) && actionable.length === 0;
   const quiet = internal.length === 0 && suppressed.length === 0;
 
   const headline = yoursLanded
@@ -212,7 +242,15 @@ export default function PublishResultAlert({ result }: { result: PublishResponse
             <Chip size="small" label={`${result.unchanged} already current`} />
           )}
           {result.purged > 0 && (
-            <Chip size="small" label={`${result.purged} deletions recorded`} />
+            // Rows the server actually deleted, counted from its reply. It used
+            // to count what was SENT — including purges the server refused —
+            // which announced deletions to somebody who had deleted nothing.
+            <Chip
+              size="small"
+              label={`${result.purged} ${
+                result.purged === 1 ? "row" : "rows"
+              } deleted on the server`}
+            />
           )}
           {result.withheld > 0 && (
             // "Outside your departments" read as data loss to the people who saw
@@ -245,7 +283,10 @@ export default function PublishResultAlert({ result }: { result: PublishResponse
       )}
 
       {result.conflicts.length > 0 && (
-        <Alert severity="warning">
+        // `info`, not `warning`, when every conflict has already settled itself.
+        // Somebody else's copy having got there first is a fact about a shared
+        // plan, not a fault in this publish.
+        <Alert severity={settled ? "info" : "warning"}>
           <AlertTitle>
             {result.conflicts.length}{" "}
             {result.conflicts.length === 1 ? "row was" : "rows were"} not saved
@@ -260,11 +301,11 @@ export default function PublishResultAlert({ result }: { result: PublishResponse
               <Typography variant="caption" color="text.secondary">
                 {summarise(rows)}
               </Typography>
+              <Typography variant="body2" sx={{ mt: 0.5 }}>
+                {CONFLICT_ADVICE[reason] ?? CONFLICT_ADVICE.STALE}
+              </Typography>
             </Box>
           ))}
-          <Typography variant="body2" sx={{ mt: 1 }}>
-            Download the latest version, check the rows, then publish again.
-          </Typography>
         </Alert>
       )}
 

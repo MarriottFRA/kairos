@@ -445,7 +445,13 @@ export interface PublishResponse {
   conflicts: CommitConflict[];
   rejected: CommitRejection[];
   withheld: number;
+  /** Rows the server actually deleted. Not rows we asked it to. */
   purged: number;
+  /**
+   * Conflicts that resolved themselves — the server's hash is now in the shadow,
+   * so the next publish sends these as ordinary updates.
+   */
+  adopted: number;
   localProblems: LocalProblem[];
   /**
    * What the server currently thinks this caller is, and whether they may write

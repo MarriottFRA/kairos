@@ -394,6 +394,94 @@ describe("purgesFor", () => {
     ]);
     expect(purgesFor([row], shadow)).toHaveLength(0);
   });
+
+  /**
+   * The three ways an absence used to be misread as a deletion.
+   *
+   * Each one produced a purge on every publish, for ever — the server refused
+   * them, so nothing was destroyed, but each was still counted and announced to
+   * the user as "N deletions recorded" on a publish that deleted nothing.
+   */
+  it("does not purge a row that is here but outside this caller's write scope", () => {
+    // The bug: `publishPlan` passed the POST-scope `publishable` set. A
+    // delegate's every publish therefore proposed deleting the plan's own
+    // rows and every position in a department they may read but not write.
+    const mine = entity("position", "mine", "D0410");
+    const theirs = entity("position", "theirs", "D0610");
+    const shadow = new Map<string, ShadowRow>(
+      ["mine", "theirs"].map((id) => [
+        shadowKey("position", id),
+        { entityType: "position", entityId: id, hash: "h", serverSeq: 3, deleted: false },
+      ])
+    );
+    expect(purgesFor([mine, theirs], shadow)).toHaveLength(0);
+  });
+
+  it("does not purge personal details the property told us not to send", () => {
+    // "Stop collecting" is not "destroy the archive" — erasure is its own
+    // deliberate act. Switching PII storage off used to delete every record
+    // already on the server, one publish later.
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position_pii", "pos-1"),
+        {
+          entityType: "position_pii",
+          entityId: "pos-1",
+          hash: "h",
+          serverSeq: 3,
+          deleted: false,
+        },
+      ],
+    ]);
+    const scannedTypes = new Set(["scenario", "position", "component_value"]);
+    expect(purgesFor([], shadow, { scannedTypes })).toHaveLength(0);
+    // Still purges a type that WAS looked at and genuinely is not here.
+    expect(purgesFor([], shadow, { scannedTypes: new Set(["position_pii"]) })).toHaveLength(
+      1
+    );
+  });
+
+  it("does not purge a row that is present but broken", () => {
+    // An orphaned sidecar is damage on this computer. Answering it by deleting
+    // the server's copy destroys the only intact one left.
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position_pii", "pos-gone"),
+        {
+          entityType: "position_pii",
+          entityId: "pos-gone",
+          hash: "h",
+          serverSeq: 3,
+          deleted: false,
+        },
+      ],
+    ]);
+    const purges = purgesFor([], shadow, {
+      unpublishable: [
+        {
+          entityType: "position_pii",
+          entityId: "pos-gone",
+          parentId: "pos-gone",
+          reason: "ORPHANED_LOCALLY",
+        },
+      ],
+    });
+    expect(purges).toHaveLength(0);
+  });
+
+  it("does not let a delegate purge the plan's own rows", () => {
+    // Re-running the engine replaces `engine_run` rows under new ids, so the
+    // old ones are absent locally and look exactly like a deletion — of a
+    // plan-wide row that was never a delegate's to delete.
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("engine_run", "run-1"),
+        { entityType: "engine_run", entityId: "run-1", hash: "h", serverSeq: 3, deleted: false },
+      ],
+    ]);
+    expect(purgesFor([], shadow, { canWriteStructure: false })).toHaveLength(0);
+    expect(purgesFor([], shadow, { canWriteStructure: true })).toHaveLength(1);
+  });
 });
 
 describe("chunkEntities", () => {
