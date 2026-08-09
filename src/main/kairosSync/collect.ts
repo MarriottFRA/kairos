@@ -32,6 +32,10 @@ import {
   Row,
   toEntity,
 } from "../../shared/kairosSync/entityMap";
+import {
+  DepartmentWritePolicy,
+  canWriteDepartment,
+} from "../../shared/kairosSync/writePolicy";
 
 type Db = InstanceType<typeof Database>;
 
@@ -255,12 +259,17 @@ export function collectLocalEntities(
   return { entities: out, unpublishable, scannedTypes };
 }
 
-/** What a caller may write. `null` departments means all of them. */
+/** What a caller may write. */
 export interface WriteScope {
   /** OWNER and ADMIN_LEASE write structure; DELEGATE does not. */
   canWriteStructure: boolean;
-  /** null = every department. */
-  departments: ReadonlySet<string> | null;
+  /**
+   * The department ceiling and floor — the SAME object the grid locks against,
+   * derived once by `departmentWritePolicy`. Sharing it is the point: the grid
+   * offering an edit this filter then withholds is a silent lost write, and it
+   * is exactly what happened while the two were separately-derived flat sets.
+   */
+  departmentPolicy: DepartmentWritePolicy;
 }
 
 /**
@@ -285,7 +294,7 @@ export function filterToWriteScope(
         scope.canWriteStructure
       : entity.department === null
         ? scope.canWriteStructure
-        : scope.departments === null || scope.departments.has(entity.department);
+        : canWriteDepartment(scope.departmentPolicy, entity.department);
     (allowed ? publishable : withheld).push(entity);
   }
 

@@ -9,10 +9,9 @@
  * ## Unpublished is the default, and it is permissive
  *
  * A plan that was never published has no server-side authority to consult, so
- * `writableDepartments` is `undefined` and every consumer treats that as "all of
- * it" — exactly how the app behaved before sync existed. A hotel that never opts
- * in must never notice this hook exists. That is why `undefined` and "an empty
- * set" mean opposite things here and are kept carefully distinct.
+ * `writePolicy` is `undefined` and every consumer treats that as "all of it" —
+ * exactly how the app behaved before sync existed. A hotel that never opts in
+ * must never notice this hook exists.
  *
  * ## The answer is the server's, not a guess
  *
@@ -20,6 +19,12 @@
  * server's write predicate — so the grid can never disagree with what a save
  * will actually do. Notably an OWNER is reported as unable to write a department
  * held by an ACTIVE delegate; their route back is to withdraw the delegation.
+ *
+ * What that answer does NOT contain is a department with no rows in the plan
+ * yet, because the enumeration is built from live rows. `departmentWritePolicy`
+ * is where that is handled — for a full-scope owner it becomes a deny-list, so
+ * an unmentioned department reads as unrestricted rather than as refused. Read
+ * that module before touching anything here.
  *
  * "Actively delegated" is the exact bar, and the imprecise version of that
  * sentence cost a round of misdiagnosis. A HANDED_BACK department has no active
@@ -56,16 +61,35 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { departmentOwnership, listDelegations } from "../services/kairosSyncService";
 import { syncFailed } from "../shared/kairosSync/ipc";
 import { DepartmentOwnership, Relation } from "../shared/kairosSync/protocol";
+import {
+  DepartmentWritePolicy,
+  NO_DEPARTMENT_WRITE,
+  departmentWritePolicy,
+  enumeratedWritableDepartments,
+  holdsAnyDepartment,
+} from "../shared/kairosSync/writePolicy";
 
 export interface PlanScope {
   /** Null until the first answer arrives, or when the plan is unpublished. */
   ownership: DepartmentOwnership | null;
   /**
-   * Departments the user may write. `undefined` means "no server-side opinion" —
-   * unpublished plan, or the lookup has not resolved — and every consumer reads
-   * that as unrestricted.
+   * What the user may write, as a ceiling and a floor. `undefined` means "no
+   * server-side opinion" — unpublished plan, or the lookup has not resolved —
+   * and every consumer reads that as unrestricted.
+   *
+   * Ask it through `canWriteDepartment`, never by reading `allow` directly: a
+   * full-scope owner's `allow` is `null`, which is the case the old flat set
+   * could not represent and the reason this is a policy.
    */
-  writableDepartments: ReadonlySet<string> | undefined;
+  writePolicy: DepartmentWritePolicy | undefined;
+  /** True when the user holds nothing writable at all. Not the same as loading. */
+  holdsNoDepartment: boolean;
+  /**
+   * The departments the server LISTED as writable — the enumeration, not the
+   * predicate. Presence reporting is the only legitimate consumer; see
+   * `enumeratedWritableDepartments`.
+   */
+  enumeratedWritable: string[];
   /** Departments the user may READ. Looser than write: it includes handbacks. */
   readableDepartments: ReadonlySet<string> | undefined;
   relation: Relation | null;
@@ -319,14 +343,16 @@ export function usePlanScope(
     // readable ones. An EMPTY set, never `undefined` — the two mean opposite
     // things here, and `undefined` is the one that unlocks the grid.
     const empty: ReadonlySet<string> = new Set<string>();
+    const writePolicy = notShared
+      ? NO_DEPARTMENT_WRITE
+      : ownership === null
+        ? undefined
+        : departmentWritePolicy(ownership);
     return {
       ownership,
-      // Sets, not arrays: the grid consults these for every rendered cell.
-      writableDepartments: notShared
-        ? empty
-        : ownership === null
-          ? undefined
-          : new Set(departments.filter((row) => row.writable).map((row) => row.code)),
+      writePolicy,
+      holdsNoDepartment: writePolicy !== undefined && !holdsAnyDepartment(writePolicy),
+      enumeratedWritable: notShared ? [] : enumeratedWritableDepartments(ownership),
       readableDepartments: notShared
         ? empty
         : ownership === null

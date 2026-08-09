@@ -34,6 +34,7 @@ import {
   BUDGET_IMPORT_CHANNELS,
   BudgetDepartmentOption,
   ImportRowsResult,
+  ImportSummary,
   PullResult,
 } from "../../shared/budgetImport/ipc";
 
@@ -159,6 +160,26 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
   };
 
   /**
+   * The current import's metadata alone, or null.
+   *
+   * Same question as `getCurrent` minus the answer's bulk: a caller that only
+   * needs "has this hotel pulled?" should not move a few thousand wide rows
+   * across the boundary to find out.
+   */
+  const getSummary: IpcHandler<any, IpcResult<ImportSummary | null>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      return ok(getCurrentImport(localDbHandle(), scope.ou) ?? null);
+    } catch (error) {
+      console.error("Budget import getSummary failed:", error);
+      return fail(error, null);
+    }
+  };
+
+  /**
    * The hotel's own department list, from its budget file rather than from the
    * company-wide mapping tables. Names are resolved here, the same way the
    * allocations view does it, so the renderer never crosses the wide map.
@@ -192,6 +213,7 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
   return {
     [BUDGET_IMPORT_CHANNELS.pull]: pull,
     [BUDGET_IMPORT_CHANNELS.getCurrent]: getCurrent,
+    [BUDGET_IMPORT_CHANNELS.getSummary]: getSummary,
     [BUDGET_IMPORT_CHANNELS.listDepartments]: listDepartmentsHandler,
   };
 }

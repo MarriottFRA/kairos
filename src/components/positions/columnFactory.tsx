@@ -71,6 +71,7 @@ import {
 } from "../../shared/positions/rowModel";
 import { headcountAccountForJobType } from "../../shared/positions/systemAccounts";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
+import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import { ORPHAN_GROUP } from "./gridValueBridge";
@@ -685,21 +686,22 @@ export interface EditabilityContext {
    *  Callers that already hold a map pass it; the form path may omit it. */
   clusterById?: ReadonlyMap<string, HotelClusterDto>;
   /**
-   * Departments this user may WRITE on the published plan, from
-   * `GET /kairos/plans/{id}/department-ownership`. `undefined` means the plan
-   * was never published and the local file is the only copy — everything is
-   * editable, which is how the app behaved before sync existed and how it must
-   * keep behaving for a hotel that never opts in.
+   * What this user may WRITE on the published plan, derived from
+   * `GET /kairos/plans/{id}/department-ownership` by `departmentWritePolicy`.
+   * `undefined` means the plan was never published and the local file is the
+   * only copy — everything is editable, which is how the app behaved before sync
+   * existed and how it must keep behaving for a hotel that never opts in.
    *
-   * A `Set` rather than an array because this is consulted for every rendered
-   * cell on every grid store update; a linear scan of thirty departments would
-   * be felt.
+   * Sets inside, because this is consulted for every rendered cell on every grid
+   * store update; a linear scan of thirty departments would be felt.
    *
    * Note that an OWNER is deliberately locked out of a department they have
    * DELEGATED — the server reports `writable: false` for it, and the owner's
    * route back is to withdraw the delegation. That is per the brief, not a bug.
+   * A department the server did not mention at all is a different thing, and for
+   * a full-scope owner it stays writable; see `writePolicy`.
    */
-  writableDepartments?: ReadonlySet<string>;
+  writePolicy?: DepartmentWritePolicy;
   /**
    * The whole plan is read-only: an administrator holds a support lease
    * (`423 kairos_plan_locked_by_support`), or the plan is archived.
@@ -793,17 +795,17 @@ function departmentWritableFor(
   const existing = departmentWritableResolvers.get(ctx);
   if (existing) return existing;
 
-  const writable = ctx.writableDepartments;
+  const policy = ctx.writePolicy;
   const cache = new WeakMap<PositionRow, boolean>();
 
-  // Unpublished plan (or a full-scope user): the local file is the only copy and
-  // everything is editable, which is exactly how the app behaved before sync
-  // existed. Hand back a constant so the hot path costs one call and no lookups.
+  // Unpublished plan: the local file is the only copy and everything is
+  // editable, which is exactly how the app behaved before sync existed. Hand
+  // back a constant so the hot path costs one call and no lookups.
   //
   // The predicate itself lives in `shared/positions/writeScope` — this is the
   // memoised wrapper around it, nothing more. Three copies of it used to exist.
   const resolve =
-    writable === undefined
+    policy === undefined
       ? () => true
       : (row: PositionRow | undefined): boolean => {
           if (!row) return true;

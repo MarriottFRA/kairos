@@ -10,6 +10,7 @@ import {
   BUDGET_IMPORT_CHANNELS,
   BudgetDepartmentOption,
   ImportRowsResult,
+  ImportSummary,
   PullResult,
 } from "../shared/budgetImport/ipc";
 
@@ -46,6 +47,21 @@ export async function getCurrentBudgetImport(
     { ou }
   );
   return (response.data as ImportRowsResult | null) ?? null;
+}
+
+/**
+ * The current stored import's metadata only, or null if this hotel has never
+ * pulled. Use this — not `getCurrentBudgetImport` — when the question is merely
+ * whether a local BST exists; the rows are the expensive part of that answer.
+ */
+export async function getBudgetImportSummary(
+  ou: string
+): Promise<ImportSummary | null> {
+  const response = await ipc().sendIpcRequest(
+    BUDGET_IMPORT_CHANNELS.getSummary,
+    { ou }
+  );
+  return (response.data as ImportSummary | null) ?? null;
 }
 
 /**

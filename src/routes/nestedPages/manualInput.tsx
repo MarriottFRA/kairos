@@ -198,29 +198,29 @@ export default function ManualInput() {
     if (planScope.planLocked) {
       return "An administrator is holding this plan, so nothing can be changed.";
     }
-    if (planScope.writableDepartments?.size === 0) {
+    if (planScope.holdsNoDepartment) {
       return (
         "This plan was shared with you to look at, not to change. Ask its owner " +
         "if you need to edit a department."
       );
     }
     return null;
-  }, [planScope.notShared, planScope.planLocked, planScope.writableDepartments]);
+  }, [planScope.notShared, planScope.planLocked, planScope.holdsNoDepartment]);
 
   /** The row-level backstop for everything that does not go through a cell. */
   const rowWritable = useCallback(
     (row: ManualGridRow | undefined) =>
       rowDepartmentWritable(row, {
-        writableDepartments: planScope.writableDepartments,
+        writePolicy: planScope.writePolicy,
         planLocked: planScope.planLocked,
       }),
-    [planScope.writableDepartments, planScope.planLocked]
+    [planScope.writePolicy, planScope.planLocked]
   );
 
   /** What the Department picker may offer here. See `departmentPickList`. */
   const departmentPicks = useMemo(
-    () => departmentPickList(departments, planScope.ownership, planScope.scopeKind),
-    [departments, planScope.ownership, planScope.scopeKind]
+    () => departmentPickList(departments, planScope.ownership),
+    [departments, planScope.ownership]
   );
 
 
@@ -519,7 +519,7 @@ export default function ManualInput() {
             viewMode={viewMode}
             apiRef={apiRef}
             loading={loading}
-            writableDepartments={planScope.writableDepartments}
+            writePolicy={planScope.writePolicy}
             planLocked={planScope.planLocked}
             onRowUpdate={handleRowUpdate}
             onRowUpdateError={handleRowUpdateError}

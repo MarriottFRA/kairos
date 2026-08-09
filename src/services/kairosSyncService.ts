@@ -580,7 +580,13 @@ export function kpiSeries(
   return call<KpiSeriesResponse>(KAIROS_SYNC_CHANNELS.kpiSeries, { ou, request });
 }
 
-/** Call before enabling the BST push page, and render every reason it returns. */
+/**
+ * Reasons the local plan may not be the whole picture, for the BST push page.
+ *
+ * Advisory ONLY — the push is a client-side write into a file the user picks,
+ * so nothing here gates it. Render the reasons as nudges to sync; ignore
+ * `allowed`.
+ */
 export function pushEligibility(
   ou: string,
   planId: string

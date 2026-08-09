@@ -60,6 +60,7 @@ import {
   rowDepartmentWritable,
 } from "../../shared/positions/writeScope";
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
+import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
 import {
   buildColumnGroupingModel,
@@ -292,24 +293,25 @@ export interface PositionsGridProps {
   blockResults: BlockResultsById | null;
   masked: boolean;
   /**
-   * Departments this user may write, from the published plan's
+   * What this user may write, from the published plan's
    * `/department-ownership`. Omit (undefined) when the plan was never published:
    * the local file is then the only copy and every row is editable, which is how
    * the app behaved before server sync and how it must keep behaving for a hotel
    * that never opts in.
    *
-   * A `Set` because `cellEditable` consults it for every rendered cell on every
-   * grid store update — see the resolver in columnFactory.
+   * Sets inside, because `cellEditable` consults it for every rendered cell on
+   * every grid store update — see the resolver in columnFactory.
    */
-  writableDepartments?: ReadonlySet<string>;
+  writePolicy?: DepartmentWritePolicy;
   /**
    * Which departments the picker may OFFER, and which it shows greyed.
    *
-   * Separate from `writableDepartments` and from `departments` on purpose. The
-   * lock answers "may I edit this row"; this answers "what may I turn it into",
-   * and the two have different right answers for an owner — who can assign a
-   * department that has no rows in it yet, and cannot assign one they have
-   * delegated away. Omit for no restriction.
+   * Separate from `writePolicy` and from `departments` on purpose. The lock
+   * answers "may I edit this row"; this answers "what may I turn it into". Both
+   * are now derived from the same policy — an owner can assign a department that
+   * has no rows in it yet, and cannot assign one they have delegated away — but
+   * this one also has to decide what to grey and what to hide. Omit for no
+   * restriction.
    */
   departmentPicks?: DepartmentPickList;
   /** An administrator holds a support lease, or the plan is archived. */
@@ -502,7 +504,7 @@ export default function PositionsGrid({
   blocks,
   blockResults,
   masked,
-  writableDepartments,
+  writePolicy,
   departmentPicks,
   planLocked,
   lockReasonByDepartment,
@@ -680,8 +682,8 @@ export default function PositionsGrid({
    */
   const rowWritable = useCallback(
     (row: PositionRow): boolean =>
-      rowDepartmentWritable(row, { writableDepartments, planLocked }),
-    [writableDepartments, planLocked]
+      rowDepartmentWritable(row, { writePolicy, planLocked }),
+    [writePolicy, planLocked]
   );
 
   /**
@@ -694,8 +696,8 @@ export default function PositionsGrid({
    */
   const rowNeedsDepartment = useCallback(
     (row: PositionRow): boolean =>
-      !structureEditable && departmentUnassigned(row, { writableDepartments }),
-    [writableDepartments, structureEditable]
+      !structureEditable && departmentUnassigned(row, { writePolicy }),
+    [writePolicy, structureEditable]
   );
 
   const getRowClassName = useMemo(
@@ -835,13 +837,13 @@ export default function PositionsGrid({
       // therefore fresh per-row caches both here and in columnFactory — which is
       // what makes a revoked delegation lock the grid on the next render rather
       // than at the next remount.
-      writableDepartments,
+      writePolicy,
       planLocked,
       // Pooled blocks whose rule decides membership: the weight cell of a row
       // the rule leaves out has nothing to set.
       poolWeightEditable: poolWeightGate(blocks),
     }),
-    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked, blocks]
+    [masked, maskableKeys, hotelClusters, currentOu, writePolicy, planLocked, blocks]
   );
 
   // Memo for the answer above, keyed row -> field.

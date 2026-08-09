@@ -77,6 +77,7 @@ import {
   revealBstFile,
   saveBstPushConfig,
 } from "../../services/bstPushService";
+import { getBudgetImportSummary } from "../../services/budgetImportService";
 import { loadOutputs } from "../../services/outputsService";
 import { listScenarios } from "../../services/scenarioService";
 import { MONTH_LONG } from "../../shared/calendar";
@@ -90,7 +91,7 @@ import {
 import { pushEligibility, logBstPush } from "../../services/kairosSyncService";
 import { syncFailed } from "../../shared/kairosSync/ipc";
 import { BstPushEligibility } from "../../shared/kairosSync/protocol";
-import PushEligibilityAlert from "../../components/sync/PushEligibilityAlert";
+import PushAdvisoryAlert from "../../components/sync/PushAdvisoryAlert";
 
 type Stage = "idle" | "review" | "done";
 type RowFilter = "all" | "problems";
@@ -364,15 +365,16 @@ export default function BstPush() {
   const [rulesRevision, setRulesRevision] = useState(0);
 
   /**
-   * Whether the server will stand behind this push.
+   * What the server would have to say about this push — advisory only.
    *
-   * Asked once per scenario rather than at commit time, because the answers are
-   * things the user has to act on BEFORE picking a file — a delegate cannot push
-   * at all, and a partial scope makes the push destructive rather than partial.
-   * A plan that was never published simply has no opinion, and the page behaves
-   * exactly as it did before sync existed.
+   * It does NOT decide whether the push may happen; the push is a local write
+   * into a file the user picks, so nothing on the server can make it wrong. The
+   * reasons are worth showing because each one means the local copy might not be
+   * the whole picture, which is a reason to sync first. Asked once per scenario,
+   * and dismissible, because a nudge that cannot be silenced is not a nudge.
    */
   const [eligibility, setEligibility] = useState<BstPushEligibility | null>(null);
+  const [advisoryDismissed, setAdvisoryDismissed] = useState(false);
 
   useEffect(() => {
     if (!ou || !planningScenarioId) {
@@ -380,6 +382,7 @@ export default function BstPush() {
       return;
     }
     let cancelled = false;
+    setAdvisoryDismissed(false);
     void pushEligibility(ou, planningScenarioId).then((result) => {
       if (cancelled) return;
       setEligibility(syncFailed(result) ? null : result.data);
@@ -389,7 +392,33 @@ export default function BstPush() {
     };
   }, [ou, planningScenarioId]);
 
-  const pushBlocked = eligibility !== null && !eligibility.allowed;
+  /**
+   * Whether this machine holds a BST Pull, which the server cannot answer: its
+   * `NO_BST_IMPORT` means "nothing published", and publishing is optional. The
+   * summary rather than `getCurrent` — the rows would be a few thousand wide
+   * rows fetched to answer a yes/no. `null` means not asked yet.
+   */
+  const [hasLocalImport, setHasLocalImport] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!ou) {
+      setHasLocalImport(null);
+      return;
+    }
+    let cancelled = false;
+    getBudgetImportSummary(ou)
+      .then((summary) => {
+        if (!cancelled) setHasLocalImport(summary !== null);
+      })
+      .catch(() => {
+        // A failed lookup must not invent a missing workbook — treat it as
+        // present and stay quiet.
+        if (!cancelled) setHasLocalImport(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ou]);
 
   // ── Resolve the planning scenario (same ladder as Results) ──
   useEffect(() => {
@@ -707,7 +736,13 @@ export default function BstPush() {
           {error}
         </Alert>
       )}
-      <PushEligibilityAlert eligibility={eligibility} />
+      {!advisoryDismissed && (
+        <PushAdvisoryAlert
+          eligibility={eligibility}
+          hasLocalImport={hasLocalImport}
+          onDismiss={() => setAdvisoryDismissed(true)}
+        />
+      )}
 
       {refusalMessage && (
         <Alert
@@ -732,7 +767,6 @@ export default function BstPush() {
           outputs={outputs}
           budgetYear={budgetYear}
           onChoose={handleChooseFile}
-          disabled={pushBlocked}
         />
       )}
 
@@ -890,15 +924,12 @@ function IdleState({
   outputs,
   budgetYear,
   onChoose,
-  disabled,
 }: {
   scopeReady: boolean;
   busy: Stage | null | string;
   outputs: OutputsResponse | null;
   budgetYear: number;
   onChoose: () => void;
-  /** The server refuses this push — the reasons are in PushEligibilityAlert. */
-  disabled?: boolean;
 }) {
   const rowCount = outputs?.rows.length ?? 0;
   const nothingToPush = Boolean(outputs) && rowCount === 0;
@@ -985,7 +1016,7 @@ function IdleState({
               )
             }
             onClick={onChoose}
-            disabled={!scopeReady || Boolean(busy) || nothingToPush || disabled}
+            disabled={!scopeReady || Boolean(busy) || nothingToPush}
           >
             {busy === "preview" ? "Reading the BST…" : "Choose BST file…"}
           </Button>

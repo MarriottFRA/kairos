@@ -63,6 +63,7 @@ import { BlockDto } from "../../shared/blocks/ipc";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
+import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
 import { FieldCatalog, FieldDef } from "../../shared/positions/fields";
 import { BlockResultsById } from "../../shared/positions/liveSim";
@@ -154,9 +155,9 @@ export interface PositionFormDialogProps {
    * `cellEditable` context omitted them, so every field on a delegated row came
    * back editable and its commits went into the same write queue as the grid's.
    * `undefined` means an unpublished plan and unrestricted editing, same as
-   * everywhere else — the distinction from an empty Set is load-bearing.
+   * everywhere else — the distinction from an empty allow-list is load-bearing.
    */
-  writableDepartments?: ReadonlySet<string>;
+  writePolicy?: DepartmentWritePolicy;
   planLocked?: boolean;
   status?: RowSaveStatus;
   /** The cell the user opened from — focused first, so Alt+Enter lands where
@@ -187,7 +188,7 @@ export default function PositionFormDialog({
   currentOu,
   hotelNames,
   masked,
-  writableDepartments,
+  writePolicy,
   planLocked,
   status,
   initialFocusField,
@@ -325,13 +326,13 @@ export default function PositionFormDialog({
       // the grid must give one answer, not two — they share `cellEditable`
       // precisely so that a rule added in one place cannot be missing from the
       // other.
-      writableDepartments,
+      writePolicy,
       planLocked,
       // Same pooled-weight lock the grid applies, so the form cannot offer an
       // edit the grid refuses (or the other way round).
       poolWeightEditable: poolWeightGate(blocks),
     }),
-    [masked, maskableKeys, hotelClusters, currentOu, writableDepartments, planLocked, blocks]
+    [masked, maskableKeys, hotelClusters, currentOu, writePolicy, planLocked, blocks]
   );
 
   // Two commits can land in one tick (Enter blurs one field and focuses the

@@ -26,7 +26,12 @@ import {
   toCommitEntities,
   LocalEntity,
 } from "../collect";
-import { CommitEntity } from "../../../shared/kairosSync/protocol";
+import { CommitEntity, DepartmentOwnership } from "../../../shared/kairosSync/protocol";
+import {
+  UNRESTRICTED_WRITE,
+  allowOnly,
+  departmentWritePolicy,
+} from "../../../shared/kairosSync/writePolicy";
 
 type Db = InstanceType<typeof Database>;
 
@@ -256,7 +261,7 @@ describe("filterToWriteScope", () => {
   it("lets an owner send everything", () => {
     const { publishable, withheld } = filterToWriteScope(entities, {
       canWriteStructure: true,
-      departments: null,
+      departmentPolicy: UNRESTRICTED_WRITE,
     });
     expect(publishable).toHaveLength(4);
     expect(withheld).toHaveLength(0);
@@ -267,7 +272,7 @@ describe("filterToWriteScope", () => {
     // of DEPARTMENT_OUT_OF_SCOPE rejections looks exactly like a failed save.
     const { publishable, withheld } = filterToWriteScope(entities, {
       canWriteStructure: false,
-      departments: new Set(["D0410"]),
+      departmentPolicy: allowOnly(["D0410"]),
     });
     expect(publishable.map((e) => e.entityId)).toEqual(["a"]);
     expect(withheld.map((e) => e.entityId).sort()).toEqual(["b", "c", PLAN]);
@@ -277,7 +282,7 @@ describe("filterToWriteScope", () => {
     // Matches the server: '' collapses to NULL and lands in the plan-wide branch.
     const { publishable } = filterToWriteScope([entity("position", "c", null)], {
       canWriteStructure: false,
-      departments: new Set(["D0410"]),
+      departmentPolicy: allowOnly(["D0410"]),
     });
     expect(publishable).toHaveLength(0);
   });
@@ -286,7 +291,7 @@ describe("filterToWriteScope", () => {
     /**
      * The invariant, stated where it is cheapest.
      *
-     * `departments: null` means "no restriction", which is what `writeScopeFor`
+     * An open ceiling means "no restriction", which is what `writeScopeFor`
      * falls back to when `/department-ownership` has never been cached. Deciding
      * plan-wide rows on the TYPE rather than on a null department code is what
      * stops that fallback putting a delegate's name on the scenario row.
@@ -298,10 +303,68 @@ describe("filterToWriteScope", () => {
     ];
     const { publishable, withheld } = filterToWriteScope(planWide, {
       canWriteStructure: false,
-      departments: null,
+      departmentPolicy: UNRESTRICTED_WRITE,
     });
     expect(publishable.map((e) => e.entityId)).toEqual(["a"]);
     expect(withheld.map((e) => e.entityType).sort()).toEqual(["engine_run", "scenario"]);
+  });
+
+  /**
+   * The half of the fix that is invisible until it is missing.
+   *
+   * Unlocking the grid for a department the server never enumerated, while this
+   * filter still withheld it, would swap a visible lock for a silent lost write
+   * — and it would be self-perpetuating: the department cannot be enumerated
+   * until it has rows, and it cannot get rows while they are withheld. The grid
+   * and this filter therefore consume the SAME `departmentWritePolicy`.
+   */
+  it("sends a full-scope owner's row in a department the server never listed", () => {
+    const ownership: DepartmentOwnership = {
+      planId: PLAN,
+      planVersion: 1,
+      authzVersion: 1,
+      me: { relation: "OWNER" as const, scopeKind: "FULL" as const },
+      structureEditableByMe: true,
+      departments: [
+        // Rooms is delegated away; F&B is theirs. Retail is the new outlet and
+        // has no rows on the server yet, so it is not here at all.
+        { code: "D0410", readable: true, writable: false, reason: null, assignedTo: [] },
+        { code: "D0610", readable: true, writable: true, reason: null, assignedTo: [] },
+      ],
+    };
+
+    const { publishable, withheld } = filterToWriteScope(
+      [
+        entity("position", "rooms", "D0410"),
+        entity("position", "fb", "D0610"),
+        entity("position", "retail", "D0910"),
+      ],
+      { canWriteStructure: true, departmentPolicy: departmentWritePolicy(ownership) }
+    );
+
+    expect(publishable.map((e) => e.entityId).sort()).toEqual(["fb", "retail"]);
+    // The delegated one is still held back — an explicit refusal, not an absence.
+    expect(withheld.map((e) => e.entityId)).toEqual(["rooms"]);
+  });
+
+  it("withholds the same row from a delegate", () => {
+    const ownership: DepartmentOwnership = {
+      planId: PLAN,
+      planVersion: 1,
+      authzVersion: 1,
+      me: { relation: "DELEGATE" as const, scopeKind: "FULL" as const },
+      structureEditableByMe: false,
+      departments: [
+        { code: "D0610", readable: true, writable: true, reason: null, assignedTo: [] },
+      ],
+    };
+
+    const { publishable } = filterToWriteScope(
+      [entity("position", "retail", "D0910"), entity("position", "fb", "D0610")],
+      { canWriteStructure: false, departmentPolicy: departmentWritePolicy(ownership) }
+    );
+
+    expect(publishable.map((e) => e.entityId)).toEqual(["fb"]);
   });
 });
 

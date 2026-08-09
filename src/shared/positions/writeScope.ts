@@ -7,19 +7,21 @@
  * a permission rule is three chances for the grid to offer an edit the save then
  * refuses — so they now all call this.
  *
- * ## The three states, and why they are not two
+ * ## The states, and why they are not two
  *
- * - **`undefined`** — no server-side opinion. An unpublished plan, or the
- *   ownership call has not resolved yet. Everything is editable, which is
- *   exactly how the app behaved before sync existed; a hotel that never opts in
- *   must not notice this code exists.
- * - **An empty set** — the opposite. A revoked delegate, or a read-only share.
- *   Nothing is editable. Collapsing this into `undefined` hands a revoked
- *   delegate a fully editable grid.
- * - **A populated set** — the server's own write predicate, verbatim from
- *   `/department-ownership`, so the grid cannot disagree with what a save does.
- *   Note that an OWNER is reported as unable to write a department they have
- *   DELEGATED; their route back is to withdraw the delegation.
+ * The answer is a `DepartmentWritePolicy` — see `shared/kairosSync/writePolicy`,
+ * which derives it once from `/department-ownership` for the grid, the picker
+ * and the publish filter alike. Omitting it entirely still means "no server-side
+ * opinion": an unpublished plan, or an ownership call that has not resolved yet,
+ * where everything is editable exactly as the app behaved before sync existed.
+ *
+ * The case worth restating here is the one that used to be wrong. A full-scope
+ * OWNER gets an open ceiling with a deny-list, because `/department-ownership`
+ * enumerates only departments that already have rows — so a department nobody
+ * has used yet is absent from it, and absent is not refused. A DELEGATE gets an
+ * allow-list, because for them the enumeration is the point. Either way an owner
+ * is still locked out of a department they have DELEGATED; that arrives as an
+ * explicit `deny` and their route back is to withdraw the delegation.
  *
  * ## The unassigned row
  *
@@ -37,11 +39,16 @@
  * them so it is visible that they are unfinished rather than merely new.
  */
 
+import {
+  DepartmentWritePolicy,
+  canWriteDepartment,
+  holdsAnyDepartment,
+} from "../kairosSync/writePolicy";
 import { DEPARTMENT_CODE_KEY } from "./fields";
 
 export interface PositionWriteScope {
-  /** `undefined` = no server opinion. An empty Set = nothing writable. */
-  writableDepartments?: ReadonlySet<string>;
+  /** Omitted = no server opinion at all. See `departmentWritePolicy`. */
+  writePolicy?: DepartmentWritePolicy;
   /** An administrator holds an exclusive lease: the whole plan is read-only. */
   planLocked?: boolean;
 }
@@ -89,7 +96,7 @@ export function departmentUnassigned(
   row: DepartmentScopedRow | undefined,
   scope: PositionWriteScope
 ): boolean {
-  if (scope.writableDepartments === undefined) return false;
+  if (scope.writePolicy === undefined) return false;
   return departmentCodeOf(row) === "";
 }
 
@@ -100,12 +107,12 @@ export function rowDepartmentWritable(
   if (!row) return true;
   if (scope.planLocked) return false;
 
-  const writable = scope.writableDepartments;
-  if (writable === undefined) return true;
+  const policy = scope.writePolicy;
+  if (policy === undefined) return true;
 
   const code = departmentCodeOf(row);
   // No department yet. Editable if this user holds anything at all — which is
   // what lets them pick one. A revoked delegate holds nothing and stays locked.
-  if (code === "") return writable.size > 0;
-  return writable.has(code);
+  if (code === "") return holdsAnyDepartment(policy);
+  return canWriteDepartment(policy, code);
 }

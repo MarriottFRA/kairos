@@ -89,6 +89,14 @@ import {
   RELATION_PLAIN,
   WriteScopeKind,
 } from "../../shared/kairosSync/relations";
+import {
+  NO_DEPARTMENT_WRITE,
+  UNRESTRICTED_WRITE,
+  allowOnly,
+  departmentWritePolicy,
+  enumeratedWritableDepartments,
+  holdsAnyDepartment,
+} from "../../shared/kairosSync/writePolicy";
 
 function envelope<T>(data: T): IpcResult<T> {
   return { success: true, data, timestamp: Date.now() };
@@ -212,10 +220,6 @@ function cachedOwnership(planId: string): DepartmentOwnership | null {
   }
 }
 
-function writableDepartmentsOf(ownership: DepartmentOwnership): string[] {
-  return ownership.departments.filter((row) => row.writable).map((row) => row.code);
-}
-
 function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
   const state = getSyncState(secureDb(), planId);
   // The relation itself comes from the head, which is refreshed on every probe;
@@ -224,22 +228,27 @@ function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
   const relation = (head?.relation ?? state?.relation ?? null) as Relation | null;
 
   // Capability first. A relation with no write at all must not fall through to
-  // `departments == null`, which every caller reads as "no restriction" — for an
+  // an open ceiling, which every caller reads as "no restriction" — for an
   // OU_VISITOR that is exactly backwards, and would have the client filter
   // nothing out of a publish the server refuses in its entirety.
   if (!canWrite(relation)) {
-    return { canWriteStructure: false, departments: new Set<string>() };
+    return { canWriteStructure: false, departmentPolicy: NO_DEPARTMENT_WRITE };
   }
 
   const ownership = cachedOwnership(planId);
-  const departments = ownership
-    ? writableDepartmentsOf(ownership)
+  const departmentPolicy = ownership
+    ? // The SAME derivation the grid locks against, so a cell the user was
+      // allowed to edit cannot be withheld here without a word. For a full-scope
+      // owner that is a deny-list: `/department-ownership` enumerates only
+      // departments that already have rows, and withholding a brand-new one
+      // would keep it from ever gaining any.
+      departmentWritePolicy(ownership)
     : // Never asked. The head's department list is the read scope, which is the
       // best available guess and errs wide — the server still resolves authority
       // per row, so the cost is a rejection rather than a lost write.
       head?.scopeKind === "PARTIAL"
-      ? head.departments
-      : null;
+      ? allowOnly(head.departments)
+      : UNRESTRICTED_WRITE;
 
   return {
     /**
@@ -259,7 +268,7 @@ function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
     canWriteStructure:
       (ownership ? ownership.structureEditableByMe : true) &&
       canWriteStructure(relation),
-    departments: departments == null ? null : new Set(departments),
+    departmentPolicy,
   };
 }
 
@@ -276,11 +285,13 @@ function headFor(heads: SyncHeads | null, planId: string): PlanHead | null {
  * that had nothing to do. The two are opposite situations and the second one
  * needs the user to go and fix something.
  *
- * Only ever raised when the scope is empty AND the relation cannot write. A
- * `null` department set means "no restriction" and must never land here.
+ * Only ever raised when the scope is empty AND the relation cannot write. An
+ * open ceiling means "no restriction" and must never land here — including a
+ * full-scope owner who has delegated every department away, who still holds the
+ * right to open a new one.
  */
 function assertCanPublish(planId: string, scope: WriteScope, head?: PlanHead | null): void {
-  if (scope.departments === null || scope.departments.size > 0) return;
+  if (holdsAnyDepartment(scope.departmentPolicy)) return;
   if (scope.canWriteStructure) return;
 
   const state = getSyncState(secureDb(), planId);
@@ -408,7 +419,7 @@ function writeScopeKindFor(
 ): WriteScopeKind {
   if (!canWrite(relation)) return "NONE";
   if (!ownership) return "UNKNOWN";
-  const writable = writableDepartmentsOf(ownership);
+  const writable = enumeratedWritableDepartments(ownership);
   if (writable.length === 0) return "NONE";
   return writable.length < ownership.departments.length ? "PARTIAL" : "FULL";
 }

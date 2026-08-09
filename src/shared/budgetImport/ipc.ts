@@ -108,6 +108,9 @@ export const BUDGET_IMPORT_CHANNELS = {
   pull: "budgetImport:pull",
   /** The current stored import (metadata + rows) for the selected OU, or null. */
   getCurrent: "budgetImport:getCurrent",
+  /** Just the current import's metadata — for callers that only need to know
+   *  whether this hotel has pulled, without paying for every row. */
+  getSummary: "budgetImport:getSummary",
   /** Just the department codes the current import carries — the hotel's own
    *  chart, rather than the mapping tables' 200-plus company-wide list. */
   listDepartments: "budgetImport:listDepartments",

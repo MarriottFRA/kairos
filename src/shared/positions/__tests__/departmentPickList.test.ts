@@ -53,7 +53,7 @@ function ownership(
 
 describe("departmentPickList", () => {
   it("offers everything when the plan was never published", () => {
-    const picks = departmentPickList(ALL, null, null);
+    const picks = departmentPickList(ALL, null);
     expect(picks.selectable).toHaveLength(4);
     expect(picks.locked).toHaveLength(0);
   });
@@ -64,8 +64,7 @@ describe("departmentPickList", () => {
       ownership("PARTIAL", "DELEGATE", [
         { code: "D0410", readable: true, writable: true },
         { code: "D0610", readable: true, writable: false, reason: "HANDED_BACK" },
-      ]),
-      "PARTIAL"
+      ])
     );
 
     expect(picks.selectable.map((option) => option.code)).toEqual(["D0410"]);
@@ -84,8 +83,7 @@ describe("departmentPickList", () => {
         { code: "D0410", readable: true, writable: false, reason: "DELEGATED" },
         { code: "D0610", readable: true, writable: true },
         { code: "D0710", readable: true, writable: true },
-      ]),
-      "FULL"
+      ])
     );
 
     expect(picks.locked.map((option) => option.code)).toEqual(["D0410"]);
@@ -104,8 +102,7 @@ describe("departmentPickList", () => {
       ALL,
       ownership("PARTIAL", "DELEGATE", [
         { code: "D0410", readable: true, writable: false, reason: "HANDED_BACK" },
-      ]),
-      "PARTIAL"
+      ])
     );
 
     expect(picks.selectable).toHaveLength(0);
@@ -117,8 +114,7 @@ describe("departmentPickList", () => {
       ALL,
       ownership("FULL", "OWNER", [
         { code: "D0410", readable: true, writable: false, reason: "SOMETHING_NEW" },
-      ]),
-      "FULL"
+      ])
     );
     // The code itself, which is not a sentence but is the one thing that lets a
     // support call name what the server actually said. This used to flatten to
@@ -135,8 +131,7 @@ describe("departmentPickList", () => {
       ownership("PARTIAL", "DELEGATE", [
         { code: "D0410", readable: true, writable: true },
         { code: "D0610", readable: true, writable: false, reason: "HANDED_BACK" },
-      ]),
-      "PARTIAL"
+      ])
     );
     expect(delegate.locked[0].reason).toBe("Handed back to the owner");
 
@@ -145,10 +140,46 @@ describe("departmentPickList", () => {
       ownership("FULL", "OWNER", [
         { code: "D0410", readable: true, writable: false, reason: "HANDED_BACK" },
         { code: "D0610", readable: true, writable: true },
-      ]),
-      "FULL"
+      ])
     );
     expect(owner.locked[0].reason).toContain("Handed back to you");
     expect(owner.locked[0].reason).toContain("withdraw the delegation");
+  });
+
+  it("keeps a FULL-scope DELEGATE on an allow-list", () => {
+    // The open ceiling is gated on the relation as well as the scope. A delegate
+    // who happens to hold every department is still the person the enumeration
+    // exists for, and handing them the hotel's unused department codes would be
+    // the disclosure the PARTIAL branch was written to prevent.
+    const picks = departmentPickList(
+      ALL,
+      ownership("FULL", "DELEGATE", [
+        { code: "D0410", readable: true, writable: true },
+        { code: "D0610", readable: true, writable: true },
+      ])
+    );
+
+    expect(picks.selectable.map((option) => option.code)).toEqual(["D0410", "D0610"]);
+    expect(picks.selectable.some((option) => option.code === "D0910")).toBe(false);
+  });
+
+  it("hides a department an owner cannot write AND cannot read", () => {
+    // Previously offered as an ordinary choice: the old FULL branch keyed on
+    // having a lock REASON, and `lockReasonsByDepartment` deliberately omits
+    // unreadable departments, so "no reason" read as "yours".
+    const picks = departmentPickList(
+      ALL,
+      ownership("FULL", "OWNER", [
+        { code: "D0410", readable: false, writable: false, reason: "DELEGATED" },
+        { code: "D0610", readable: true, writable: true },
+      ])
+    );
+
+    expect(picks.selectable.map((option) => option.code)).toEqual([
+      "D0610",
+      "D0710",
+      "D0910",
+    ]);
+    expect(picks.locked).toHaveLength(0);
   });
 });

@@ -49,6 +49,7 @@ import {
   vacationCostById,
 } from "../../shared/positions/rowModel";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
+import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { departmentPickList } from "../../shared/positions/departmentPickList";
 import { lockReasonsByDepartment } from "../../shared/kairosSync/lockReason";
 import { buildCalendarContext } from "../../shared/engine/calendarContext";
@@ -636,9 +637,10 @@ export default function Positions() {
    * What the server says this user may write on this plan.
    *
    * Unrestricted until the plan is published — a hotel that never syncs sees no
-   * difference. Once it is, `writableDepartments` locks the grid to exactly what
-   * a save would accept, including locking an owner out of a department they
-   * have delegated.
+   * difference. Once it is, `writePolicy` locks the grid to exactly what a save
+   * would accept, including locking an owner out of a department they have
+   * delegated. A department the server has never mentioned is a different case
+   * and stays open for a full-scope owner; see `departmentWritePolicy`.
    */
   const planScope = usePlanScope(selectedHotelOu, scenario?.id ?? null);
 
@@ -678,7 +680,7 @@ export default function Positions() {
     if (planScope.planLocked) {
       return "An administrator is holding this plan, so nothing can be added to it.";
     }
-    if (planScope.writableDepartments?.size === 0) {
+    if (planScope.holdsNoDepartment) {
       return (
         "This plan was shared with you to look at, not to change. Ask its owner " +
         "if you need to edit a department."
@@ -694,12 +696,12 @@ export default function Positions() {
   }, [
     planScope.notShared,
     planScope.planLocked,
-    planScope.writableDepartments,
+    planScope.holdsNoDepartment,
     planScope.canAddRows,
   ]);
 
   const writeScopeRef = useRef<{
-    writable: ReadonlySet<string> | undefined;
+    writable: DepartmentWritePolicy | undefined;
     planLocked: boolean;
     partial: boolean;
     notShared: boolean;
@@ -712,7 +714,7 @@ export default function Positions() {
     addRefusal: null,
   });
   writeScopeRef.current = {
-    writable: planScope.writableDepartments,
+    writable: planScope.writePolicy,
     planLocked: planScope.planLocked,
     partial: planScope.scopeKind === "PARTIAL",
     notShared: planScope.notShared,
@@ -722,15 +724,15 @@ export default function Positions() {
   const rowWritable = useCallback((row: PositionRow): boolean => {
     const scope = writeScopeRef.current;
     return rowDepartmentWritable(row, {
-      writableDepartments: scope.writable,
+      writePolicy: scope.writable,
       planLocked: scope.planLocked,
     });
   }, []);
 
   /** What the Department picker may offer here. See `departmentPickList`. */
   const departmentPicks = useMemo(
-    () => departmentPickList(departments, planScope.ownership, planScope.scopeKind),
-    [departments, planScope.ownership, planScope.scopeKind]
+    () => departmentPickList(departments, planScope.ownership),
+    [departments, planScope.ownership]
   );
 
   /**
@@ -797,9 +799,7 @@ export default function Positions() {
     ou: selectedHotelOu,
     planId: scenario?.id ?? null,
     dirtyEntities: queueSnapshot.pendingRows,
-    departments: planScope.writableDepartments
-      ? [...planScope.writableDepartments]
-      : [],
+    departments: planScope.enumeratedWritable,
     lastLocalEditAt: null,
     // `/presence` is one of the routes a plan you cannot read refuses, and
     // there is nobody to warn anyway — presence exists so an owner knows that
@@ -1870,7 +1870,7 @@ export default function Positions() {
             blocks={blocks}
             blockResults={liveSim.results}
             masked={masked}
-            writableDepartments={planScope.writableDepartments}
+            writePolicy={planScope.writePolicy}
             departmentPicks={departmentPicks}
             planLocked={planScope.planLocked}
             lockReasonByDepartment={lockReasonByDepartment}
@@ -2018,7 +2018,7 @@ export default function Positions() {
           currentOu={selectedHotelOu}
           hotelNames={hotelNames}
           masked={masked}
-          writableDepartments={planScope.writableDepartments}
+          writePolicy={planScope.writePolicy}
           departmentPicks={departmentPicks}
           planLocked={planScope.planLocked}
           status={queueSnapshot.statusByRow.get(editRowId ?? "")}

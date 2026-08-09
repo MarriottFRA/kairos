@@ -28,6 +28,7 @@ import { AccountOption, DepartmentOption } from "../../shared/mappingTables/type
 import { AccountFilter } from "../../shared/positions/fields";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import type { DepartmentPickList } from "../../shared/positions/departmentPickList";
+import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { buildManualColumns, isRateLockedField, ManualViewMode } from "./columns";
 import { isRateDriven, ManualGridRow } from "./rowModel";
 
@@ -44,18 +45,19 @@ export interface ManualInputGridProps {
   apiRef?: ReturnType<typeof useGridApiRef>;
   loading?: boolean;
   /**
-   * Departments this user may write, straight from `/department-ownership`.
+   * What this user may write, derived from `/department-ownership` by
+   * `departmentWritePolicy`.
    *
    * `undefined` means "no server opinion" — an unpublished plan — and every
    * cell stays editable, which is how this page has always behaved. An empty
-   * set is the opposite and locks everything: see `rowDepartmentWritable`.
+   * allow-list is the opposite and locks everything: see `rowDepartmentWritable`.
    *
    * This page had no scope at all until now, and `manual_input_row` is a
    * department-scoped published type, so `filterToWriteScope` was quietly
    * dropping rows at publish for a department the typist did not hold. No
    * rejection, no warning — the rows simply were not there afterwards.
    */
-  writableDepartments?: ReadonlySet<string>;
+  writePolicy?: DepartmentWritePolicy;
   /** An administrator holds a support lease: the whole plan is read-only. */
   planLocked?: boolean;
   /** Persist an edited row; returns the row the grid keeps (post-sanitize). */
@@ -77,7 +79,7 @@ export default function ManualInputGrid({
   viewMode = "both",
   apiRef,
   loading = false,
-  writableDepartments,
+  writePolicy,
   planLocked,
   onRowUpdate,
   onRowUpdateError,
@@ -97,8 +99,8 @@ export default function ManualInputGrid({
 
   const rowWritable = useCallback(
     (row: ManualGridRow | undefined): boolean =>
-      rowDepartmentWritable(row, { writableDepartments, planLocked }),
-    [writableDepartments, planLocked]
+      rowDepartmentWritable(row, { writePolicy, planLocked }),
+    [writePolicy, planLocked]
   );
 
   // Two independent locks, checked in order of authority.

@@ -18,25 +18,30 @@
  *
  * ## Why an owner and a delegate need different rules
  *
- * `/department-ownership` lists only departments this caller can READ, and it is
- * not established whether that enumerates departments with no rows in them yet.
- * That matters in one direction only:
+ * `/department-ownership` lists only departments this caller can READ, and it
+ * enumerates only those that already have rows in the plan. That matters in one
+ * direction only:
  *
  * - For a **delegate** the answer is the whole point. They hold three
  *   departments out of thirty and should see three, not thirty.
- * - For an **owner** it would be a regression. Intersecting with ownership could
- *   make it impossible to assign a position to a department nobody has used yet,
+ * - For an **owner** it would be a regression. Intersecting with ownership makes
+ *   it impossible to assign a position to a department nobody has used yet,
  *   which is a normal thing to do when a hotel opens a new outlet.
  *
- * So a FULL scope starts from the reference data and only ever SUBTRACTS what
- * has been delegated away; a PARTIAL scope starts from what the server says it
- * holds. If the enumeration question is ever settled the two branches collapse
- * into one intersection.
+ * This module used to be the only place that knew that, and it hand-wrote the
+ * distinction as a FULL/PARTIAL branch. The grid's lock did not know it, so it
+ * refused what this offered — a picked department locked the row instantly, and
+ * the lock covered the picker, so there was no way back from a mis-click.
+ *
+ * The rule now lives in `departmentWritePolicy` and both read it: a full-scope
+ * owner gets an open ceiling with a deny-list, everyone else an allow-list. What
+ * is left here is presentation — which options to grey, and what to say on them.
  */
 
 import type { DepartmentOption } from "../mappingTables/types";
 import type { DepartmentOwnership } from "../kairosSync/protocol";
 import { lockReasonsByDepartment } from "../kairosSync/lockReason";
+import { canWriteDepartment, departmentWritePolicy } from "../kairosSync/writePolicy";
 
 export interface LockedDepartmentOption extends DepartmentOption {
   /** Why it cannot be chosen, in the words the grid's banner already uses. */
@@ -56,63 +61,34 @@ const UNRESTRICTED = (all: DepartmentOption[]): DepartmentPickList => ({
 
 export function departmentPickList(
   all: DepartmentOption[],
-  ownership: DepartmentOwnership | null | undefined,
-  scopeKind: "FULL" | "PARTIAL" | null
+  ownership: DepartmentOwnership | null | undefined
 ): DepartmentPickList {
   // No server opinion: an unpublished plan behaves exactly as it always has.
   if (!ownership) return UNRESTRICTED(all);
 
-  const writable = new Set<string>();
-  for (const row of ownership.departments) {
-    if (row.writable) writable.add(row.code);
-  }
+  const policy = departmentWritePolicy(ownership);
   // Readable-but-not-writable, worded for whoever is being refused: an owner
   // must not be told a department was "handed back to the owner". Derived by
   // `lockReasonsByDepartment` rather than here so the picker, the row menu and
   // the Delegation table cannot word the same reason three ways.
   const reasonByCode = lockReasonsByDepartment(ownership);
 
-  // A revoked delegate holds nothing. Everything they can still see is locked,
-  // and offering them a choice would be a lie about what a save would do.
-  if (writable.size === 0) {
-    return {
-      selectable: [],
-      locked: all
-        .filter((option) => reasonByCode.has(option.code))
-        .map((option) => ({
-          ...option,
-          reason: reasonByCode.get(option.code) as string,
-        })),
-    };
-  }
-
-  if (scopeKind === "PARTIAL") {
-    const selectable: DepartmentOption[] = [];
-    const locked: LockedDepartmentOption[] = [];
-    for (const option of all) {
-      if (writable.has(option.code)) {
-        selectable.push(option);
-      } else if (reasonByCode.has(option.code)) {
-        locked.push({ ...option, reason: reasonByCode.get(option.code) as string });
-      }
-      // Neither readable nor writable: not this delegate's business at all, and
-      // listing it would hand somebody scoped to one department the shape of the
-      // whole hotel.
-    }
-    return { selectable, locked };
-  }
-
-  // FULL, or an unknown scope kind treated as full. Reference data is the source
-  // of truth and ownership only subtracts — see the module note.
   const selectable: DepartmentOption[] = [];
   const locked: LockedDepartmentOption[] = [];
   for (const option of all) {
-    const reason = reasonByCode.get(option.code);
-    if (reason !== undefined && !writable.has(option.code)) {
-      locked.push({ ...option, reason });
-    } else {
+    if (canWriteDepartment(policy, option.code)) {
       selectable.push(option);
+      continue;
     }
+    const reason = reasonByCode.get(option.code);
+    // Refused, with a reason worth reading: greyed, never dropped. Refused and
+    // not even readable: omitted entirely, because listing it would hand
+    // somebody scoped to one department the shape of the whole hotel.
+    if (reason !== undefined) locked.push({ ...option, reason });
   }
+
+  // No early return for a revoked delegate: their `allow` is empty, so the loop
+  // above already refuses every option and greys the ones they can still read.
+  // The special case that used to be here said the same thing twice.
   return { selectable, locked };
 }

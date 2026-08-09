@@ -6,14 +6,20 @@
  * hands us that answer as `writable` on `/department-ownership`, where it IS the
  * write predicate, so the only way to be wrong here is to apply it wrongly.
  *
- * Three cases carry real consequences:
+ * Four cases carry real consequences:
  *
- * - **`undefined` means unrestricted.** A plan that was never published has no
- *   server-side authority to consult, and a hotel that never opts into sync must
- *   not notice this code exists.
- * - **An empty set means nothing is writable**, which is the opposite. Confusing
- *   the two either locks an offline hotel out of its own file or hands a
- *   revoked delegate a fully editable grid.
+ * - **No policy at all means unrestricted.** A plan that was never published has
+ *   no server-side authority to consult, and a hotel that never opts into sync
+ *   must not notice this code exists.
+ * - **An empty allow-list means nothing is writable**, which is the opposite.
+ *   Confusing the two either locks an offline hotel out of its own file or hands
+ *   a revoked delegate a fully editable grid.
+ * - **An unmentioned department is not a refused one.** `/department-ownership`
+ *   enumerates only departments that already have rows, so a full-scope owner
+ *   gets an open ceiling and a deny-list. Read as an allow-list it locked them
+ *   out of any department they had just opened — and, because the publish filter
+ *   read the same answer, the row was withheld, the department never gained
+ *   rows, and it was therefore never enumerated. See `departmentWritePolicy`.
  * - **A row with no department stays editable, and stays unpublishable.** The
  *   server routes department-less rows to the owner-only branch, and
  *   `filterToWriteScope` withholds them locally — but LOCKING them in the grid
@@ -32,6 +38,8 @@ import {
   cellEditable,
 } from "../../../components/positions/columnFactory";
 import { departmentUnassigned, rowDepartmentWritable } from "../writeScope";
+import { allowOnly, departmentWritePolicy } from "../../kairosSync/writePolicy";
+import type { DepartmentOwnership } from "../../kairosSync/protocol";
 
 const OU = "OU25RJ2";
 
@@ -85,13 +93,13 @@ describe("department write scope", () => {
 
   it("allows a department the user holds", () => {
     expect(
-      cellEditable(row("D0410"), column, ctx({ writableDepartments: new Set(["D0410"]) }))
+      cellEditable(row("D0410"), column, ctx({ writePolicy: allowOnly(["D0410"]) }))
     ).toBe(true);
   });
 
   it("locks a department the user does not hold", () => {
     expect(
-      cellEditable(row("D0610"), column, ctx({ writableDepartments: new Set(["D0410"]) }))
+      cellEditable(row("D0610"), column, ctx({ writePolicy: allowOnly(["D0410"]) }))
     ).toBe(false);
   });
 
@@ -101,7 +109,7 @@ describe("department write scope", () => {
     //
     // ACTIVE is the load-bearing word — see the next test.
     const asOwnerWithRoomsDelegated = ctx({
-      writableDepartments: new Set(["D0610", "D0710"]),
+      writePolicy: allowOnly(["D0610", "D0710"]),
     });
     expect(cellEditable(row("D0410"), column, asOwnerWithRoomsDelegated)).toBe(false);
     expect(cellEditable(row("D0610"), column, asOwnerWithRoomsDelegated)).toBe(true);
@@ -119,7 +127,7 @@ describe("department write scope", () => {
     // either direction — a client that unlocked on its own would produce edits
     // `filterToWriteScope` withholds at publish without a word.
     const afterHandback = ctx({
-      writableDepartments: new Set(["D0410", "D0610", "D0710"]),
+      writePolicy: allowOnly(["D0410", "D0610", "D0710"]),
     });
     expect(cellEditable(row("D0410"), column, afterHandback)).toBe(true);
   });
@@ -130,7 +138,7 @@ describe("department write scope", () => {
     // the grid, the row form, or a paste. It stays unpublishable either way;
     // `filterToWriteScope` is what enforces that, and it has not changed.
     expect(
-      cellEditable(row(""), column, ctx({ writableDepartments: new Set(["D0410"]) }))
+      cellEditable(row(""), column, ctx({ writePolicy: allowOnly(["D0410"]) }))
     ).toBe(true);
   });
 
@@ -138,7 +146,7 @@ describe("department write scope", () => {
     // A revoked delegate must not gain an editing surface out of the change
     // above. Nothing to assign it to means nothing to unlock.
     expect(
-      cellEditable(row(""), column, ctx({ writableDepartments: new Set<string>() }))
+      cellEditable(row(""), column, ctx({ writePolicy: allowOnly([]) }))
     ).toBe(false);
   });
 
@@ -147,7 +155,7 @@ describe("department write scope", () => {
       cellEditable(
         row(""),
         column,
-        ctx({ writableDepartments: new Set(["D0410"]), planLocked: true })
+        ctx({ writePolicy: allowOnly(["D0410"]), planLocked: true })
       )
     ).toBe(false);
   });
@@ -155,7 +163,7 @@ describe("department write scope", () => {
   it("locks everything when the set is empty", () => {
     // A revoked delegate. Emphatically NOT the same as undefined.
     expect(
-      cellEditable(row("D0410"), column, ctx({ writableDepartments: new Set<string>() }))
+      cellEditable(row("D0410"), column, ctx({ writePolicy: allowOnly([]) }))
     ).toBe(false);
   });
 
@@ -164,7 +172,7 @@ describe("department write scope", () => {
       cellEditable(
         row("D0410"),
         column,
-        ctx({ writableDepartments: new Set(["D0410"]), planLocked: true })
+        ctx({ writePolicy: allowOnly(["D0410"]), planLocked: true })
       )
     ).toBe(false);
   });
@@ -191,7 +199,7 @@ describe("department write scope", () => {
       cellEditable(
         row("D0410"),
         maskedColumn,
-        ctx({ masked: true, writableDepartments: new Set(["D0410"]) })
+        ctx({ masked: true, writePolicy: allowOnly(["D0410"]) })
       )
     ).toBe(false);
   });
@@ -199,7 +207,7 @@ describe("department write scope", () => {
   it("gives the same answer every time for the same row and context", () => {
     // The resolver caches per (context, row); a cache that answered differently
     // on the second call would make the grid flicker between editable and not.
-    const scope = ctx({ writableDepartments: new Set(["D0410"]) });
+    const scope = ctx({ writePolicy: allowOnly(["D0410"]) });
     const target = row("D0410");
     const other = row("D0610");
     for (let index = 0; index < 5; index += 1) {
@@ -211,8 +219,8 @@ describe("department write scope", () => {
   it("picks up a new answer when the context object changes", () => {
     // A revoked delegation must lock the grid on the next render, not at the
     // next remount — which works because a new ownership answer builds a new ctx.
-    const before = ctx({ writableDepartments: new Set(["D0410"]) });
-    const after = ctx({ writableDepartments: new Set<string>() });
+    const before = ctx({ writePolicy: allowOnly(["D0410"]) });
+    const after = ctx({ writePolicy: allowOnly([]) });
     const target = row("D0410");
 
     expect(cellEditable(target, column, before)).toBe(true);
@@ -224,7 +232,7 @@ describe("department write scope", () => {
  * The row form applies the same rules as the grid.
  *
  * `PositionFormDialog` builds its own `EditabilityContext` and calls the same
- * `cellEditable`. It used to omit `writableDepartments` and `planLocked`, which
+ * `cellEditable`. It used to omit `writePolicy` and `planLocked`, which
  * made it a hole straight through the lock: every field on a delegated row came
  * back editable and the form's commits went into the same write queue as the
  * grid's. These pin the two together — the point of sharing the predicate is
@@ -241,7 +249,7 @@ describe("the row form and the grid agree", () => {
       maskableKeys,
       hotelClusters: [],
       currentOu: OU,
-      writableDepartments: new Set(["D0410"]),
+      writePolicy: allowOnly(["D0410"]),
     };
     expect(cellEditable(row("D0410"), column, formCtx)).toBe(true);
     expect(cellEditable(row("D0610"), column, formCtx)).toBe(false);
@@ -253,7 +261,7 @@ describe("the row form and the grid agree", () => {
       maskableKeys,
       hotelClusters: [],
       currentOu: OU,
-      writableDepartments: new Set(["D0410"]),
+      writePolicy: allowOnly(["D0410"]),
       planLocked: true,
     };
     expect(cellEditable(row("D0410"), column, formCtx)).toBe(false);
@@ -286,11 +294,11 @@ describe("cellEditable and rowDepartmentWritable agree", () => {
 
   const scopes: Array<{ name: string; scope: Partial<EditabilityContext> }> = [
     { name: "never published", scope: {} },
-    { name: "holds one department", scope: { writableDepartments: new Set(["D0410"]) } },
-    { name: "revoked", scope: { writableDepartments: new Set<string>() } },
+    { name: "holds one department", scope: { writePolicy: allowOnly(["D0410"]) } },
+    { name: "revoked", scope: { writePolicy: allowOnly([]) } },
     {
       name: "held by an administrator",
-      scope: { writableDepartments: new Set(["D0410"]), planLocked: true },
+      scope: { writePolicy: allowOnly(["D0410"]), planLocked: true },
     },
   ];
 
@@ -306,6 +314,118 @@ describe("cellEditable and rowDepartmentWritable agree", () => {
   }
 });
 
+/**
+ * The owner's side, built from a real ownership body rather than a hand-written
+ * set — because the defect was never in the predicate, it was in what the
+ * caller handed it.
+ *
+ * The scenario, end to end: a hotel opens a new outlet. The owner picks its
+ * department on a position (the picker offers it — reference data is the source
+ * of truth for a full scope) and the row locks, picker included, so there is no
+ * way back from a mis-click. The publish filter reads the same answer and
+ * withholds the row silently, so the department never gains a row on the
+ * server, so it is never enumerated, so it is never writable.
+ */
+describe("a full-scope owner and a department the server has never mentioned", () => {
+  const column = anyEditableColumn();
+
+  function ownerOwnership(
+    rows: Array<{ code: string; readable: boolean; writable: boolean }>,
+    relation: "OWNER" | "DELEGATE" = "OWNER",
+    scopeKind: "FULL" | "PARTIAL" = "FULL"
+  ): DepartmentOwnership {
+    return {
+      planId: "plan-1",
+      planVersion: 42,
+      authzVersion: 7,
+      me: { relation, scopeKind },
+      structureEditableByMe: relation === "OWNER",
+      departments: rows.map(
+        (dept): DepartmentOwnership["departments"][number] => ({
+          ...dept,
+          reason: null,
+          assignedTo: [],
+        })
+      ),
+    };
+  }
+
+  /** Rooms delegated away, F&B theirs, Retail brand new and unmentioned. */
+  const owner = ctx({
+    writePolicy: departmentWritePolicy(
+      ownerOwnership([
+        { code: "D0410", readable: true, writable: false },
+        { code: "D0610", readable: true, writable: true },
+      ])
+    ),
+  });
+
+  it("keeps the row editable, so a mis-click can be undone", () => {
+    expect(cellEditable(row("D0910"), column, owner)).toBe(true);
+  });
+
+  it("still locks the department it delegated away", () => {
+    // The half that must NOT move. An explicit `writable: false` is a refusal,
+    // and the owner's route back is to withdraw the delegation.
+    expect(cellEditable(row("D0410"), column, owner)).toBe(false);
+    expect(cellEditable(row("D0610"), column, owner)).toBe(true);
+  });
+
+  it("locks the same unmentioned department for a DELEGATE", () => {
+    // The open ceiling is gated on the relation too. A delegate holding every
+    // enumerated department is still on an allow-list.
+    const delegate = ctx({
+      writePolicy: departmentWritePolicy(
+        ownerOwnership([{ code: "D0610", readable: true, writable: true }], "DELEGATE")
+      ),
+    });
+    expect(cellEditable(row("D0910"), column, delegate)).toBe(false);
+    expect(cellEditable(row("D0610"), column, delegate)).toBe(true);
+  });
+
+  it("locks it for an owner whose own scope is PARTIAL", () => {
+    // A partial-scope owner really is bounded by their own department grant, so
+    // the widening must not reach them either.
+    const partialOwner = ctx({
+      writePolicy: departmentWritePolicy(
+        ownerOwnership(
+          [{ code: "D0610", readable: true, writable: true }],
+          "OWNER",
+          "PARTIAL"
+        )
+      ),
+    });
+    expect(cellEditable(row("D0910"), column, partialOwner)).toBe(false);
+  });
+
+  it("lets an owner who delegated everything away still start a new row", () => {
+    // `holdsAnyDepartment` is what the unassigned-row rule asks, and the old
+    // `size > 0` test answered no here — leaving the owner of a fully delegated
+    // plan unable to create the row that would open a sixth department.
+    const allDelegated = ctx({
+      writePolicy: departmentWritePolicy(
+        ownerOwnership([
+          { code: "D0410", readable: true, writable: false },
+          { code: "D0610", readable: true, writable: false },
+        ])
+      ),
+    });
+    expect(cellEditable(row(""), column, allDelegated)).toBe(true);
+    expect(cellEditable(row("D0910"), column, allDelegated)).toBe(true);
+    expect(cellEditable(row("D0410"), column, allDelegated)).toBe(false);
+  });
+
+  it("is still stopped by a support lease", () => {
+    const leased = ctx({
+      writePolicy: departmentWritePolicy(
+        ownerOwnership([{ code: "D0610", readable: true, writable: true }])
+      ),
+      planLocked: true,
+    });
+    expect(cellEditable(row("D0910"), column, leased)).toBe(false);
+  });
+});
+
 describe("departmentUnassigned", () => {
   it("is false with no scope — an unpublished plan has no owner-only branch", () => {
     expect(departmentUnassigned(row(""), {})).toBe(false);
@@ -313,13 +433,13 @@ describe("departmentUnassigned", () => {
 
   it("is true for a blank department once a scope exists", () => {
     expect(
-      departmentUnassigned(row(""), { writableDepartments: new Set(["D0410"]) })
+      departmentUnassigned(row(""), { writePolicy: allowOnly(["D0410"]) })
     ).toBe(true);
   });
 
   it("is false once the row has been classified", () => {
     expect(
-      departmentUnassigned(row("D0410"), { writableDepartments: new Set(["D0410"]) })
+      departmentUnassigned(row("D0410"), { writePolicy: allowOnly(["D0410"]) })
     ).toBe(false);
   });
 });
