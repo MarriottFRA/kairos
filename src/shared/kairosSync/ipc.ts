@@ -30,6 +30,8 @@ import {
   KpiSeriesRequest,
   KpiSeriesResponse,
   LeaseResponse,
+  MyDelegation,
+  MyDelegationList,
   PartialOverlapContext,
   PiiSummary,
   PlanHead,
@@ -39,6 +41,7 @@ import {
   UnsyncedWorkContext,
   WriteScopeKind,
 } from "./protocol";
+import { PlanDelegationSummary } from "./delegationSummary";
 import { StructureChange } from "./structureDoc";
 
 export const KAIROS_SYNC_CHANNELS = {
@@ -92,6 +95,8 @@ export const KAIROS_SYNC_CHANNELS = {
    *  unpublished work and 409s unless forced. */
   handBackAll: "kairosSync:handBackAll",
   reopenDepartment: "kairosSync:reopenDepartment",
+  /** My unpublished rows by department. Local read, no network. */
+  pendingByDepartment: "kairosSync:pendingByDepartment",
   presence: "kairosSync:presence",
   activity: "kairosSync:activity",
 
@@ -227,6 +232,21 @@ export interface PlanSyncStatus {
   /** false → a demoted owner: hide the blocks/allocations/KPI/SS editors. */
   structureEditable: boolean;
   handbacksPending: number;
+  /**
+   * Who holds what, from the LAST `/department-ownership` answer.
+   *
+   * Derived in the status handler from the cache it already reads for
+   * `writeScope`, so this costs no request. `stale: true` means that call has
+   * never run for this plan; see `PlanDelegationSummary`.
+   *
+   * Deliberately carries no timestamp. `/department-ownership` reports who holds
+   * a department and in what state, and nothing about when it moved —
+   * `handedBackAt` lives on `Delegation.departments[]`, which only an owner can
+   * fetch. A guessed time here would be the one fact on the card that could be
+   * wrong, so the Sync page says who and which, and the Delegation page says
+   * when.
+   */
+  delegation: PlanDelegationSummary | null;
   lastPublishedAt: string | null;
   lastPulledAt: string | null;
   /** Rows changed locally since the last publish. Drives the Publish button. */
@@ -330,6 +350,63 @@ export interface PullPreview {
   collides: number;
   /** Departments the colliding rows are in, for naming them. */
   collidingDepartments: string[];
+  /**
+   * Incoming rows by department — WHERE the download lands, not just how much.
+   *
+   * The question an owner collecting a delegate's finished work is actually
+   * asking. Rows with no department are counted under `UNCLASSIFIED_DEPARTMENT`
+   * rather than dropped, so the breakdown always sums to `total`; a list that
+   * silently does not add up is worse than no list.
+   */
+  byDepartment: Record<string, number>;
+  deletedByDepartment: Record<string, number>;
+}
+
+/**
+ * The bucket for rows that carry no department of their own.
+ *
+ * The plan's own row, engine metadata, and the PII sidecar — which inherits its
+ * parent's department server-side and does not carry one on the wire. The
+ * parentheses cannot collide with a real department code.
+ */
+export const UNCLASSIFIED_DEPARTMENT = "(none)";
+
+/**
+ * The error codes the RENDERER branches on.
+ *
+ * The full list lives in `main/kairosSync/client.ts`, beside the HTTP layer that
+ * raises them — and that module reaches the network, so the renderer cannot
+ * import it. This is the handful a screen actually makes a decision about,
+ * restated where a screen can see them.
+ *
+ * Anything currently matched by a bare string literal in a component belongs
+ * here instead. A literal is what lets a typo in a 409 handler fall through to a
+ * generic error toast, and the 409s on this surface are the ones carrying the
+ * context the user is supposed to read.
+ */
+export const SYNC_ERROR_CODES = {
+  HANDBACK_WITH_UNSYNCED_WORK: "kairos_handback_with_unsynced_work",
+  DELEGATE_HAS_UNSYNCED_WORK: "kairos_delegate_has_unsynced_work",
+  DELEGATION_PARTIAL_OVERLAP: "kairos_delegation_partial_overlap",
+  DELEGATION_REVOKED: "kairos_delegation_revoked",
+  PLAN_NOT_SHARED: "kairos_plan_not_shared",
+  STRUCTURE_PRECONDITION: "kairos_structure_precondition",
+  WRITE_SCOPE_EMPTY: "kairos_write_scope_empty",
+} as const;
+
+/**
+ * My unpublished rows, by department.
+ *
+ * Answers the one question a handback has to ask and the server does not:
+ * "does giving this department back strand anything of mine?" Computed from the
+ * local store with the same hash refinement `pendingChanges` uses, so the two
+ * can never disagree — and with no network, so a delegate on a train still gets
+ * a straight answer.
+ */
+export interface PendingByDepartment {
+  planId: string;
+  byDepartment: Record<string, number>;
+  total: number;
 }
 
 export interface PublishPreviewResponse {
@@ -341,6 +418,21 @@ export interface PublishPreviewResponse {
   withheld: Array<{ entityType: string; entityId: string; department: string | null }>;
   /** Rows with no department: owner-only, and never delegatable. */
   unclassified: Array<{ entityType: string; entityId: string }>;
+  localProblems: LocalProblem[];
+}
+
+/**
+ * A row this computer could not publish because the row itself is broken.
+ *
+ * Kept apart from `rejected` on purpose. A rejection is the server declining
+ * something you asked for; this is a leftover here that nothing on the server
+ * could ever have matched, and presenting the two the same way is what made an
+ * ordinary publish read as a permission failure.
+ */
+export interface LocalProblem {
+  entityType: string;
+  reason: "EMPTY_KEY" | "ORPHANED_LOCALLY";
+  count: number;
 }
 
 export interface PublishResponse {
@@ -354,6 +446,19 @@ export interface PublishResponse {
   rejected: CommitRejection[];
   withheld: number;
   purged: number;
+  localProblems: LocalProblem[];
+  /**
+   * What the server currently thinks this caller is, and whether they may write
+   * the hotel's structure.
+   *
+   * Both exist so the result alert can tell "you need to do something" apart
+   * from "the app sent something only an owner may send". A reason code this
+   * caller's role could not have caused is counted, never explained — accusing
+   * somebody of a rejection they had no way to cause sends them to their
+   * administrator over a working system.
+   */
+  relation: Relation | null;
+  structureEditable: boolean;
   noop: boolean;
 }
 
@@ -361,7 +466,25 @@ export interface StructureDiffResponse {
   ou: string;
   /** null when the property has published nothing — keep the local copy. */
   serverVersion: number | null;
+  /**
+   * Whether the hotel has EVER published its setup.
+   *
+   * Distinct from an empty diff. A hotel with nothing on the server has nothing
+   * to differ FROM, so both lists come back empty and the card would otherwise
+   * claim the local setup matches a copy that does not exist.
+   */
+  published: boolean;
+  /** What downloading the hotel's setup would change here. */
   changes: StructureChange[];
+  /**
+   * What publishing this machine's setup would change for everybody else.
+   *
+   * Publishing sends the WHOLE local document, so this is the only place the
+   * blast radius is visible before the button is pressed — and it is a hotel-
+   * wide one: every plan at the property renders through these columns and
+   * blocks.
+   */
+  outgoing: StructureChange[];
   notModified: boolean;
 }
 
@@ -466,7 +589,10 @@ export type {
   DepartmentOwnership,
   KpiSeriesResponse,
   LeaseResponse,
+  MyDelegation,
+  MyDelegationList,
   PiiSummary,
+  PlanDelegationSummary,
   PlanSummary,
   ScopeReport,
   StructureChange,

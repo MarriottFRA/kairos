@@ -62,6 +62,7 @@ import UndoIcon from "@mui/icons-material/Undo";
 import { BlockDto } from "../../shared/blocks/ipc";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
 import { FieldCatalog, FieldDef } from "../../shared/positions/fields";
 import { BlockResultsById } from "../../shared/positions/liveSim";
@@ -136,6 +137,8 @@ export interface PositionFormDialogProps {
   blocks: BlockDto[];
   blockResults: BlockResultsById | null;
   departments: DepartmentOption[];
+  /** Which of them may be chosen. Omit for no restriction. */
+  departmentPicks?: DepartmentPickList;
   accounts: AccountOption[];
   vacationCostById: ReadonlyMap<string, number>;
   manhoursWorkedById: ReadonlyMap<string, number>;
@@ -175,6 +178,7 @@ export default function PositionFormDialog({
   blocks,
   blockResults,
   departments,
+  departmentPicks,
   accounts,
   vacationCostById,
   manhoursWorkedById,
@@ -217,6 +221,7 @@ export default function PositionFormDialog({
       masked,
       numberFormat: new Intl.NumberFormat(),
       departments,
+      departmentPicks,
       accounts,
       vacationCostById,
       manhoursWorkedById,
@@ -243,6 +248,7 @@ export default function PositionFormDialog({
     blockResults,
     masked,
     departments,
+    departmentPicks,
     accounts,
     vacationCostById,
     manhoursWorkedById,
@@ -552,6 +558,7 @@ export default function PositionFormDialog({
           dense={options?.dense}
           action={options?.action}
           departments={departments}
+          departmentPicks={departmentPicks}
           accounts={accounts}
           onCommit={commit}
         />

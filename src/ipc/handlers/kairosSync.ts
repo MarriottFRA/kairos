@@ -54,6 +54,7 @@ import {
 } from "../../main/kairosSync/repo";
 import { purgeScenario } from "../../main/maintenance/cleanupRepo";
 import {
+  normalizeDepartment,
   PublishedEntityType,
   Row,
   toEntity,
@@ -61,11 +62,14 @@ import {
 import { WriteScope } from "../../main/kairosSync/collect";
 import {
   KAIROS_SYNC_CHANNELS,
+  PendingByDepartment,
   PlanSyncStatus,
   SyncError,
   SyncOutcome,
   SyncStatusResponse,
+  UNCLASSIFIED_DEPARTMENT,
 } from "../../shared/kairosSync/ipc";
+import { delegationSummary } from "../../shared/kairosSync/delegationSummary";
 import {
   BundleOptions,
   DelegationCreate,
@@ -237,11 +241,23 @@ function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
       : null;
 
   return {
-    // OWNER_DEGRADED keeps its departments but loses structure — exactly the
-    // distinction this flag exists for. GLOBAL_ADMIN writes nothing at all.
-    canWriteStructure: ownership
-      ? ownership.structureEditableByMe
-      : canWriteStructure(relation),
+    /**
+     * AND, not "cache if present, capability otherwise".
+     *
+     * A cached ownership body may TAKE structure rights away from an owner — a
+     * demotion is exactly what `structureEditableByMe: false` reports — but it
+     * must never hand them to a relation the server's own matrix gives none to,
+     * and neither may the no-cache fallback. Written as a conjunction, a
+     * DELEGATE resolves false however stale or absent the cache is, while a
+     * genuine owner publishing a brand-new plan (nothing cached yet, and the
+     * `scenario` row is the first thing that has to go up) still resolves true.
+     *
+     * OWNER_DEGRADED keeps its departments and loses structure, which is the
+     * distinction this flag exists for. GLOBAL_ADMIN writes nothing at all.
+     */
+    canWriteStructure:
+      (ownership ? ownership.structureEditableByMe : true) &&
+      canWriteStructure(relation),
     departments: departments == null ? null : new Set(departments),
   };
 }
@@ -534,8 +550,33 @@ export function createKairosSyncHandlers(
           const frozenLocalHeads = (heads?.plans ?? []).filter(
             (head) => localIds.has(head.id) && !canRead(head.relation)
           );
+          /**
+           * A plan held here that somebody else owns.
+           *
+           * A delegate's copy, in other words. `GET /plans` is the only place
+           * the owner's address lives, and it is the one fact that turns every
+           * "ask the plan's owner" sentence in the app from advice into an
+           * action — the Delegation page header, the read-only setup card, the
+           * refusal on a structure edit. Cheap: one listing per property, and
+           * only where such a plan exists.
+           */
+          const nonOwnedLocal = scenarios.some((scenario) => {
+            const relation = (headById.get(scenario.id)?.relation ??
+              states.get(scenario.id)?.relation ??
+              null) as Relation | null;
+            return (
+              relation !== null &&
+              relation !== "OWNER" &&
+              relation !== "OWNER_DEGRADED"
+            );
+          });
           let remoteSummaries: PlanSummary[] = [];
-          if (missingHeads.length > 0 || frozenLocalHeads.length > 0 || removed.length > 0) {
+          if (
+            missingHeads.length > 0 ||
+            frozenLocalHeads.length > 0 ||
+            removed.length > 0 ||
+            nonOwnedLocal
+          ) {
             try {
               remoteSummaries = await plansApi.listPlans(client, scope.ou);
             } catch {
@@ -574,6 +615,7 @@ export function createKairosSyncHandlers(
             const head = headById.get(scenario.id);
             const state = states.get(scenario.id);
             const relation = (head?.relation ?? state?.relation ?? null) as Relation | null;
+            const ownership = cachedOwnership(scenario.id);
             const twinPlanId =
               head === undefined && state === undefined
                 ? remoteByName.get(nameKey(scenario.year, scenario.label)) ?? null
@@ -597,21 +639,26 @@ export function createKairosSyncHandlers(
                 | "PARTIAL"
                 | null,
               departments: head?.departments ?? state?.scopeDepartments ?? null,
-              writeScope: writeScopeKindFor(relation, cachedOwnership(scenario.id)),
+              writeScope: writeScopeKindFor(relation, ownership),
               structureEditable: state?.structureEditable ?? false,
               handbacksPending: head?.handbacksPending ?? 0,
+              // Free: `cachedOwnership` was already read for `writeScope` above.
+              delegation: delegationSummary(ownership),
               lastPublishedAt: state?.lastPublishedAt ?? null,
               lastPulledAt: state?.lastPulledAt ?? null,
               pendingChanges: pendingCount(scenario.id, scope.ou),
               revoked: state?.revokedJson ? JSON.parse(state.revokedJson) : null,
               onThisComputer: true,
-              // Normally null — a plan on this computer is yours, and printing
-              // your own address back at you is noise. A frozen copy is the
-              // exception: naming the owner is the only actionable thing left
-              // to say about it.
-              ownerEmail: canRead(relation)
-                ? null
-                : summaryById.get(scenario.id)?.ownerEmail ?? null,
+              // Null only for an owner: printing your own address back at you
+              // is noise. Everybody else needs it — a delegate's Delegation
+              // page header names who to ask, the read-only setup card names
+              // who can publish it, and a frozen copy names who could restore
+              // it. Gating this on `canRead` withheld it from exactly the
+              // people the address exists for.
+              ownerEmail:
+                relation === "OWNER" || relation === "OWNER_DEGRADED"
+                  ? null
+                  : summaryById.get(scenario.id)?.ownerEmail ?? null,
               serverRows: 0,
               // Only meaningful while this copy is unpublished: once it has its
               // own plan on the server, the same name elsewhere is a coincidence.
@@ -649,6 +696,9 @@ export function createKairosSyncHandlers(
               writeScope: readable ? "UNKNOWN" : "NONE",
               structureEditable: false,
               handbacksPending: head.handbacksPending,
+              // Nothing local, so nothing has ever asked `/department-ownership`
+              // about it. `stale`, not empty — see `delegationSummary`.
+              delegation: null,
               lastPublishedAt: null,
               lastPulledAt: state?.lastPulledAt ?? null,
               pendingChanges: 0,
@@ -761,6 +811,7 @@ export function createKairosSyncHandlers(
               entityType: entity.entityType,
               entityId: entity.entityId,
             })),
+            localProblems: preview.localProblems,
           };
         }, request.planId)
       );
@@ -1023,6 +1074,25 @@ export function createKairosSyncHandlers(
             request.departmentCode,
             request.reason
           );
+        })
+      ),
+
+    // Local only — no client call at all, so it works offline, which is the
+    // point: the handback confirmation that depends on it must not be the thing
+    // that fails when the network does.
+    [KAIROS_SYNC_CHANNELS.pendingByDepartment]: async (
+      _event,
+      request: { ou: string; planId: string }
+    ) =>
+      envelope(
+        await attempt((): PendingByDepartment => {
+          const scope = resolveOuScope(request.ou);
+          const byDepartment = pendingByDepartment(request.planId, scope.ou);
+          return {
+            planId: request.planId,
+            byDepartment,
+            total: Object.values(byDepartment).reduce((sum, n) => sum + n, 0),
+          };
         })
       ),
 
@@ -1551,6 +1621,13 @@ export function createKairosSyncHandlers(
       rejected: result.rejected,
       withheld: result.withheld,
       purged: result.purged,
+      localProblems: result.localProblems,
+      // Both carried so the result alert can tell "you did something wrong"
+      // apart from "the app sent something only an owner may send". A reason
+      // code this caller's role could not have caused is counted, never
+      // explained — see PublishResultAlert.
+      relation: (head?.relation ?? null) as Relation | null,
+      structureEditable: writeScope.canWriteStructure,
       noop: result.noop,
     };
   }
@@ -1712,6 +1789,8 @@ export function createKairosSyncHandlers(
       scope: result.scope,
       byType: result.summary.byType,
       deletedByType: result.summary.deletedByType,
+      byDepartment: result.summary.byDepartment,
+      deletedByDepartment: result.summary.deletedByDepartment,
       total: result.summary.total,
       deleted: result.summary.deleted,
       skippedTypes: result.skippedTypes,
@@ -1728,7 +1807,9 @@ export function createKairosSyncHandlers(
     return {
       ou: scope.ou,
       serverVersion: result.document?.structureVersion ?? null,
+      published: result.published,
       changes: result.changes,
+      outgoing: result.outgoing,
       notModified: result.notModified,
       applied: result.applied,
     };
@@ -1872,6 +1953,79 @@ function pendingEntityKeys(planId: string, ou: string): ReadonlySet<string> {
     }
   }
   return keys;
+}
+
+/**
+ * WHICH departments my unpublished rows are in, and how many in each.
+ *
+ * Answers the question a handback has to ask and the server does not: giving
+ * ROOMS back removes it from my write scope, so anything of mine still sitting
+ * in ROOMS becomes unpublishable the moment I press the button. The single
+ * department handback route deliberately does not check this (handing back one
+ * of five with four still open is routine), so the client has to.
+ *
+ * The same two-stage comparison as `pendingCount` — candidates by timestamp,
+ * then hashed against the shadow — so this cannot disagree with the number on
+ * the card. Always hashed, no `PENDING_REFINE_LIMIT` ceiling, for the same
+ * reason `pendingEntityKeys` has none: the answer is consumed by a confirmation
+ * somebody is waiting on, and under-reporting is the one direction it must
+ * never err in.
+ *
+ * Local read, no network. A delegate deciding whether to publish before handing
+ * back may well be on a train.
+ */
+function pendingByDepartment(planId: string, ou: string): Record<string, number> {
+  const db = secureDb();
+  const byDepartment: Record<string, number> = {};
+
+  for (const source of PENDING_SOURCES) {
+    const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
+    if (rows.length === 0) continue;
+
+    /**
+     * `component_value` is the one that needs a join.
+     *
+     * Its `departmentOf` returns null (entityMap.ts) because the server infers
+     * the department from the parent position and a second copy on the wire
+     * would be a second source of truth for an authorization input. True there,
+     * useless here — the question being asked is "does handing ROOMS back
+     * strand anything of mine?", and the answer lives on the parent.
+     *
+     * Built once per type rather than joined in SQL: the candidate set is small,
+     * and the positions map is usually already needed for the position pass.
+     */
+    const parentDepartments =
+      source.entityType === "component_value"
+        ? new Map(
+            (
+              prepared(
+                db,
+                `SELECT id, department_code FROM positions WHERE ou = ? AND scenario_id = ?`
+              ).all(ou, planId) as Row[]
+            ).map((row) => [String(row.id), normalizeDepartment(row.department_code)])
+          )
+        : null;
+
+    for (const row of rows) {
+      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const known = getShadow(db, planId, source.entityType, mapped.entityId);
+      const changed =
+        !known ||
+        known.hash !== contentHash(mapped.payload) ||
+        known.deleted !== mapped.deleted;
+      if (!changed) continue;
+
+      const department =
+        mapped.department ??
+        (mapped.parentId !== null
+          ? parentDepartments?.get(mapped.parentId) ?? null
+          : null);
+      const key = department ?? UNCLASSIFIED_DEPARTMENT;
+      byDepartment[key] = (byDepartment[key] ?? 0) + 1;
+    }
+  }
+
+  return byDepartment;
 }
 
 function pendingCount(planId: string, ou: string): number {

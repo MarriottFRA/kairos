@@ -111,23 +111,69 @@ function rowsFor(
   return prepared(db, sql).all(...(args as never[])) as Row[];
 }
 
+/** Why a local row can never be published, whoever is publishing it. */
+export type UnpublishableReason = "EMPTY_KEY" | "ORPHANED_LOCALLY";
+
+/**
+ * A row that is broken here rather than refused there.
+ *
+ * The distinction is the whole point of the type. The server answers these with
+ * `PII_KEY_MISMATCH` or `MISSING_PAYLOAD`, which the Sync page renders as a
+ * refusal — and a refusal reads as "the server does not trust you", when the
+ * truth is a leftover on this computer that nothing on the server could ever
+ * have matched.
+ */
+export interface UnpublishableRow {
+  entityType: PublishedEntityType;
+  entityId: string;
+  parentId: string | null;
+  reason: UnpublishableReason;
+}
+
+export interface CollectResult {
+  entities: LocalEntity[];
+  /** Never sent. Reported so the user can be told, not so they can retry. */
+  unpublishable: UnpublishableRow[];
+}
+
+/**
+ * Plan-wide by construction, not by a missing department code.
+ *
+ * `scenario` and `engine_run` have `departmentOf: () => null` in `ENTITY_SPECS`:
+ * they are the plan's own rows and there is no department that could ever
+ * authorise them. Deciding this on the TYPE rather than on `department === null`
+ * matters, because the write scope can err wide — `writeScopeFor` falls back to
+ * the relation's capability when `/department-ownership` has never been cached —
+ * and a wide scope must still not put a delegate's name on the plan row. That
+ * combination is where the wall of `STRUCTURE_OWNER_ONLY` came from.
+ */
+export const PLAN_WIDE_ENTITY_TYPES: ReadonlySet<PublishedEntityType> = new Set([
+  "scenario",
+  "engine_run",
+]);
+
 /**
  * Every publishable row of a plan, mapped, hashed, and in dependency order.
  *
  * Inherited rows get their department filled in from their parent position, so
  * the write-scope filter downstream can decide about them without a join. The
  * server derives the same value independently and does not read ours.
+ *
+ * Two classes of row are dropped here rather than sent and refused. Both are
+ * local damage, and both used to reach the server looking like a permission
+ * problem — see `UnpublishableRow`.
  */
 export function collectLocalEntities(
   deps: CollectDeps,
   options: CollectOptions
-): LocalEntity[] {
+): CollectResult {
   const { ou, planId } = options;
   const includePii = options.includePii !== false;
 
   // Parent department lookup, built once from the positions pass.
   const departmentByPosition = new Map<string, string | null>();
   const out: LocalEntity[] = [];
+  const unpublishable: UnpublishableRow[] = [];
 
   for (const entityType of PUBLISH_ORDER) {
     if (entityType === "position_pii" && !includePii) continue;
@@ -137,10 +183,50 @@ export function collectLocalEntities(
       if (entityType === "position") {
         departmentByPosition.set(mapped.entityId, mapped.department);
       }
-      const department =
-        mapped.parentId !== null
-          ? departmentByPosition.get(mapped.parentId) ?? null
-          : mapped.department;
+
+      /**
+       * An id the server cannot key on.
+       *
+       * `str()` in `entityMap` turns a NULL column into `""`, so this is what a
+       * `position_pii` row with a null `position_id` actually looks like by the
+       * time it gets here — and since its id and its parent id are the same
+       * expression, both come out empty and the row reads as plan-wide.
+       */
+      if (mapped.entityId === "") {
+        unpublishable.push({
+          entityType,
+          entityId: mapped.entityId,
+          parentId: mapped.parentId,
+          reason: "EMPTY_KEY",
+        });
+        continue;
+      }
+
+      const inherited = INHERITED_ENTITY_TYPES.has(entityType);
+      if (inherited) {
+        /**
+         * `has`, not `get(...) ?? null`.
+         *
+         * An ABSENT parent and a parent with NO department are opposite
+         * situations, and collapsing them to `null` classified an orphan as
+         * plan-wide — the second half of the same bug. `PUBLISH_ORDER`
+         * guarantees positions have already been walked, so a miss here really
+         * does mean the parent is gone.
+         */
+        if (mapped.parentId === null || !departmentByPosition.has(mapped.parentId)) {
+          unpublishable.push({
+            entityType,
+            entityId: mapped.entityId,
+            parentId: mapped.parentId,
+            reason: "ORPHANED_LOCALLY",
+          });
+          continue;
+        }
+      }
+
+      const department = inherited
+        ? departmentByPosition.get(mapped.parentId as string) ?? null
+        : mapped.department;
 
       out.push({
         entityType,
@@ -155,7 +241,7 @@ export function collectLocalEntities(
     }
   }
 
-  return out;
+  return { entities: out, unpublishable };
 }
 
 /** What a caller may write. `null` departments means all of them. */
@@ -183,8 +269,10 @@ export function filterToWriteScope(
   const withheld: LocalEntity[] = [];
 
   for (const entity of entities) {
-    const allowed =
-      entity.department === null
+    const allowed = PLAN_WIDE_ENTITY_TYPES.has(entity.entityType)
+      ? // The type decides, not the department code. See PLAN_WIDE_ENTITY_TYPES.
+        scope.canWriteStructure
+      : entity.department === null
         ? scope.canWriteStructure
         : scope.departments === null || scope.departments.has(entity.department);
     (allowed ? publishable : withheld).push(entity);

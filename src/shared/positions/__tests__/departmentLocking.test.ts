@@ -14,9 +14,12 @@
  * - **An empty set means nothing is writable**, which is the opposite. Confusing
  *   the two either locks an offline hotel out of its own file or hands a
  *   revoked delegate a fully editable grid.
- * - **A row with no department is locked for a delegate.** The server routes
- *   department-less rows to the owner-only branch, so letting a delegate type
- *   into them produces edits that come back DEPARTMENT_UNASSIGNED at save time.
+ * - **A row with no department stays editable, and stays unpublishable.** The
+ *   server routes department-less rows to the owner-only branch, and
+ *   `filterToWriteScope` withholds them locally — but LOCKING them in the grid
+ *   meant a delegate could not give a row they had just created a department at
+ *   all, because the lock covered the picker. The publish rule is unchanged;
+ *   only the editor's.
  */
 
 import { describe, expect, it } from "vitest";
@@ -28,6 +31,7 @@ import {
   buildColumns,
   cellEditable,
 } from "../../../components/positions/columnFactory";
+import { departmentUnassigned, rowDepartmentWritable } from "../writeScope";
 
 const OU = "OU25RJ2";
 
@@ -101,9 +105,31 @@ describe("department write scope", () => {
     expect(cellEditable(row("D0610"), column, asOwnerWithRoomsDelegated)).toBe(true);
   });
 
-  it("locks a row with no department once a scope exists", () => {
+  it("leaves a row with no department editable so a delegate can give it one", () => {
+    // Deliberately inverted. Locking it covered the department picker itself, so
+    // a row a delegate had just created could never be classified — not through
+    // the grid, the row form, or a paste. It stays unpublishable either way;
+    // `filterToWriteScope` is what enforces that, and it has not changed.
     expect(
       cellEditable(row(""), column, ctx({ writableDepartments: new Set(["D0410"]) }))
+    ).toBe(true);
+  });
+
+  it("still locks an unassigned row when the writable set is empty", () => {
+    // A revoked delegate must not gain an editing surface out of the change
+    // above. Nothing to assign it to means nothing to unlock.
+    expect(
+      cellEditable(row(""), column, ctx({ writableDepartments: new Set<string>() }))
+    ).toBe(false);
+  });
+
+  it("still locks an unassigned row while an administrator holds the plan", () => {
+    expect(
+      cellEditable(
+        row(""),
+        column,
+        ctx({ writableDepartments: new Set(["D0410"]), planLocked: true })
+      )
     ).toBe(false);
   });
 
@@ -225,5 +251,56 @@ describe("the row form and the grid agree", () => {
     };
     expect(cellEditable(row(""), column, formCtx)).toBe(true);
     expect(cellEditable(row("D0610"), column, formCtx)).toBe(true);
+  });
+});
+
+/**
+ * One predicate, three callers.
+ *
+ * The rule used to be written out three times — the cell resolver, the row-menu
+ * guard, and the save backstop — which is three chances for the grid to offer an
+ * edit the save then refuses. They all call `rowDepartmentWritable` now, and
+ * this asserts the two remaining entry points cannot drift apart again.
+ */
+describe("cellEditable and rowDepartmentWritable agree", () => {
+  const column = anyEditableColumn();
+
+  const scopes: Array<{ name: string; scope: Partial<EditabilityContext> }> = [
+    { name: "never published", scope: {} },
+    { name: "holds one department", scope: { writableDepartments: new Set(["D0410"]) } },
+    { name: "revoked", scope: { writableDepartments: new Set<string>() } },
+    {
+      name: "held by an administrator",
+      scope: { writableDepartments: new Set(["D0410"]), planLocked: true },
+    },
+  ];
+
+  for (const { name, scope } of scopes) {
+    it(`gives the same answer when ${name}`, () => {
+      for (const code of ["D0410", "D0610", ""]) {
+        const target = row(code);
+        expect(cellEditable(target, column, ctx(scope))).toBe(
+          rowDepartmentWritable(target, scope)
+        );
+      }
+    });
+  }
+});
+
+describe("departmentUnassigned", () => {
+  it("is false with no scope — an unpublished plan has no owner-only branch", () => {
+    expect(departmentUnassigned(row(""), {})).toBe(false);
+  });
+
+  it("is true for a blank department once a scope exists", () => {
+    expect(
+      departmentUnassigned(row(""), { writableDepartments: new Set(["D0410"]) })
+    ).toBe(true);
+  });
+
+  it("is false once the row has been classified", () => {
+    expect(
+      departmentUnassigned(row("D0410"), { writableDepartments: new Set(["D0410"]) })
+    ).toBe(false);
   });
 });

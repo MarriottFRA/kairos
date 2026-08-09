@@ -43,7 +43,6 @@ import {
 import {
   COLLAPSIBLE_MONTH_FAMILIES,
   collapsibleMonthKeys,
-  DEPARTMENT_CODE_KEY,
   FieldCatalog,
   SectionId,
   vectorKey,
@@ -54,6 +53,11 @@ import { clusterMapById } from "../../shared/hotelClusters/resolve";
 import { BlockDto } from "../../shared/blocks/ipc";
 import { BlockResultsById } from "../../shared/positions/liveSim";
 import { PositionRow } from "../../shared/positions/rowModel";
+import {
+  departmentUnassigned,
+  rowDepartmentWritable,
+} from "../../shared/positions/writeScope";
+import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
 import {
   buildColumnGroupingModel,
@@ -95,7 +99,8 @@ const NO_QUICK_FILTER: string[] = [];
  * render would defeat the grid's own memoisation of the prop.
  */
 function rowClassNameFor(
-  locked: (row: PositionRow) => boolean
+  locked: (row: PositionRow) => boolean,
+  needsDepartment: (row: PositionRow) => boolean
 ): (params: GridRowClassNameParams) => string {
   return (params) => {
     const row = params.row as PositionRow | undefined;
@@ -106,6 +111,10 @@ function rowClassNameFor(
     // signal is that double-click quietly does nothing, which reads as a broken
     // grid rather than as a rule.
     if (locked(row)) classes.push("pos-row--locked");
+    // Mutually exclusive with locked by construction: a row with no department
+    // is writable for anyone who holds one, and this only applies to people who
+    // cannot publish it as it stands.
+    else if (needsDepartment(row)) classes.push("pos-row--needsDepartment");
     return classes.join(" ");
   };
 }
@@ -178,6 +187,15 @@ const GRID_SX: SxProps<Theme> = {
     bgcolor: (theme) => alpha(theme.palette.text.disabled, 0.06),
     "&:hover": {
       bgcolor: (theme) => alpha(theme.palette.text.disabled, 0.09),
+    },
+  },
+  // Added but not finished: no department, and this user cannot publish a row
+  // without one. Deliberately a warning tint rather than the disabled one —
+  // the row IS editable, it just will not go anywhere until it is classified.
+  "& .pos-row--needsDepartment": {
+    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.1),
+    "&:hover": {
+      bgcolor: (theme) => alpha(theme.palette.warning.main, 0.16),
     },
   },
   "& .pos-cell--masked": {
@@ -282,8 +300,27 @@ export interface PositionsGridProps {
    * grid store update — see the resolver in columnFactory.
    */
   writableDepartments?: ReadonlySet<string>;
+  /**
+   * Which departments the picker may OFFER, and which it shows greyed.
+   *
+   * Separate from `writableDepartments` and from `departments` on purpose. The
+   * lock answers "may I edit this row"; this answers "what may I turn it into",
+   * and the two have different right answers for an owner — who can assign a
+   * department that has no rows in it yet, and cannot assign one they have
+   * delegated away. Omit for no restriction.
+   */
+  departmentPicks?: DepartmentPickList;
   /** An administrator holds a support lease, or the plan is archived. */
   planLocked?: boolean;
+  /**
+   * May this user change the hotel's setup — columns, blocks, schemes?
+   *
+   * Used here only to decide whether an unassigned row is worth flagging: a row
+   * with no department can be published by somebody with structure rights and by
+   * nobody else, so for an owner it is a choice and for a delegate it is an
+   * unfinished row. Defaults to true, which flags nothing.
+   */
+  structureEditable?: boolean;
   groupByDept: boolean;
   /** False (the default) filters the grid down to budgeted positions. */
   showInactive: boolean;
@@ -442,7 +479,9 @@ export default function PositionsGrid({
   blockResults,
   masked,
   writableDepartments,
+  departmentPicks,
   planLocked,
+  structureEditable = true,
   groupByDept,
   showInactive,
   loading,
@@ -614,21 +653,28 @@ export default function PositionsGrid({
    * rebuild.
    */
   const rowWritable = useCallback(
-    (row: PositionRow): boolean => {
-      if (planLocked) return false;
-      if (!writableDepartments) return true; // never published — local file only
-      const code =
-        typeof row[DEPARTMENT_CODE_KEY] === "string"
-          ? (row[DEPARTMENT_CODE_KEY] as string)
-          : "";
-      return code !== "" && writableDepartments.has(code);
-    },
+    (row: PositionRow): boolean =>
+      rowDepartmentWritable(row, { writableDepartments, planLocked }),
     [writableDepartments, planLocked]
   );
 
+  /**
+   * Created, editable, and not finished: no department yet.
+   *
+   * Only worth marking for somebody who cannot publish a department-less row —
+   * an owner can, so for them an unclassified row is a choice rather than an
+   * omission. Warning-tinted rather than disabled-tinted, because unlike a
+   * locked row this one IS editable.
+   */
+  const rowNeedsDepartment = useCallback(
+    (row: PositionRow): boolean =>
+      !structureEditable && departmentUnassigned(row, { writableDepartments }),
+    [writableDepartments, structureEditable]
+  );
+
   const getRowClassName = useMemo(
-    () => rowClassNameFor((row) => !rowWritable(row)),
-    [rowWritable]
+    () => rowClassNameFor((row) => !rowWritable(row), rowNeedsDepartment),
+    [rowWritable, rowNeedsDepartment]
   );
 
   const columns = useMemo<GridColDef<PositionRow>[]>(() => {
@@ -709,7 +755,7 @@ export default function PositionsGrid({
     // The gutter's members lead the array, which is the only thing keeping them
     // together now that nothing is pinned.
     const [controlColumns, dataColumns] = partition(
-      buildColumns(catalog, { masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames }),
+      buildColumns(catalog, { masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames }),
       (column) => controlKeys.has(column.field)
     );
 
@@ -718,7 +764,7 @@ export default function PositionsGrid({
     const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable]);
+  }, [catalog, controlKeys, masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable]);
 
   const columnGroupingModel = useMemo(
     () => [

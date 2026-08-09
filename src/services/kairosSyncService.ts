@@ -19,6 +19,8 @@ import {
   DelegationCreate,
   DelegationView,
   GrantOutcome,
+  MyDelegationList,
+  PendingByDepartment,
   PiiPullResponse,
   PlanSyncStatus,
   ProbeResponse,
@@ -306,9 +308,31 @@ export function listDelegations(
   return call(KAIROS_SYNC_CHANNELS.listDelegations, { ou, planId });
 }
 
-/** Across every hotel, including delegations revoked in the last 30 days. */
-export function myDelegations(): Promise<SyncOutcome<{ delegations: Delegation[] }>> {
-  return call(KAIROS_SYNC_CHANNELS.myDelegations, {});
+/**
+ * Across every hotel, including delegations revoked in the last 30 days.
+ *
+ * `MyDelegation`, NOT `Delegation` — a different shape for a different question.
+ * This is the delegate's view, keyed by plan, so it carries `ou`, `year` and
+ * `label` and is the only call that can say "that plan is at another hotel".
+ */
+export function myDelegations(): Promise<SyncOutcome<MyDelegationList>> {
+  return call<MyDelegationList>(KAIROS_SYNC_CHANNELS.myDelegations, {});
+}
+
+/**
+ * My unpublished rows, by department. Local read — no network, works offline.
+ *
+ * The check the handback routes do not do for a single department. Uses the same
+ * hash comparison as the Publish badge, so the two cannot disagree.
+ */
+export function pendingByDepartment(
+  ou: string,
+  planId: string
+): Promise<SyncOutcome<PendingByDepartment>> {
+  return call<PendingByDepartment>(KAIROS_SYNC_CHANNELS.pendingByDepartment, {
+    ou,
+    planId,
+  });
 }
 
 /**

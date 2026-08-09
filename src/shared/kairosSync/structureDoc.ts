@@ -41,6 +41,7 @@ import {
   DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
   DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
 } from "../calendar";
+import { canonicalJson } from "./canonical";
 import { Row } from "./entityMap";
 
 /** The document's shape. Sections are optional so an older client can omit one. */
@@ -201,7 +202,14 @@ export function fieldCatalogFromDoc(row: Row): Row {
     dropdown_source: nullableStr(row.dropdownSource),
     validation: nullableStr(row.validation),
     default_value: nullableStr(row.defaultValue),
-    seed_version: num(row.seedVersion, 1),
+    // `seed_version` is deliberately NOT written back. It is this machine's
+    // bookkeeping — which release of `fieldSeed.ts` last refreshed the row — and
+    // adopting a colleague's number would tell a client on an older build that it
+    // is already up to date, so `ensureFieldCatalogSeed` would skip a refresh it
+    // owes. Omitting the column leaves it untouched on update and at its DEFAULT
+    // on insert, after which the local seed claims it on the next catalog read.
+    // It still travels in the document (see `fieldCatalogToDoc`) so the wire
+    // shape is unchanged for peers that predate this.
     updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
     deleted_at: nullableStr(row.deletedAt),
   };
@@ -551,12 +559,138 @@ export function positionDefaultsFromDoc(row: Row): Row {
 
 // -------------------------------------------------------------------- merge
 
+/** One field of one row that the two documents disagree about. */
+export interface StructureFieldDiff {
+  /** The document's own field name, camelCase — `customLabel`, `sortOrder`. */
+  field: string;
+  /**
+   * The values, rendered for display and truncated.
+   *
+   * Named for the merge's own frame rather than for a direction: `base` is the
+   * document the merge started from, `incoming` the one merged over it. Which of
+   * those is "this computer" depends on which way round `mergeStructureDoc` was
+   * called, and only the caller knows that — see `pullStructure`, which runs it
+   * both ways.
+   */
+  base: string;
+  incoming: string;
+}
+
 export interface StructureChange {
   section: StructureSectionKey;
   key: string;
   /** A human-readable handle for the Sync page — a label or a code, not an id. */
   label: string;
   kind: "added" | "updated" | "removed";
+  /** Which fields actually differ. Only ever set on `updated`. */
+  fields?: StructureFieldDiff[];
+  /** Differing fields beyond `FIELD_DIFF_LIMIT`, so "+3 more" can be honest. */
+  moreFields?: number;
+}
+
+/**
+ * How many differing fields a single row reports.
+ *
+ * A row that disagrees about more than a dozen fields is not being read
+ * field-by-field by anybody; it is "this is a different row". The cap keeps the
+ * IPC payload bounded when two documents genuinely diverge.
+ */
+export const FIELD_DIFF_LIMIT = 12;
+
+/** Longest rendered value before it is elided. Config blobs are unbounded. */
+const VALUE_DISPLAY_LIMIT = 120;
+
+/**
+ * Fields that are bookkeeping rather than configuration.
+ *
+ * `updatedAt` is per-machine by construction: every client seeds its own field
+ * catalog and its own system component definitions with its own clock, so
+ * value-identical rows carry different stamps — and `calendar_years` /
+ * `position_defaults` do not even agree on the FORMAT, stamping SQLite's
+ * `CURRENT_TIMESTAMP` where `calendarFromDoc` writes an ISO string. Comparing it
+ * reports every row as changed forever.
+ *
+ * `seedVersion` is the local seed marker; see `fieldCatalogFromDoc`.
+ */
+const NOT_CONFIGURATION = new Set(["updatedAt", "seedVersion"]);
+
+/**
+ * The comparable form of a row: canonical key order, bookkeeping dropped.
+ *
+ * This is the fix for the bug that made a brand-new plan report its entire
+ * column set as changed in both directions. `pushStructure` canonicalises the
+ * document before sending it, so the server's copy comes back with its keys
+ * SORTED, while `buildStructureDoc` assembles the local copy in field-declaration
+ * order. A plain `JSON.stringify` comparison of the two can therefore never be
+ * equal, whatever the values are — and applying the download rebuilt the local
+ * document in declaration order again, so the diff never cleared and downloading
+ * looked like it did nothing.
+ *
+ * `canonicalJson` is the same function the push path hashes with, so the two can
+ * never drift: it sorts keys at every level and normalises numbers, which also
+ * settles a float that survived a round trip through SQLite REAL.
+ *
+ * `deletedAt` is NOT excluded — a tombstone is a real difference.
+ */
+function comparable(row: Row): string {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (!NOT_CONFIGURATION.has(key)) out[key] = value;
+  }
+  return canonicalJson(out);
+}
+
+/** A value as the compare dialog shows it: short, and never `[object Object]`. */
+function displayValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string") {
+    if (value === "") return "—";
+    return value.length > VALUE_DISPLAY_LIMIT
+      ? `${value.slice(0, VALUE_DISPLAY_LIMIT)}…`
+      : value;
+  }
+  const rendered = canonicalJson(value);
+  return rendered.length > VALUE_DISPLAY_LIMIT
+    ? `${rendered.slice(0, VALUE_DISPLAY_LIMIT)}…`
+    : rendered;
+}
+
+/**
+ * Which fields two versions of the same row disagree about.
+ *
+ * Compared through `canonicalJson` per field for the same reason the whole row
+ * is: a nested config blob whose keys came back in a different order is not a
+ * change, and neither is a float that round-tripped.
+ */
+function fieldDiffs(
+  base: Row,
+  incoming: Row
+): { fields: StructureFieldDiff[]; moreFields: number } {
+  const fields: StructureFieldDiff[] = [];
+  let moreFields = 0;
+
+  // Union of both sides, in a stable order, so a field only one of them has is
+  // still reported — that is exactly the interesting case after a version bump.
+  const keys = [...new Set([...Object.keys(base), ...Object.keys(incoming)])].sort();
+
+  for (const key of keys) {
+    if (NOT_CONFIGURATION.has(key)) continue;
+    if (canonicalJson(base[key] ?? null) === canonicalJson(incoming[key] ?? null)) {
+      continue;
+    }
+    if (fields.length >= FIELD_DIFF_LIMIT) {
+      moreFields += 1;
+      continue;
+    }
+    fields.push({
+      field: key,
+      base: displayValue(base[key]),
+      incoming: displayValue(incoming[key]),
+    });
+  }
+
+  return { fields, moreFields };
 }
 
 export interface StructureMerge {
@@ -630,8 +764,16 @@ export function mergeStructureDoc(
         }
       } else if (nowDeleted && !wasDeleted) {
         changes.push({ section, key, label: labelOf(section, row), kind: "removed" });
-      } else if (JSON.stringify(existing) !== JSON.stringify(row)) {
-        changes.push({ section, key, label: labelOf(section, row), kind: "updated" });
+      } else if (comparable(existing) !== comparable(row)) {
+        const { fields, moreFields } = fieldDiffs(existing, row);
+        changes.push({
+          section,
+          key,
+          label: labelOf(section, row),
+          kind: "updated",
+          fields,
+          ...(moreFields > 0 ? { moreFields } : {}),
+        });
       }
 
       byKey.set(key, row);

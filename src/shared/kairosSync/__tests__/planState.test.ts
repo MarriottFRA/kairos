@@ -28,6 +28,7 @@ function plan(overrides: Partial<PlanSyncStatus> = {}): PlanSyncStatus {
     writeScope: "FULL",
     structureEditable: true,
     handbacksPending: 0,
+    delegation: null,
     lastPublishedAt: "2026-08-01T10:00:00Z",
     lastPulledAt: "2026-08-01T10:00:00Z",
     pendingChanges: 0,

@@ -14,9 +14,13 @@
  *
  * ## The two branches
  *
- * **Take the server's copy** is an ordinary pull. Local unpublished work is
- * replaced; the review step that follows names exactly what changes, including
- * deletions.
+ * **Take the server's copy** is an ordinary pull, and a pull is a per-row delta:
+ * only the rows the server actually sends are replaced, and local rows it does
+ * not mention are untouched. That distinction is not pedantic — it is the whole
+ * shape of the common case. Somebody who holds some of this plan's departments
+ * can only ever have changed rows in those, so their work and the reader's
+ * usually cannot touch at all, and the review step counts exactly how many rows
+ * (often none) would actually be replaced.
  *
  * **Keep mine** re-reads the server's manifest into the shadow so this client's
  * commit carries the server's own current hashes, and publishes on top. That is
@@ -84,11 +88,18 @@ export default function ClaimPlanDialog({
             title="Take the server's copy"
             cost={
               localChanges === 1
-                ? "Your 1 unpublished change here is replaced."
-                : `Your ${localChanges} unpublished changes here are replaced.`
+                ? "Your 1 unpublished change is replaced only if the server has changed that same row."
+                : `Any of your ${localChanges} unpublished changes that the server has also changed are replaced. The rest stay, and can still be published.`
             }
-            detail="You will be shown exactly what changes, including anything that would be deleted, before it is applied."
-            action="Download"
+            detail={
+              "The next screen counts exactly how many that is — often none. A " +
+              "colleague who holds some of this plan's departments can only ever " +
+              "have changed rows in those, so their work and yours usually cannot touch."
+            }
+            // Not "Download": this opens the review, and labelling a preview
+            // with the name of the destructive act is what makes people hesitate
+            // over the safe one.
+            action="See what would change"
             busy={busy}
             onClick={onTakeServer}
           />

@@ -35,6 +35,7 @@ import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import type { GridColDef } from "@mui/x-data-grid-premium";
 import { FieldDef } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import {
@@ -84,6 +85,8 @@ export interface PositionFormFieldProps {
   /** Rendered right of the label — the chevron a month family hangs off. */
   action?: React.ReactNode;
   departments: DepartmentOption[];
+  /** Which of them may be chosen. Omit for no restriction. See the grid's. */
+  departmentPicks?: DepartmentPickList;
   accounts: AccountOption[];
   /**
    * Hands the dialog a function that applies this edit, rather than a finished
@@ -107,6 +110,7 @@ export default function PositionFormField({
   dense,
   action,
   departments,
+  departmentPicks,
   accounts,
   onCommit,
 }: PositionFormFieldProps) {
@@ -205,19 +209,58 @@ export default function PositionFormField({
   // ── Departments ─────────────────────────────────────────────────────
   if (source?.kind === "departments" && departments.length > 0) {
     const name = typeof value === "string" ? value : "";
-    const known = name ? departments.find((option) => option.name === name) : null;
-    // A name from unsynced/legacy data stays selectable rather than vanishing.
-    const orphan = name && !known ? { code: "", name } : null;
+    // The same narrow-then-grey rule as the grid's edit cell, and the same
+    // resolution order for the row's current value, so opening a row in the form
+    // can never offer a choice the grid would refuse. See `departmentPickList`.
+    const picks = departmentPicks ?? { selectable: departments, locked: [] };
+    const current = name
+      ? picks.selectable.find((option) => option.name === name) ??
+        picks.locked.find((option) => option.name === name) ??
+        departments.find((option) => option.name === name) ?? { code: "", name }
+      : null;
+    const currentIsSelectable =
+      current !== null &&
+      picks.selectable.some((option) => option.name === current.name);
+    const disabledNames = new Set<string>(picks.locked.map((option) => option.name));
+    if (current && !currentIsSelectable) disabledNames.add(current.name);
+    const reasonByName = new Map(
+      picks.locked.map((option) => [option.name, option.reason])
+    );
     return (
       <FieldRow {...rowProps}>
         <Autocomplete<DepartmentOption>
-          options={orphan ? [orphan, ...departments] : departments}
-          value={known ?? orphan}
+          options={[
+            ...(current && !currentIsSelectable ? [current] : []),
+            ...picks.selectable,
+            ...picks.locked,
+          ]}
+          value={current}
           openOnFocus
           autoHighlight
           filterOptions={filterDepartments}
           getOptionLabel={(option) => option.name}
           isOptionEqualToValue={(option, picked) => option.name === picked.name}
+          getOptionDisabled={(option) => disabledNames.has(option.name)}
+          renderOption={(optionProps, option) => {
+            const reason = reasonByName.get(option.name);
+            return (
+              <Box component="li" {...optionProps} key={option.code || option.name}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Box component="span" sx={{ display: "block" }}>
+                    {option.name}
+                  </Box>
+                  {reason && (
+                    <Box
+                      component="span"
+                      sx={{ display: "block", fontSize: 12, color: "text.secondary" }}
+                    >
+                      {reason}
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            );
+          }}
           onChange={(_event, picked) => commit(picked?.name ?? "")}
           slotProps={{ paper: { sx: { minWidth: 340 } } }}
           renderInput={(params) => (

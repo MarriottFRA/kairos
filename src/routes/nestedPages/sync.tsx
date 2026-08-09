@@ -40,8 +40,6 @@ import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Card from "@mui/material/Card";
-import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Dialog from "@mui/material/Dialog";
@@ -49,7 +47,6 @@ import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogContentText from "@mui/material/DialogContentText";
 import DialogTitle from "@mui/material/DialogTitle";
-import Divider from "@mui/material/Divider";
 import LinearProgress from "@mui/material/LinearProgress";
 import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
@@ -75,6 +72,7 @@ import {
   publish as publishCall,
   publishOverServer as publishOverServerCall,
   pull as pullCall,
+  pendingByDepartment as pendingByDepartmentCall,
   previewStructure as previewStructureCall,
   pullStructure as pullStructureCall,
   pushStructure as pushStructureCall,
@@ -92,12 +90,16 @@ import {
   syncFailed,
 } from "../../shared/kairosSync/ipc";
 import {
+  Delegation,
   DelegationCandidate,
   Lease,
   LeaseCreate,
 } from "../../shared/kairosSync/protocol";
 import { planState } from "../../shared/kairosSync/planState";
 import { useAdminTools } from "../../hooks/useAdminTools";
+import { useDelegationOverview } from "../../hooks/useDelegationOverview";
+import { usePlanDelegations } from "../../hooks/usePlanDelegations";
+import { delegationSummary } from "../../shared/kairosSync/delegationSummary";
 import PlanSyncCard, { PlanAdminActions } from "../../components/sync/PlanSyncCard";
 import CloudPlanCard from "../../components/sync/CloudPlanCard";
 import DeletePlanDialog, {
@@ -114,21 +116,15 @@ import {
 } from "../../components/sync/LeaseDialog";
 import ScopeTraceDialog from "../../components/sync/ScopeTraceDialog";
 import TransferOwnershipDialog from "../../components/sync/TransferOwnershipDialog";
+import HotelSetupCard, {
+  STRUCTURE_LABELS,
+  countBySection,
+} from "../../components/sync/HotelSetupCard";
+import HotelSetupCompareDialog from "../../components/sync/HotelSetupCompareDialog";
+import { StructureChange } from "../../shared/kairosSync/structureDoc";
 
 /** Idle probe interval. Matches the cadence table in the API guide (§3.5). */
 const PROBE_INTERVAL_MS = 5 * 60 * 1000;
-
-/** Plain-English names for the hotel-setup document's sections. */
-const STRUCTURE_LABELS: Record<string, string> = {
-  fieldCatalog: "Columns",
-  blockConfigs: "Blocks",
-  componentDefs: "Block components",
-  ssSchemes: "Social security schemes",
-  allocations: "Allocations",
-  kpiDrivers: "KPI drivers",
-  calendars: "Calendar",
-  positionDefaults: "Defaults for new positions",
-};
 
 type Toast = { severity: "success" | "error" | "info" | "warning"; message: string } | null;
 
@@ -136,6 +132,10 @@ interface PullReview {
   planId: string;
   byType: Record<string, number>;
   deletedByType: Record<string, number>;
+  /** Incoming rows by department — where the download lands. */
+  byDepartment: Record<string, number>;
+  /** Departments this machine has unpublished work in, for the contrast. */
+  pendingDepartments: string[];
   total: number;
   deleted: number;
   skippedTypes: string[];
@@ -149,6 +149,15 @@ interface PullReview {
   replaceLocalPlanId: string | null;
   /** True for a plan this computer does not hold yet — a first download. */
   firstDownload: boolean;
+  /**
+   * Departments to lead the review with, when the download was started from one
+   * person's row in the plan card.
+   *
+   * Presentation only. `/changes` takes a watermark and a cursor and nothing
+   * else, so there is no per-delegate feed to ask for — the pull is whole-plan
+   * either way, and the dialog says so. This only decides what is listed first.
+   */
+  forDepartments: string[];
 }
 
 interface PublishReview {
@@ -158,13 +167,6 @@ interface PublishReview {
   chunks: number;
   withheld: number;
   unclassified: number;
-}
-
-interface StructureReview {
-  byType: Record<string, number>;
-  removedByType: Record<string, number>;
-  total: number;
-  removed: number;
 }
 
 /**
@@ -208,7 +210,29 @@ export default function Sync() {
   const [pullReview, setPullReview] = useState<PullReview | null>(null);
   const [publishReview, setPublishReview] = useState<PublishReview | null>(null);
   const [publishResult, setPublishResult] = useState<PublishResponse | null>(null);
-  const [structureReview, setStructureReview] = useState<StructureReview | null>(null);
+  /**
+   * The hotel-setup diff, in both directions, from the last check.
+   *
+   * Held rather than shown-and-discarded because the card draws from it
+   * continuously — the divergence badge, the "publishing affects everybody"
+   * warning, and the copy-for-the-owner summary all read the same answer.
+   * `null` means nothing has been checked yet.
+   *
+   * `serverVersion` rides along because it is the `If-Match` the next publish
+   * must send. Taking it from `status` instead is how a publish that follows a
+   * download 412s: the pull moved the hotel's version and the page's sync status
+   * still holds the one from before it.
+   */
+  const [setupDiff, setSetupDiff] = useState<{
+    incoming: StructureChange[];
+    outgoing: StructureChange[];
+    published: boolean;
+    serverVersion: number | null;
+  } | null>(null);
+  /** Open when the user asked to see the divergence row by row. */
+  const [setupCompare, setSetupCompare] = useState(false);
+  /** Confirming a hotel-wide publish. Holds the outgoing diff at the moment of asking. */
+  const [setupPublish, setSetupPublish] = useState<StructureChange[] | null>(null);
   /** Set by a first download; consumed by the effect under `handleStructurePreview`. */
   const [checkSetupAfterDownload, setCheckSetupAfterDownload] = useState(false);
 
@@ -356,10 +380,19 @@ export default function Sync() {
   // ------------------------------------------------------------- pull
 
   const handlePreviewPull = useCallback(
-    async (plan: PlanSyncStatus) => {
+    async (plan: PlanSyncStatus, forDepartments: string[] = []): Promise<void> => {
       if (!ou) return;
       await run(plan.planId, async () => {
-        const result = await previewPullCall(ou, plan.planId);
+        // Both at once: the second is a local read and only worth making when
+        // there IS unpublished work for the verdict to contrast the download
+        // with. `Promise.all` rather than sequential — neither depends on the
+        // other and the dialog waits for both.
+        const [result, pending] = await Promise.all([
+          previewPullCall(ou, plan.planId),
+          plan.pendingChanges > 0
+            ? pendingByDepartmentCall(ou, plan.planId)
+            : Promise.resolve(null),
+        ]);
         if (syncFailed(result)) {
           fail(result.error.message);
           return;
@@ -368,6 +401,7 @@ export default function Sync() {
           planId: plan.planId,
           byType: result.data.byType,
           deletedByType: result.data.deletedByType,
+          byDepartment: result.data.byDepartment,
           total: result.data.total,
           deleted: result.data.deleted,
           skippedTypes: result.data.skippedTypes,
@@ -375,15 +409,35 @@ export default function Sync() {
           collides: result.data.collides,
           collidingDepartments: result.data.collidingDepartments,
           pendingChanges: plan.pendingChanges,
+          pendingDepartments:
+            pending && !syncFailed(pending)
+              ? Object.keys(pending.data.byDepartment)
+              : [],
           replaceLocalPlanId: plan.onThisComputer ? null : plan.twinPlanId,
           // The handler decides this, not the card: it is the one that knows
           // whether a live `scenarios` row exists, and it uses the same answer
           // to choose between a delta and a full pull.
           firstDownload: result.data.firstDownload,
+          forDepartments,
         });
       });
     },
     [ou, run, fail]
+  );
+
+  /**
+   * Collect one person's finished work, from their row in the plan card.
+   *
+   * The same whole-plan pull as the Download button — there is no per-delegate
+   * feed and pretending otherwise would make the review lie about what is
+   * arriving. Their departments are sorted to the front of the dialog and
+   * coloured; the rest is still listed, and still said.
+   */
+  const handleDownloadForDelegation = useCallback(
+    (plan: PlanSyncStatus, delegation: Delegation): void => {
+      void handlePreviewPull(plan, delegation.effectiveDepartments);
+    },
+    [handlePreviewPull]
   );
 
   const handleConfirmPull = useCallback(async () => {
@@ -568,12 +622,39 @@ export default function Sync() {
   // ------------------------------------------------------- structure
 
   /**
-   * Preview the hotel setup before applying it.
+   * Refresh the hotel-setup diff without putting a dialog in anybody's way.
    *
-   * This used to apply straight away, unlike a plan pull, even though it can
-   * replace the columns and blocks every scenario at the property renders
-   * through. The diff already came back from the preview call; it just was not
-   * being shown.
+   * Deliberately silent: it runs on load, and a conditional GET that comes back
+   * 304 must not announce itself. The card renders whatever this leaves behind.
+   */
+  const refreshSetupDiff = useCallback(async () => {
+    if (!ou) return null;
+    const result = await previewStructureCall(ou);
+    if (syncFailed(result)) return null;
+    const diff = {
+      incoming: result.data.changes,
+      outgoing: result.data.outgoing,
+      published: result.data.published,
+      serverVersion: result.data.serverVersion,
+    };
+    setSetupDiff(diff);
+    return diff;
+  }, [ou]);
+
+  // On load, and on every hotel change. One ETag'd request; a 304 costs nothing
+  // and the answer is what the card needs before anybody presses anything.
+  useEffect(() => {
+    void refreshSetupDiff();
+  }, [refreshSetupDiff]);
+
+  /**
+   * Check, and show the answer.
+   *
+   * Nothing to see gets a toast; anything to see opens the compare dialog, which
+   * is where both directions and all three actions live. It used to open a
+   * generic review dialog showing the same section counts the card already
+   * showed, with a Download button behind them — so the only way to find out
+   * WHAT had changed was to apply it and look at the grid.
    */
   const handleStructurePreview = useCallback(async () => {
     if (!ou) return;
@@ -582,23 +663,22 @@ export default function Sync() {
       fail(result.error.message);
       return;
     }
-    const changes = result.data.changes;
-    if (changes.length === 0) {
-      setToast({ severity: "success", message: "Your setup matches the server." });
+    setSetupDiff({
+      incoming: result.data.changes,
+      outgoing: result.data.outgoing,
+      published: result.data.published,
+      serverVersion: result.data.serverVersion,
+    });
+    if (result.data.changes.length === 0 && result.data.outgoing.length === 0) {
+      setToast({
+        severity: result.data.published ? "success" : "info",
+        message: result.data.published
+          ? "Your setup matches the server."
+          : "This hotel's setup has never been published.",
+      });
       return;
     }
-    const byType: Record<string, number> = {};
-    const removedByType: Record<string, number> = {};
-    for (const change of changes) {
-      const bucket = change.kind === "removed" ? removedByType : byType;
-      bucket[change.section] = (bucket[change.section] ?? 0) + 1;
-    }
-    setStructureReview({
-      byType,
-      removedByType,
-      total: changes.length,
-      removed: changes.filter((change) => change.kind === "removed").length,
-    });
+    setSetupCompare(true);
   }, [ou, fail]);
 
   // Deliberately an effect rather than a call inside `handleConfirmPull`: the
@@ -610,37 +690,130 @@ export default function Sync() {
     void handleStructurePreview();
   }, [checkSetupAfterDownload, handleStructurePreview]);
 
+  /**
+   * Apply the hotel's setup here.
+   *
+   * The count comes from the diff the user was just shown, not from the pull's
+   * own response: that response is a SECOND fetch, and by the time it answers
+   * the rows have been applied, so it reports how much the document changed
+   * during this call rather than how much arrived. It read "Applied 0 setup
+   * changes" for a download that did the work.
+   */
   const handleStructurePull = useCallback(async () => {
     if (!ou) return;
+    const expected = setupDiff?.incoming.length ?? 0;
     const result = await pullStructureCall(ou);
-    setToast(
-      syncFailed(result)
-        ? { severity: "error", message: result.error.message }
-        : {
-            severity: "success",
-            message: `Applied ${result.data.changes.length} setup changes.`,
-          }
-    );
-    setStructureReview(null);
+    if (syncFailed(result)) {
+      fail(result.error.message);
+      return;
+    }
+    setSetupCompare(false);
+    setToast({
+      severity: "success",
+      message:
+        expected === 1
+          ? "Applied 1 setup change."
+          : `Applied ${expected} setup changes.`,
+    });
+    await refreshSetupDiff();
     await refresh();
-  }, [ou, refresh]);
+  }, [ou, setupDiff, refresh, refreshSetupDiff, fail]);
 
+  /**
+   * Ask before publishing something that lands in everybody's plans.
+   *
+   * The diff is re-fetched at the moment of asking rather than reused from the
+   * card: this is the one screen where a stale answer would understate what is
+   * about to be sent, and a colleague may well have published since the page
+   * loaded. If the check fails the confirmation still opens, with an empty list
+   * and the hotel-wide warning — which is the honest state, and refusing to let
+   * an owner publish because a diff call failed would be worse.
+   */
+  const handleStructurePublishIntent = useCallback(async () => {
+    const diff = await refreshSetupDiff();
+    setSetupPublish(diff?.outgoing ?? []);
+  }, [refreshSetupDiff]);
+
+  /**
+   * Publish, matching on the version the diff on screen was computed against.
+   *
+   * NOT `status.structureVersion`: that comes from the last `/sync/heads`, which
+   * moves on a five-minute timer and is never touched by a structure pull. After
+   * a download it names a version the hotel has already moved past, so `If-Match`
+   * fails and the publish 412s every time.
+   *
+   * Deliberately not re-fetched at the moment of pressing, either. The 412 is
+   * the guard against publishing over a change nobody has looked at, and quietly
+   * adopting the newest version first would disarm it — the diff in front of the
+   * user is exactly what they are agreeing to send.
+   */
   const handleStructurePush = useCallback(async () => {
     if (!ou) return;
-    const result = await pushStructureCall(ou, status?.structureVersion ?? null);
+    const version = setupDiff?.serverVersion ?? status?.structureVersion ?? null;
+    const result = await pushStructureCall(ou, version);
+    setSetupPublish(null);
+    if (syncFailed(result)) {
+      setToast({
+        severity: "error",
+        message:
+          result.error.code === "kairos_structure_precondition"
+            ? "Somebody else changed this hotel's setup while this page was open. Download it, then publish again."
+            : result.error.message,
+      });
+      await refreshSetupDiff();
+      return;
+    }
+    setSetupCompare(false);
+    setToast({ severity: "success", message: "Hotel setup published." });
+    await refreshSetupDiff();
+    await refresh();
+  }, [ou, status, setupDiff, refresh, refreshSetupDiff]);
+
+  /**
+   * Download the hotel's setup, then publish the result.
+   *
+   * The answer to the state the card could describe but neither button could
+   * resolve: the hotel's copy and this one have each moved on, so downloading
+   * loses nothing (the merge is additive) but leaves this machine's own work
+   * unpublished, and publishing first would send a document that predates the
+   * colleague's change. Doing both, in that order, ends with one setup holding
+   * everything.
+   *
+   * Sequenced here rather than added to the protocol — `GET` then `PUT` is all
+   * it is, and the server's own merge is additive in both directions.
+   */
+  const handleStructureSyncBoth = useCallback(async () => {
+    if (!ou) return;
+    const pulled = await pullStructureCall(ou);
+    if (syncFailed(pulled)) {
+      fail(pulled.error.message);
+      await refreshSetupDiff();
+      return;
+    }
+    // The version to match on is the one the pull just landed on, not the one
+    // this page loaded with.
+    const result = await pushStructureCall(ou, pulled.data.serverVersion);
+    setSetupCompare(false);
     setToast(
       syncFailed(result)
         ? {
             severity: "error",
             message:
               result.error.code === "kairos_structure_precondition"
-                ? "Somebody else changed this hotel's setup while this page was open. Download it, then publish again."
-                : result.error.message,
+                ? "The hotel's setup changed again while this was running. Check for changes and try once more."
+                : // The download DID apply — say so, or this reads as a total
+                  // failure and the obvious next move is to press it again.
+                  `Downloaded, but publishing failed: ${result.error.message}`,
           }
-        : { severity: "success", message: "Hotel setup published." }
+        : {
+            severity: "success",
+            message:
+              "Downloaded this hotel's setup and published yours. Both copies now match.",
+          }
     );
+    await refreshSetupDiff();
     await refresh();
-  }, [ou, status, refresh]);
+  }, [ou, refresh, refreshSetupDiff, fail]);
 
   // -------------------------------------------------- transfer & admin
 
@@ -917,6 +1090,12 @@ export default function Sync() {
     [status]
   );
 
+  // Two stages. The cheap one answers "does anybody hold anything here" for
+  // every plan you could delegate; the expensive one fetches the grants and
+  // presence only where the answer was yes. See both hooks.
+  const delegationOverview = useDelegationOverview(ou, localPlans);
+  const planDelegations = usePlanDelegations(ou, localPlans, delegationOverview);
+
   const orderedPlans = useMemo(() => {
     const plans = localPlans;
     return [...plans].sort((left, right) => {
@@ -942,6 +1121,17 @@ export default function Sync() {
   const anyOwner = localPlans.some(
     (plan) => plan.relation === "OWNER" || plan.relation === "ADMIN_LEASE"
   );
+  /**
+   * Somebody who could publish the hotel's setup, when this user cannot.
+   *
+   * Best-effort and deliberately so: there is no "who owns this hotel's setup"
+   * call, because the setup has no owner — it is published by anybody who owns
+   * any plan here. The owner of a plan this user can see is the closest true
+   * answer, and naming one real person beats "ask an administrator".
+   */
+  const setupPublisherEmail = anyOwner
+    ? null
+    : orderedPlans.find((plan) => plan.ownerEmail)?.ownerEmail ?? null;
   // Cloud-only plans count: a page that says "Up to date" above a plan waiting
   // to be downloaded is contradicting itself. Locked ones do NOT — a colleague's
   // plan you were never meant to open is not outstanding work, and counting it
@@ -1074,7 +1264,40 @@ export default function Sync() {
           onPreviewPublish={() => void handlePreviewPublish(plan)}
           onPreviewPull={() => void handlePreviewPull(plan)}
           onResolveDivergence={() => setDialog({ kind: "claim", plan })}
-          onOpenDelegation={() => navigate(`/signed-in-landing/delegation?plan=${plan.planId}`)}
+          delegationOverride={
+            delegationOverview[plan.planId]
+              ? delegationSummary(delegationOverview[plan.planId])
+              : undefined
+          }
+          delegations={planDelegations[plan.planId]?.delegations ?? null}
+          presenceByUserId={planDelegations[plan.planId]?.presenceByUserId ?? {}}
+          onDownloadForDelegation={(delegation) =>
+            handleDownloadForDelegation(plan, delegation)
+          }
+          onReconcile={() => void handleReconcile(plan)}
+          onRebuildShadow={() => void handleRebuildShadow(plan)}
+          onOpenDelegation={(delegationId) =>
+            // The hint saves the Delegation page a round trip and, more to the
+            // point, lets it name the plan before anything renders. Matched on
+            // `planId` there, so a replayed history entry cannot mislabel it.
+            // `delegation` anchors the scroll on one person's card, so a click
+            // on a row lands on that row rather than at the top of a list.
+            navigate(
+              `/signed-in-landing/delegation?plan=${plan.planId}` +
+                (delegationId ? `&delegation=${delegationId}` : ""),
+              {
+              state: {
+                plan: {
+                  planId: plan.planId,
+                  label: plan.label,
+                  year: plan.year,
+                  ou: plan.ou,
+                  ownerEmail: plan.ownerEmail,
+                },
+              },
+              }
+            )
+          }
           onTransfer={() => setDialog({ kind: "transfer", plan })}
           onDeleteFromServer={() => setDialog({ kind: "delete", plan })}
           onDiscardLocalCopy={() => setDialog({ kind: "discard", plan })}
@@ -1103,18 +1326,11 @@ export default function Sync() {
             />
           )}
 
-          {plan.published && (
-            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-              <Button size="small" onClick={() => void handleReconcile(plan)}>
-                Check for differences
-              </Button>
-              <Tooltip title="Re-read what the server holds. Use this after rebuilding the local database or running an import.">
-                <Button size="small" onClick={() => void handleRebuildShadow(plan)}>
-                  Repair sync state
-                </Button>
-              </Tooltip>
-            </Stack>
-          )}
+          {/* "Check for differences" and "Repair sync state" used to sit here,
+              as a third button row inside the card. They are now in the card's
+              own "More" menu: both are diagnostics, neither is something anybody
+              does on purpose in a normal week, and giving them the same weight
+              as Publish was most of what made this card read as a wall. */}
         </PlanSyncCard>
       ))}
 
@@ -1149,29 +1365,34 @@ export default function Sync() {
       )}
 
       {status && (
-        <Card variant="outlined" sx={{ borderRadius: 2, mt: 3 }}>
-          <CardContent>
-            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
-              Hotel setup
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Columns, blocks, social security schemes, allocations, KPI drivers,
-              the calendar and the defaults for new positions. One shared copy per
-              hotel, used by every scenario.
-            </Typography>
-
-            <Divider sx={{ mb: 2 }} />
-            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-              <Button onClick={() => void handleStructurePreview()}>Check for changes</Button>
-              {anyOwner && (
-                <Button variant="outlined" onClick={() => void handleStructurePush()}>
-                  Publish setup
-                </Button>
-              )}
-            </Stack>
-          </CardContent>
-        </Card>
+        <HotelSetupCard
+          incoming={setupDiff?.incoming ?? null}
+          outgoing={setupDiff?.outgoing ?? null}
+          checked={setupDiff !== null}
+          published={setupDiff?.published ?? false}
+          busy={loading}
+          canPublish={anyOwner}
+          publisherEmail={setupPublisherEmail}
+          onCheck={() => void handleStructurePreview()}
+          onCompare={() => setSetupCompare(true)}
+          onPublish={() => void handleStructurePublishIntent()}
+        />
       )}
+
+      <HotelSetupCompareDialog
+        open={setupCompare}
+        incoming={setupDiff?.incoming ?? []}
+        outgoing={setupDiff?.outgoing ?? []}
+        busy={loading}
+        canPublish={anyOwner}
+        onDownload={() => void handleStructurePull()}
+        // Straight to the hotel-wide confirmation, not to the push: publishing
+        // the setup lands in everybody's plans, and that warning is the one
+        // thing on this page that must not be skippable.
+        onPublish={() => void handleStructurePublishIntent()}
+        onSyncBoth={() => void handleStructureSyncBoth()}
+        onClose={() => setSetupCompare(false)}
+      />
 
       <ReviewDialog
         open={pullReview !== null}
@@ -1189,11 +1410,31 @@ export default function Sync() {
         collides={pullReview?.collides ?? 0}
         collidingDepartments={pullReview?.collidingDepartments ?? []}
         pendingChanges={pullReview?.pendingChanges ?? 0}
+        byDepartment={pullReview?.byDepartment ?? {}}
+        pendingDepartments={pullReview?.pendingDepartments ?? []}
+        // Set only when the download was started from somebody's row. Leads with
+        // their departments; the dialog still shows, and says, that the rest of
+        // the plan is arriving too.
+        highlightDepartments={pullReview?.forDepartments ?? []}
         allowEmpty={pullReview?.firstDownload ?? false}
         replacesLabel={
           pullReview?.replaceLocalPlanId
             ? labelById.get(pullReview.replaceLocalPlanId) ?? "your local plan"
             : null
+        }
+        // Only offered when something would actually be overwritten — see the
+        // verdict in ReviewDialog. Closes this dialog and opens the publish
+        // review for the same plan, which is what the user meant by pressing it.
+        onPublishFirst={
+          pullReview && pullReview.collides > 0
+            ? () => {
+                const plan = localPlans.find(
+                  (candidate) => candidate.planId === pullReview.planId
+                );
+                setPullReview(null);
+                if (plan) void handlePreviewPublish(plan);
+              }
+            : undefined
         }
         onConfirm={() => void handleConfirmPull()}
         onClose={() => setPullReview(null)}
@@ -1213,19 +1454,83 @@ export default function Sync() {
         onClose={() => setPublishReview(null)}
       />
 
-      <ReviewDialog
-        open={structureReview !== null}
-        title="Download hotel setup"
-        direction="pull"
-        busy={false}
-        labels={STRUCTURE_LABELS}
-        byType={structureReview?.byType ?? {}}
-        deletedByType={structureReview?.removedByType ?? {}}
-        total={structureReview?.total ?? 0}
-        deleted={structureReview?.removed ?? 0}
-        onConfirm={() => void handleStructurePull()}
-        onClose={() => setStructureReview(null)}
-      />
+      {/* Publishing the setup is the one action on this page whose blast radius
+          is the whole hotel rather than one plan, and the button said nothing
+          about that. It also sends the WHOLE local document — not a delta since
+          the last publish — which is the part nobody expects. */}
+      <Dialog
+        open={setupPublish !== null}
+        onClose={() => setSetupPublish(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Publish this hotel&apos;s setup</DialogTitle>
+        <DialogContent dividers>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            <AlertTitle>This changes every plan at this hotel</AlertTitle>
+            Columns, blocks and schemes are one shared copy per hotel. Publishing
+            them applies to your colleagues&apos; plans as well as your own, the
+            next time they download.
+          </Alert>
+
+          {setupPublish && setupPublish.length > 0 ? (
+            <>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                What is different from the hotel&apos;s copy
+              </Typography>
+              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mb: 2 }}>
+                {countBySection(setupPublish).map(([section, count]) => (
+                  <Chip
+                    key={section}
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    label={`${STRUCTURE_LABELS[section] ?? section}: ${count}`}
+                  />
+                ))}
+              </Stack>
+              <Box sx={{ maxHeight: 220, overflowY: "auto" }}>
+                {setupPublish.slice(0, 60).map((change) => (
+                  <Typography
+                    key={`${change.section}:${change.key}`}
+                    variant="body2"
+                    color="text.secondary"
+                  >
+                    {change.kind === "removed"
+                      ? "Removes"
+                      : change.kind === "added"
+                        ? "Adds"
+                        : "Changes"}{" "}
+                    {STRUCTURE_LABELS[change.section] ?? change.section} —{" "}
+                    <strong>{change.label}</strong>
+                  </Typography>
+                ))}
+                {setupPublish.length > 60 && (
+                  <Typography variant="caption" color="text.secondary">
+                    …and {setupPublish.length - 60} more.
+                  </Typography>
+                )}
+              </Box>
+            </>
+          ) : (
+            <Typography color="text.secondary">
+              Nothing here differs from the hotel&apos;s copy. Publishing sends
+              your whole local setup anyway, which is harmless when the two
+              already agree.
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSetupPublish(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="warning"
+            onClick={() => void handleStructurePush()}
+          >
+            Publish for the whole hotel
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <ClaimPlanDialog
         open={dialog?.kind === "claim"}

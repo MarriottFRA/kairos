@@ -28,6 +28,7 @@
 import type Database from "better-sqlite3-multiple-ciphers";
 import { KairosApiError, KAIROS_ERRORS, KairosClient, query } from "./client";
 import { ChangesPage, ChangeEntity, ScopeReport } from "../../shared/kairosSync/protocol";
+import { UNCLASSIFIED_DEPARTMENT } from "../../shared/kairosSync/ipc";
 import { FALLBACK_APPLY_ORDER } from "../../shared/kairosSync/entityMap";
 import { ApplyDeps, applyEntities } from "./apply";
 import { contentHash } from "./hash";
@@ -51,6 +52,16 @@ export interface PullSummary {
   collides: number;
   /** Which departments those are in, so the warning can name them. */
   collidingDepartments: string[];
+  /**
+   * department → how many rows arrived, so the review can say WHERE.
+   *
+   * Rows with no department of their own are bucketed under
+   * `UNCLASSIFIED_DEPARTMENT` rather than skipped, so this always sums to
+   * `total`. A breakdown that quietly does not add up invites the reader to
+   * assume the missing rows went somewhere unnamed.
+   */
+  byDepartment: Record<string, number>;
+  deletedByDepartment: Record<string, number>;
 }
 
 export interface PullResult {
@@ -105,6 +116,8 @@ function tally(
   for (const entity of entities) {
     summary.byType[entity.entityType] = (summary.byType[entity.entityType] ?? 0) + 1;
     summary.total += 1;
+    const department = entity.department ?? UNCLASSIFIED_DEPARTMENT;
+    summary.byDepartment[department] = (summary.byDepartment[department] ?? 0) + 1;
     if (collidesWith?.has(`${entity.entityType}:${entity.entityId}`)) {
       summary.collides += 1;
       // Inherited rows carry their parent position's department, so a component
@@ -117,6 +130,8 @@ function tally(
     if (entity.deleted) {
       summary.deletedByType[entity.entityType] =
         (summary.deletedByType[entity.entityType] ?? 0) + 1;
+      summary.deletedByDepartment[department] =
+        (summary.deletedByDepartment[department] ?? 0) + 1;
       summary.deleted += 1;
     }
   }
@@ -170,6 +185,8 @@ async function runPull(
     pages: 0,
     collides: 0,
     collidingDepartments: [],
+    byDepartment: {},
+    deletedByDepartment: {},
   };
   const skippedTypes = new Set<string>();
 

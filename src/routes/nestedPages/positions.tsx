@@ -30,7 +30,6 @@ import {
   useGridApiRef,
 } from "@mui/x-data-grid-premium";
 import {
-  DEPARTMENT_CODE_KEY,
   FieldCatalog,
   FieldDataType,
   fieldLabel,
@@ -49,6 +48,8 @@ import {
   toRow,
   vacationCostById,
 } from "../../shared/positions/rowModel";
+import { rowDepartmentWritable } from "../../shared/positions/writeScope";
+import { departmentPickList } from "../../shared/positions/departmentPickList";
 import { buildCalendarContext } from "../../shared/engine/calendarContext";
 import { CalendarContext } from "../../shared/engine/types";
 import { CalendarYear } from "../../shared/calendar";
@@ -137,6 +138,7 @@ import DeleteClusterPositionDialog, {
 } from "../../components/positions/DeleteClusterPositionDialog";
 import PositionFormDialog from "../../components/positions/PositionFormDialog";
 import LockedDepartmentsBanner from "../../components/positions/LockedDepartmentsBanner";
+import DelegateHoldingsBanner from "../../components/positions/DelegateHoldingsBanner";
 import { uuidv7 } from "../../shared/engine/ids";
 
 /**
@@ -655,29 +657,87 @@ export default function Positions() {
    * would be one too many if they could disagree, so both consult the same
    * server-supplied set.
    */
+  /**
+   * Why creating a row would be refused, or null when it would not.
+   *
+   * Four independent situations, and the wrong sentence in any of them sends
+   * somebody to their administrator over a system that is working. "Add
+   * position" used to be gated on nothing but the loading state, so a read-only
+   * share, a plan held under a support lease and a plan that had stopped being
+   * shared all offered it and all failed at save.
+   *
+   * `canAddRows` is the delegation flag the owner set when they granted. It has
+   * been on the wire since delegation shipped and nothing has ever read it.
+   */
+  const addRefusal = useMemo((): string | null => {
+    if (planScope.notShared) {
+      return (
+        "This plan is no longer shared with you. You can read what is here, " +
+        "but new positions cannot be added."
+      );
+    }
+    if (planScope.planLocked) {
+      return "An administrator is holding this plan, so nothing can be added to it.";
+    }
+    if (planScope.writableDepartments?.size === 0) {
+      return (
+        "This plan was shared with you to look at, not to change. Ask its owner " +
+        "if you need to edit a department."
+      );
+    }
+    if (planScope.canAddRows === false) {
+      return (
+        "Your delegation covers editing the positions that are already here, " +
+        "not adding new ones. Ask the plan's owner if you need to add rows."
+      );
+    }
+    return null;
+  }, [
+    planScope.notShared,
+    planScope.planLocked,
+    planScope.writableDepartments,
+    planScope.canAddRows,
+  ]);
+
   const writeScopeRef = useRef<{
     writable: ReadonlySet<string> | undefined;
     planLocked: boolean;
     partial: boolean;
     notShared: boolean;
-  }>({ writable: undefined, planLocked: false, partial: false, notShared: false });
+    addRefusal: string | null;
+  }>({
+    writable: undefined,
+    planLocked: false,
+    partial: false,
+    notShared: false,
+    addRefusal: null,
+  });
   writeScopeRef.current = {
     writable: planScope.writableDepartments,
     planLocked: planScope.planLocked,
     partial: planScope.scopeKind === "PARTIAL",
     notShared: planScope.notShared,
+    addRefusal,
   };
 
   const rowWritable = useCallback((row: PositionRow): boolean => {
     const scope = writeScopeRef.current;
-    if (scope.planLocked) return false;
-    if (!scope.writable) return true; // never published — the local file is it
-    const code =
-      typeof row[DEPARTMENT_CODE_KEY] === "string"
-        ? (row[DEPARTMENT_CODE_KEY] as string)
-        : "";
-    return code !== "" && scope.writable.has(code);
+    return rowDepartmentWritable(row, {
+      writableDepartments: scope.writable,
+      planLocked: scope.planLocked,
+    });
   }, []);
+
+  /** What the Department picker may offer here. See `departmentPickList`. */
+  const departmentPicks = useMemo(
+    () => departmentPickList(departments, planScope.ownership, planScope.scopeKind),
+    [departments, planScope.ownership, planScope.scopeKind]
+  );
+
+  // Read inside `addPositions`, which is deliberately dependency-free — see the
+  // note on `writeScopeRef`.
+  const structureEditableRef = useRef(true);
+  structureEditableRef.current = planScope.structureEditable;
 
   /** Why a write was refused, in the words the Sync page would use. */
   const refusalReason = useCallback((count: number): string => {
@@ -978,6 +1038,20 @@ export default function Positions() {
       const queue = queueRef.current;
       if (!currentCatalog || !queue) return;
 
+      /**
+       * The backstop, and it is load-bearing rather than belt-and-braces.
+       *
+       * The toolbar's own gate covers the button, but this is also called from
+       * the cluster-seed navigation effect below, which never touches the
+       * toolbar — so a "add a position in this cluster" link would otherwise
+       * walk straight past the refusal.
+       */
+      const refusal = writeScopeRef.current.addRefusal;
+      if (refusal) {
+        setToast(refusal);
+        return;
+      }
+
       const total = Math.min(Math.max(Math.trunc(count) || 1, 1), MAX_BULK_ADD);
 
       // Seed the Contract columns (Yearly Days, Days Off, Public Holidays, Daily
@@ -1002,12 +1076,24 @@ export default function Positions() {
         drafts.push(draft);
       }
       setRows((current) => [...current, ...drafts]);
-      if (writeScopeRef.current.partial) {
-        // A new row has no department yet, and a row with no department is
-        // owner-only server-side. A delegate can create it but cannot type into
-        // it until it is one of theirs, which without this reads as a dead row.
+      /**
+       * A new row has no department, and only somebody with structure rights can
+       * publish one of those.
+       *
+       * The condition used to be `partial`, which was wrong twice: it missed a
+       * full-scope delegate entirely, and it told people the row could not be
+       * EDITED — which was true at the time and was itself the bug, because the
+       * lock covered the department picker they needed. The row is editable now;
+       * what it cannot do is go anywhere unclassified, and the amber tint keeps
+       * saying so after the snackbar has gone.
+       */
+      if (!structureEditableRef.current) {
         setToast(
-          "Added. Set the department to one of yours before you can edit or publish these."
+          drafts.length === 1
+            ? "Position added. Give it a department before you publish — a row with no " +
+                "department can only be published by the plan's owner."
+            : `${drafts.length} positions added. Give them a department before you publish — ` +
+                "rows with no department can only be published by the plan's owner."
         );
       } else if (drafts.length > 1) {
         setToast(`${drafts.length} positions added`);
@@ -1671,6 +1757,29 @@ export default function Positions() {
         />
       )}
 
+      {/* The other half of the same fact: which departments ARE yours, and the
+          route to handing them back — which had no discoverable entry point at
+          all before, because the only link to the Delegation page was gated on
+          the granting capability. */}
+      {gridReady && planScope.relation === "DELEGATE" && scenario && (
+        <DelegateHoldingsBanner
+          departments={[...(planScope.writableDepartments ?? [])]}
+          onHandBack={() =>
+            navigate(`/signed-in-landing/delegation?plan=${scenario.id}`, {
+              state: {
+                plan: {
+                  planId: scenario.id,
+                  label: scenario.label,
+                  year: scenario.year,
+                  ou: selectedHotelOu,
+                  ownerEmail: null,
+                },
+              },
+            })
+          }
+        />
+      )}
+
       {/* Structure problems (e.g. blocks referencing each other in a loop)
           pause the block totals; everything else keeps working. */}
       {liveSim.errors && liveSim.errors.length > 0 && (
@@ -1694,6 +1803,8 @@ export default function Positions() {
           queueState={queueSnapshot.state}
           pendingRows={queueSnapshot.pendingRows}
           onAddPositions={addPositions}
+          canAddPositions={addRefusal === null}
+          addBlockedReason={addRefusal}
           onAddBlock={() => setBlockDialog({ mode: "create" })}
           onToggleMask={() => setMasked((value) => !value)}
           onToggleGroup={() => setGroupByDept((value) => !value)}
@@ -1744,7 +1855,9 @@ export default function Positions() {
             blockResults={liveSim.results}
             masked={masked}
             writableDepartments={planScope.writableDepartments}
+            departmentPicks={departmentPicks}
             planLocked={planScope.planLocked}
+            structureEditable={planScope.structureEditable}
             groupByDept={groupByDept}
             showInactive={showInactive}
             loading={loading}
@@ -1888,6 +2001,7 @@ export default function Positions() {
           hotelNames={hotelNames}
           masked={masked}
           writableDepartments={planScope.writableDepartments}
+          departmentPicks={departmentPicks}
           planLocked={planScope.planLocked}
           status={queueSnapshot.statusByRow.get(editRowId ?? "")}
           initialFocusField={editFocusField}

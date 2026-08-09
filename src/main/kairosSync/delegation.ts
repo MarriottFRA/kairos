@@ -43,6 +43,7 @@ import {
   DelegationList,
   DepartmentOwnership,
   HandbackResult,
+  MyDelegationList,
   PartialOverlapContext,
   PresenceReport,
   RevokeResponse,
@@ -107,11 +108,21 @@ export function listDelegations(
   return client.get<DelegationList>(`${plan(planId)}/delegations`);
 }
 
-/** My delegations across every hotel, including ones revoked in the last 30 days. */
-export function listMyDelegations(
-  client: KairosClient
-): Promise<{ delegations: Delegation[] }> {
-  return client.get<{ delegations: Delegation[] }>(`/me/delegations`);
+/**
+ * My delegations across every hotel, including ones revoked in the last 30 days.
+ *
+ * `MyDelegation`, not `Delegation`. This was typed as the latter and they are
+ * not the same record: the owner's view of a grant they made is keyed by
+ * delegate, this is the delegate's view of a grant they received and is keyed by
+ * plan — so it carries `ou`, `year`, `label` and `state`, and carries no
+ * `delegateEmail`. The mistyping went unnoticed because nothing called it.
+ *
+ * A withdrawn delegation stays listed on purpose. The plan does not simply
+ * vanish; the client can keep showing it with a banner, which is what "your work
+ * is not lost" looks like in a UI.
+ */
+export function listMyDelegations(client: KairosClient): Promise<MyDelegationList> {
+  return client.get<MyDelegationList>(`/me/delegations`);
 }
 
 /** What a grant attempt produced, including the case the owner must confirm. */

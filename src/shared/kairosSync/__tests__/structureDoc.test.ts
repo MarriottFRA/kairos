@@ -11,7 +11,9 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { canonicalJson } from "../canonical";
 import {
+  FIELD_DIFF_LIMIT,
   STRUCTURE_DOC_VERSION,
   StructureDoc,
   calendarFromDoc,
@@ -164,6 +166,113 @@ describe("mergeStructureDoc", () => {
 
     const { doc: fromNothing } = mergeStructureDoc(emptyStructureDoc(OU), local);
     expect(fromNothing.fieldCatalog).toHaveLength(1);
+  });
+});
+
+/**
+ * What a row has to differ BY to count as different.
+ *
+ * These are the cases the suite above could not catch, because every test in it
+ * builds both sides from the same helper and therefore in the same key order.
+ * The app does not: `pushStructure` canonicalises before sending, so the
+ * server's copy comes back with sorted keys while `buildStructureDoc` assembles
+ * the local one in field-declaration order. Compared with a plain
+ * `JSON.stringify` the two can never be equal, whatever the values — which
+ * reported an untouched hotel's entire column set as changed in both directions,
+ * and left the diff exactly as it was after downloading, so the download read as
+ * a no-op.
+ */
+describe("what counts as a difference", () => {
+  /** The server's copy: same values, canonical key order. */
+  function asServerSent(row: Record<string, unknown>): Record<string, unknown> {
+    return JSON.parse(canonicalJson(row)) as Record<string, unknown>;
+  }
+
+  it("does not report a row whose keys arrive in canonical order", () => {
+    const local = doc([field("shared")]);
+    const incoming = doc([asServerSent(field("shared"))]);
+
+    expect(mergeStructureDoc(local, incoming).changes).toHaveLength(0);
+    // And the other way round, which is the "not published" count on the card.
+    expect(mergeStructureDoc(incoming, local).changes).toHaveLength(0);
+  });
+
+  it("does not report a row that differs only by updatedAt", () => {
+    // Every machine seeds its own catalog with its own clock, so this is the
+    // steady state for all 79 system columns at a hotel, not an edge case.
+    const local = doc([field("shared", { updatedAt: "2026-07-01T00:00:00.000Z" })]);
+    const incoming = doc([field("shared", { updatedAt: "2026-08-09T11:22:33.000Z" })]);
+
+    expect(mergeStructureDoc(local, incoming).changes).toHaveLength(0);
+  });
+
+  it("does not report a row that differs only by seedVersion", () => {
+    const local = doc([field("shared", { seedVersion: 29 })]);
+    const incoming = doc([field("shared", { seedVersion: 28 })]);
+
+    expect(mergeStructureDoc(local, incoming).changes).toHaveLength(0);
+  });
+
+  it("does not report a config blob whose nested keys are reordered", () => {
+    const local: StructureDoc = {
+      docVersion: STRUCTURE_DOC_VERSION,
+      ou: OU,
+      blockConfigs: [
+        { id: "b1", ou: OU, blockType: "MERIT", label: "Merit", config: { a: 1, b: 2 } },
+      ],
+    };
+    const incoming: StructureDoc = {
+      docVersion: STRUCTURE_DOC_VERSION,
+      ou: OU,
+      blockConfigs: [
+        { id: "b1", ou: OU, blockType: "MERIT", label: "Merit", config: { b: 2, a: 1 } },
+      ],
+    };
+
+    expect(mergeStructureDoc(local, incoming).changes).toHaveLength(0);
+  });
+
+  it("still reports a real change, and names the field that moved", () => {
+    const local = doc([field("shared", { customLabel: "Ours", visible: true })]);
+    const incoming = doc([
+      asServerSent(field("shared", { customLabel: "Theirs", visible: false })),
+    ]);
+
+    const { changes } = mergeStructureDoc(local, incoming);
+    expect(changes).toHaveLength(1);
+    expect(changes[0].fields).toEqual([
+      { field: "customLabel", base: "Ours", incoming: "Theirs" },
+      { field: "visible", base: "Yes", incoming: "No" },
+    ]);
+    expect(changes[0].moreFields).toBeUndefined();
+  });
+
+  it("caps the field list and counts what it left out", () => {
+    // A row that disagrees about everything is "a different row", not something
+    // anybody reads line by line — but the count must not lie about it.
+    const local = doc([field("shared")]);
+    const incoming = doc([
+      field("shared", {
+        section: "PII",
+        dataType: "TEXT",
+        storage: "POSITION_EXTRA",
+        origin: "USER",
+        locked: true,
+        defaultLabel: "Other",
+        customLabel: "Other",
+        sortOrder: 99,
+        visible: false,
+        editable: false,
+        maskable: true,
+        vector: "MONTHLY",
+        monthIndex: 3,
+        computeKey: "x",
+      }),
+    ]);
+
+    const { changes } = mergeStructureDoc(local, incoming);
+    expect(changes[0].fields).toHaveLength(FIELD_DIFF_LIMIT);
+    expect(changes[0].moreFields).toBe(2);
   });
 });
 

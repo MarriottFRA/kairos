@@ -265,7 +265,30 @@ export function applyStructureDoc(db: Db, doc: StructureDoc): void {
 export interface StructurePullResult {
   /** null when the property has published nothing — keep the local copy. */
   document: StructureDocument | null;
+  /**
+   * Whether the property has EVER published its setup.
+   *
+   * Its own flag rather than `document === null`, which is also what a 304 says.
+   * The two need telling apart: a hotel that has published nothing has an empty
+   * diff because there is nothing to compare against, and calling that "matches
+   * the server" — as the card did — is untrue in the one direction that matters.
+   */
+  published: boolean;
+  /** What DOWNLOADING would change here. */
   changes: StructureChange[];
+  /**
+   * What PUBLISHING would change for everybody else at this hotel.
+   *
+   * The mirror image, and it has to be computed separately: `changes` merges the
+   * server into the local copy, and the answer to "what would my publish do to
+   * theirs" is the same merge run the other way round. Both documents are in
+   * hand at this point, so it costs one more pure call and no request.
+   *
+   * This is what makes the blast radius visible before the button is pressed —
+   * `pushStructure` sends the WHOLE local document, not just what was touched
+   * since the last publish, and the merge server-side is additive.
+   */
+  outgoing: StructureChange[];
   merged: StructureDoc | null;
   applied: boolean;
 }
@@ -295,7 +318,11 @@ export async function pullStructure(
       // uploaded its configuration, and its local copy stands.
       return {
         document: null,
+        published: false,
         changes: [],
+        // Nothing published yet, so publishing sends the local document whole.
+        // The card says that in words rather than listing every row.
+        outgoing: [],
         merged: null,
         applied: false,
         etag: null,
@@ -308,7 +335,11 @@ export async function pullStructure(
   if (response.status === 304) {
     return {
       document: null,
+      // A 304 is only ever an answer to "has it changed", which the server can
+      // only give about something it holds.
+      published: true,
       changes: [],
+      outgoing: [],
       merged: null,
       applied: false,
       etag: response.etag,
@@ -319,12 +350,17 @@ export async function pullStructure(
   const incoming = response.body.doc as unknown as StructureDoc;
   const local = buildStructureDoc(db, ou);
   const { doc, changes } = mergeStructureDoc(local, incoming);
+  // The same merge the other way round: what this machine's copy would do to
+  // the hotel's. Never applied — only reported.
+  const { changes: outgoing } = mergeStructureDoc(incoming, local);
 
   if (options.apply) applyStructureDoc(db, doc);
 
   return {
     document: response.body,
+    published: true,
     changes,
+    outgoing,
     merged: doc,
     applied: options.apply === true,
     etag: response.etag,

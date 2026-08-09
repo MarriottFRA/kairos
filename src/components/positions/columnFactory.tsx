@@ -45,7 +45,6 @@ import {
   FieldCatalog,
   FieldDef,
   fieldLabel,
-  DEPARTMENT_CODE_KEY,
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
   SectionId,
@@ -71,6 +70,8 @@ import {
   PositionRow,
 } from "../../shared/positions/rowModel";
 import { headcountAccountForJobType } from "../../shared/positions/systemAccounts";
+import { rowDepartmentWritable } from "../../shared/positions/writeScope";
+import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import { ORPHAN_GROUP } from "./gridValueBridge";
 import { headerPresentation } from "./headerMeta";
@@ -85,6 +86,19 @@ export interface ColumnFactoryContext {
   /** Department options for the `departments` dropdown. Empty when the mapping
    *  tables have not been synced — the field then stays free text. */
   departments: DepartmentOption[];
+  /**
+   * Which of `departments` may actually be chosen, and which show greyed.
+   *
+   * Deliberately a second field rather than a narrowing of `departments`, which
+   * carries an unrelated second meaning: `autofilledCodeKeys` reads
+   * `departments.length === 0` as "reference data was never synced, so leave the
+   * code column typeable". Narrowing it to `[]` for a revoked delegate would
+   * silently unlock that mirror as free text.
+   *
+   * Omit for no restriction — an unpublished plan, or any caller that predates
+   * delegation.
+   */
+  departmentPicks?: DepartmentPickList;
   /** Account options (the whole account_maps cache) for the `accounts`
    *  dropdowns. Each account field narrows this to its own subset (A9…, A5…).
    *  Empty when the mapping tables have not been synced — those fields then stay
@@ -138,20 +152,51 @@ const filterDepartments = createFilterOptions<DepartmentOption>({
  * page's row-update path. A stored name no longer in the synced reference data
  * is injected as its own option so it stays visible and re-picking never blanks
  * the cell.
+ *
+ * Departments this user cannot write are shown, disabled, with the reason — see
+ * `departmentPickList`. Offering them as ordinary choices is what let somebody
+ * lock themselves out of the row they were editing with one keystroke.
  */
 function DepartmentEditCell(
-  props: GridRenderEditCellParams<PositionRow> & { options: DepartmentOption[] }
+  props: GridRenderEditCellParams<PositionRow> & {
+    picks: DepartmentPickList;
+    /** Every known department, for resolving a value outside both lists. */
+    all: DepartmentOption[];
+  }
 ) {
-  const { id, field, value, options, hasFocus } = props;
+  const { id, field, value, picks, all, hasFocus } = props;
   const apiRef = useGridApiContext();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const name = typeof value === "string" ? value : "";
-  const known = name ? options.find((option) => option.name === name) : null;
-  // Legacy/unsynced name: keep it selectable rather than dropping it silently.
-  const orphan = name && !known ? { code: "", name } : null;
-  const current = known ?? orphan;
-  const selectable = orphan ? [orphan, ...options] : options;
+  /**
+   * Whatever this row currently holds, resolved widest-last so the cell never
+   * renders blank: something they may pick, then something they may see but not
+   * pick, then a department real but outside both lists, then a legacy or
+   * unsynced name that exists only on this row.
+   */
+  const current = name
+    ? picks.selectable.find((option) => option.name === name) ??
+      picks.locked.find((option) => option.name === name) ??
+      all.find((option) => option.name === name) ?? { code: "", name }
+    : null;
+
+  const currentIsSelectable =
+    current !== null &&
+    picks.selectable.some((option) => option.name === current.name);
+
+  const options = [
+    ...(current && !currentIsSelectable ? [current] : []),
+    ...picks.selectable,
+    ...picks.locked,
+  ];
+  const disabledNames = new Set<string>(picks.locked.map((option) => option.name));
+  // The row's own value, when it is not one they may choose. Visible so the cell
+  // reads correctly, disabled so re-picking it is not offered as a fresh choice.
+  if (current && !currentIsSelectable) disabledNames.add(current.name);
+  const reasonByName = new Map(
+    picks.locked.map((option) => [option.name, option.reason])
+  );
 
   useEffect(() => {
     if (hasFocus) inputRef.current?.focus();
@@ -159,7 +204,7 @@ function DepartmentEditCell(
 
   return (
     <Autocomplete<DepartmentOption>
-      options={selectable}
+      options={options}
       value={current}
       openOnFocus
       autoHighlight
@@ -167,11 +212,28 @@ function DepartmentEditCell(
       filterOptions={filterDepartments}
       getOptionLabel={(option) => option.name}
       isOptionEqualToValue={(option, picked) => option.name === picked.name}
-      renderOption={(optionProps, option) => (
-        <Box component="li" {...optionProps} key={option.code || option.name}>
-          {option.name}
-        </Box>
-      )}
+      // By name, not identity: `filterOptions` hands back new array entries.
+      getOptionDisabled={(option) => disabledNames.has(option.name)}
+      renderOption={(optionProps, option) => {
+        const reason = reasonByName.get(option.name);
+        return (
+          <Box component="li" {...optionProps} key={option.code || option.name}>
+            <Box sx={{ minWidth: 0 }}>
+              <Box component="span" sx={{ display: "block" }}>
+                {option.name}
+              </Box>
+              {reason && (
+                <Box
+                  component="span"
+                  sx={{ display: "block", fontSize: 12, color: "text.secondary" }}
+                >
+                  {reason}
+                </Box>
+              )}
+            </Box>
+          </Box>
+        );
+      }}
       onChange={(_event, picked) => {
         // Commit immediately: without stopCellEditMode the pick sets the edit
         // value but the cell stays open, so processRowUpdate (and the code
@@ -737,6 +799,9 @@ function departmentWritableFor(
   // Unpublished plan (or a full-scope user): the local file is the only copy and
   // everything is editable, which is exactly how the app behaved before sync
   // existed. Hand back a constant so the hot path costs one call and no lookups.
+  //
+  // The predicate itself lives in `shared/positions/writeScope` — this is the
+  // memoised wrapper around it, nothing more. Three copies of it used to exist.
   const resolve =
     writable === undefined
       ? () => true
@@ -744,14 +809,7 @@ function departmentWritableFor(
           if (!row) return true;
           const hit = cache.get(row);
           if (hit !== undefined) return hit;
-          const code =
-            typeof row[DEPARTMENT_CODE_KEY] === "string"
-              ? (row[DEPARTMENT_CODE_KEY] as string)
-              : "";
-          // A row with no department is owner-only server-side. Locking it for a
-          // delegate matches what a save would actually do, rather than letting
-          // them type into rows that come back DEPARTMENT_UNASSIGNED.
-          const allowed = code !== "" && writable.has(code);
+          const allowed = rowDepartmentWritable(row, ctx);
           cache.set(row, allowed);
           return allowed;
         };
@@ -1078,9 +1136,12 @@ function buildColumn(
   // Attached only when options exist — otherwise the field stays plain editable
   // text, and both the paste path and the code auto-fill tolerate a typed name.
   if (def.dropdownSource?.kind === "departments" && ctx.departments.length > 0) {
-    const options = ctx.departments;
+    const all = ctx.departments;
+    // No pick list supplied is "no restriction", which is the unpublished case
+    // and every caller that predates delegation.
+    const picks = ctx.departmentPicks ?? { selectable: all, locked: [] };
     column.renderEditCell = (params) => (
-      <DepartmentEditCell {...params} options={options} />
+      <DepartmentEditCell {...params} picks={picks} all={all} />
     );
   }
 

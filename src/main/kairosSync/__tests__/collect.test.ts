@@ -86,7 +86,7 @@ describe("collectLocalEntities", () => {
     // reordering.
     const stores = makeStores();
     seed(stores);
-    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
 
     const firstOf = (type: string) =>
       entities.findIndex((entity) => entity.entityType === type);
@@ -98,7 +98,7 @@ describe("collectLocalEntities", () => {
   it("resolves an inherited row's department from its parent position", () => {
     const stores = makeStores();
     seed(stores);
-    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
 
     const pii = entities.find((entity) => entity.entityType === "position_pii");
     const componentValue = entities.find(
@@ -116,7 +116,7 @@ describe("collectLocalEntities", () => {
       .prepare(`UPDATE positions SET deleted_at = ? WHERE id = ?`)
       .run("2026-07-02T00:00:00.000Z", "pos-fb");
 
-    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
     const deleted = entities.find((entity) => entity.entityId === "pos-fb");
     expect(deleted).toBeDefined();
     expect(deleted?.deleted).toBe(true);
@@ -125,7 +125,7 @@ describe("collectLocalEntities", () => {
   it("omits personal details when the property forbids storing them", () => {
     const stores = makeStores();
     seed(stores);
-    const entities = collectLocalEntities(stores, {
+    const { entities } = collectLocalEntities(stores, {
       ou: OU,
       planId: PLAN,
       includePii: false,
@@ -145,8 +145,103 @@ describe("collectLocalEntities", () => {
       )
       .run("pos-other", "OU99999", "plan-2", "D0410", "2026-07-01T00:00:00.000Z");
 
-    const entities = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
     expect(entities.some((entity) => entity.entityId === "pos-other")).toBe(false);
+  });
+
+  /**
+   * The two shapes of local damage that used to reach the server looking like a
+   * permission problem.
+   *
+   * `str()` in `entityMap` turns a NULL column into `""`, and `position_pii`
+   * derives BOTH its id and its parent id from `position_id` — so a row with a
+   * null key became `entityId: ""` with a non-null (empty) parent, which read
+   * downstream as "has a parent, department unknown" and therefore as plan-wide.
+   * The delegate who saw `PII_KEY_MISMATCH` and `STRUCTURE_OWNER_ONLY` after an
+   * ordinary afternoon's editing was seeing exactly this.
+   */
+  it("drops a personal-details row with no position id, and says why", () => {
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb
+      .prepare(
+        `INSERT INTO position_pii (position_id, ou, scenario_id, last_name, updated_at)
+         VALUES (NULL, ?, ?, ?, ?)`
+      )
+      .run(OU, PLAN, "Orphan", "2026-07-02T00:00:00.000Z");
+
+    const { entities, unpublishable } = collectLocalEntities(stores, {
+      ou: OU,
+      planId: PLAN,
+    });
+
+    expect(entities.some((entity) => entity.entityId === "")).toBe(false);
+    expect(unpublishable).toContainEqual(
+      expect.objectContaining({ entityType: "position_pii", reason: "EMPTY_KEY" })
+    );
+  });
+
+  it("drops an inherited row whose parent position is gone, and says why", () => {
+    /**
+     * Reachable, but only through a gap in the constraint.
+     *
+     * `position_pii.position_id` is `REFERENCES positions(id) ON DELETE CASCADE`
+     * and `foreign_keys` is ON in both live stores, so the ordinary delete path
+     * cannot strand one. What can is any window where enforcement is off — the
+     * Settings rebuild, a migration, a store restored from before the
+     * constraint — which is exactly when nobody is watching. Hence the pragma
+     * here: the state is contrived on purpose, and the point is that publish
+     * classifies it as local damage rather than letting the server call it a
+     * permission failure.
+     */
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb.pragma("foreign_keys = OFF");
+    stores.secureDb
+      .prepare(
+        `INSERT INTO position_pii (position_id, ou, scenario_id, last_name, updated_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("pos-vanished", OU, PLAN, "Ghost", "2026-07-02T00:00:00.000Z");
+    stores.secureDb.pragma("foreign_keys = ON");
+
+    const { entities, unpublishable } = collectLocalEntities(stores, {
+      ou: OU,
+      planId: PLAN,
+    });
+
+    // An absent parent and a parent with no department are opposite situations.
+    // The old `.get(...) ?? null` collapsed them and classified this plan-wide.
+    expect(entities.some((entity) => entity.entityId === "pos-vanished")).toBe(false);
+    expect(unpublishable).toContainEqual(
+      expect.objectContaining({
+        entityType: "position_pii",
+        reason: "ORPHANED_LOCALLY",
+      })
+    );
+  });
+
+  it("keeps an inherited row whose parent simply has no department", () => {
+    // The other side of the same distinction: `pos-none` exists and is
+    // unclassified, so its children travel and are judged as owner-only rows.
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb
+      .prepare(
+        `INSERT INTO position_pii (position_id, ou, scenario_id, last_name, updated_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("pos-none", OU, PLAN, "Unclassified", "2026-07-02T00:00:00.000Z");
+
+    const { entities, unpublishable } = collectLocalEntities(stores, {
+      ou: OU,
+      planId: PLAN,
+    });
+
+    const pii = entities.find((entity) => entity.entityId === "pos-none");
+    expect(pii).toBeDefined();
+    expect(pii?.department).toBeNull();
+    expect(unpublishable).toHaveLength(0);
   });
 });
 
@@ -185,6 +280,28 @@ describe("filterToWriteScope", () => {
       departments: new Set(["D0410"]),
     });
     expect(publishable).toHaveLength(0);
+  });
+
+  it("never sends the plan's own rows without structure rights, even wide open", () => {
+    /**
+     * The invariant, stated where it is cheapest.
+     *
+     * `departments: null` means "no restriction", which is what `writeScopeFor`
+     * falls back to when `/department-ownership` has never been cached. Deciding
+     * plan-wide rows on the TYPE rather than on a null department code is what
+     * stops that fallback putting a delegate's name on the scenario row.
+     */
+    const planWide: LocalEntity[] = [
+      entity("scenario", PLAN, null),
+      entity("engine_run", `run:${PLAN}`, null),
+      entity("position", "a", "D0410"),
+    ];
+    const { publishable, withheld } = filterToWriteScope(planWide, {
+      canWriteStructure: false,
+      departments: null,
+    });
+    expect(publishable.map((e) => e.entityId)).toEqual(["a"]);
+    expect(withheld.map((e) => e.entityType).sort()).toEqual(["engine_run", "scenario"]);
   });
 });
 

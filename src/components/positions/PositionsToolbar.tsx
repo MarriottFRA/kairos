@@ -63,6 +63,17 @@ export interface PositionsToolbarProps {
   pendingRows: number;
   /** Append `count` blank positions (1 from the main button, N from its menu). */
   onAddPositions: (count: number) => void;
+  /**
+   * May this user create rows at all?
+   *
+   * Separate from `disabled`, which is the loading state. This one is a
+   * permission and needs its own sentence — a read-only share, a support lease,
+   * a withdrawn delegation and a grant made without `canAddRows` all land here
+   * and mean different things.
+   */
+  canAddPositions?: boolean;
+  /** The sentence for the tooltip when `canAddPositions` is false. */
+  addBlockedReason?: string | null;
   onAddBlock: () => void;
   onToggleMask: () => void;
   onToggleGroup: () => void;
@@ -147,6 +158,8 @@ export default function PositionsToolbar({
   queueState,
   pendingRows,
   onAddPositions,
+  canAddPositions = true,
+  addBlockedReason = null,
   onAddBlock,
   onToggleMask,
   onToggleGroup,
@@ -188,25 +201,36 @@ export default function PositionsToolbar({
       {/* Split button: the bare click adds one row and drops you into its first
           cell; the arrow adds a batch, which deliberately does not open an
           editor (see addPositions). */}
-      <ButtonGroup variant="contained" disableElevation sx={{ height: CONTROL_HEIGHT }}>
-        <Button
-          startIcon={<AddIcon />}
-          onClick={() => onAddPositions(1)}
-          disabled={disabled}
-          sx={{ px: 2 }}
-        >
-          Add position
-        </Button>
-        <Button
-          size="small"
-          aria-label="Add several positions"
-          onClick={(event) => setAddAnchor(event.currentTarget)}
-          disabled={disabled}
-          sx={{ px: 0.5, minWidth: 32 }}
-        >
-          <ArrowDropDownIcon />
-        </Button>
-      </ButtonGroup>
+      {/* The span wrapper is what lets a disabled button still show a tooltip —
+          the same idiom "Add block" already uses below. Without it the one
+          explanation of why the button is dead never appears. */}
+      <Tooltip title={canAddPositions ? "" : addBlockedReason ?? ""}>
+        <span>
+          <ButtonGroup
+            variant="contained"
+            disableElevation
+            sx={{ height: CONTROL_HEIGHT }}
+          >
+            <Button
+              startIcon={<AddIcon />}
+              onClick={() => onAddPositions(1)}
+              disabled={disabled || !canAddPositions}
+              sx={{ px: 2 }}
+            >
+              Add position
+            </Button>
+            <Button
+              size="small"
+              aria-label="Add several positions"
+              onClick={(event) => setAddAnchor(event.currentTarget)}
+              disabled={disabled || !canAddPositions}
+              sx={{ px: 0.5, minWidth: 32 }}
+            >
+              <ArrowDropDownIcon />
+            </Button>
+          </ButtonGroup>
+        </span>
+      </Tooltip>
 
       <Menu
         anchorEl={addAnchor}

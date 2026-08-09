@@ -559,6 +559,39 @@ export interface DelegationList {
   delegations: Delegation[];
 }
 
+/**
+ * One plan delegated to ME, from `GET /me/delegations`.
+ *
+ * NOT a `Delegation`, and the difference is not cosmetic. That one is the
+ * owner's view of a grant they made and is keyed by delegate; this is the
+ * delegate's view of a grant they received and is keyed by plan — which is why
+ * it carries `ou`, `year` and `label` and no `delegateEmail`.
+ *
+ * It is also the only surface that lists plans at OTHER hotels, and the only one
+ * that still lists a delegation after it was withdrawn (30 days). Both matter:
+ * the first is how a deep link can say "that plan is at another hotel, switch to
+ * it" rather than "not found", and the second is what "your work is not lost"
+ * looks like in a UI.
+ */
+export interface MyDelegation {
+  delegationId: string;
+  planId: string;
+  ou: string;
+  year: number;
+  label: string;
+  state: "ACTIVE" | "REVOKED";
+  revokedAt: string | null;
+  revokedWithUnsynced: boolean;
+  generation: number;
+  departments: Array<{ code: string; state: HandbackState }>;
+  /** Present on a REVOKED entry: who to talk to, and about what. */
+  remedy: { kind: string; ownerUserId: number | null } | null;
+}
+
+export interface MyDelegationList {
+  delegations: MyDelegation[];
+}
+
 export interface DelegationCreate {
   delegateUserId: number;
   departments: string[];

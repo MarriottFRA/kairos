@@ -538,14 +538,19 @@ export const ENTITY_SPECS: Record<PublishedEntityType, TypeSpec> = {
     fromPayload: piiFromPayload,
     // entityId === parentId === the position id. Anything else is PII_KEY_MISMATCH.
     idOf: (row) => str(row.position_id),
-    parentOf: (row) => str(row.position_id),
+    // `nullableStr`, so a NULL column stays null instead of becoming "". An
+    // empty-string parent id reads downstream as "has a parent, department
+    // unknown" — which is how an orphan PII row ended up classified plan-wide
+    // and sent by callers who may not send plan-wide rows.
+    parentOf: (row) => nullableStr(row.position_id),
     departmentOf: () => null, // inherited from the parent position, server-side
   },
   component_value: {
     toPayload: componentValueToPayload,
     fromPayload: componentValueFromPayload,
     idOf: (row) => componentValueId(str(row.position_id), str(row.component_def_id)),
-    parentOf: (row) => str(row.position_id),
+    // Same reason as `position_pii` above.
+    parentOf: (row) => nullableStr(row.position_id),
     departmentOf: () => null,
   },
   buyout_row: {

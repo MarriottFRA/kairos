@@ -18,12 +18,28 @@
  * work, and a publish can carry a deletion nobody meant. Neither is undone by
  * pressing the button again.
  *
- * ## Support tools
+ * ## One decision per band
  *
- * The administrator controls are rendered only when the Settings switch is on
- * AND the server has confirmed the account is an administrator. They sit in an
- * overflow menu rather than the button row, with warning colouring, because
- * "Delete plan" should not be one pixel away from "Publish".
+ * The footer used to carry five buttons of near-equal weight — Delegation, Hand
+ * over, Download, Publish, Details — and above them two more, plus an Alert.
+ * Every one was individually justified and together they were a wall, which is
+ * a bad thing to put in front of a finance director who wants to know whether
+ * it is safe to press anything.
+ *
+ * So the footer is now two verbs and an overflow. Delegation left it entirely
+ * (the people section IS the route now), and handing over, checking for
+ * differences and repairing the sync state went behind "More" — all three are
+ * real and none is a thing anybody does weekly.
+ *
+ * ## Two overflow menus, on purpose
+ *
+ * The plain "More" in the footer holds the rare-but-ordinary. The warning-
+ * coloured one in the header holds support tools, is drawn only when the
+ * Settings switch is on AND the server has confirmed the account is an
+ * administrator, and its actions are recorded. They are different colours in
+ * different places because "Delete plan" should not be one pixel away from
+ * "Publish" — which is also why deleting the server's copy stays inside Details
+ * rather than joining the footer menu.
  */
 
 import { ReactNode, useState } from "react";
@@ -47,12 +63,16 @@ import CloudOffOutlinedIcon from "@mui/icons-material/CloudOffOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import CloudDownloadOutlinedIcon from "@mui/icons-material/CloudDownloadOutlined";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import { PlanSyncStatus } from "../../shared/kairosSync/ipc";
-import { Lease } from "../../shared/kairosSync/protocol";
-import { PlanState, planState } from "../../shared/kairosSync/planState";
+import { PlanDelegationSummary } from "../../shared/kairosSync/delegationSummary";
+import { ActivityEntry, Delegation, Lease } from "../../shared/kairosSync/protocol";
+import PlanPeopleSection from "./PlanPeopleSection";
+import { TONE_COLOUR } from "./tone";
+import { planState } from "../../shared/kairosSync/planState";
+import { syncAssurance } from "../../shared/kairosSync/syncAssurance";
 import {
-  canDelegate,
   canDeletePlan,
   canRead,
   RELATION_EXPLAINER,
@@ -73,13 +93,6 @@ const VIEW_ONLY_EXPLAINER = {
   next:
     "The owner is still working on this plan. If you need to edit a department, " +
     "ask them — they can switch this on without re-sharing the plan.",
-};
-
-const TONE_COLOUR: Record<PlanState["tone"], string> = {
-  neutral: "text.disabled",
-  good: "success.main",
-  attention: "warning.main",
-  blocked: "error.main",
 };
 
 export interface PlanAdminActions {
@@ -105,7 +118,36 @@ export interface PlanSyncCardProps {
   onPreviewPull: () => void;
   /** Both sides moved — ask which copy wins rather than picking one. */
   onResolveDivergence: () => void;
-  onOpenDelegation: () => void;
+  /** Optionally anchored on one grant, when the click came from a person's row. */
+  onOpenDelegation: (delegationId?: string) => void;
+  /**
+   * The grants on this plan, for the people section. `null` = not fetched yet,
+   * which is NOT the same as nobody holding anything.
+   */
+  delegations?: Delegation[] | null;
+  /** Presence, keyed by `delegateUserId`. */
+  presenceByUserId?: Record<string, ActivityEntry>;
+  /** Collect one delegate's finished work — an ordinary whole-plan pull. */
+  onDownloadForDelegation?: (delegation: Delegation) => void;
+  /**
+   * `POST /manifest/diff` — reports what disagrees, changes nothing.
+   *
+   * In the overflow rather than the card body: it answers a question almost
+   * nobody has, and the two people who do have it are usually on the phone to
+   * support when they ask it.
+   */
+  onReconcile?: () => void;
+  /** `GET /manifest` — adopts the server's hashes into the shadow. */
+  onRebuildShadow?: () => void;
+  /**
+   * A fresher `/department-ownership` answer than the status call carried.
+   *
+   * The status call derives `plan.delegation` from whatever was last cached,
+   * which is nothing at all for an owner who has never opened the Delegation
+   * page — most of them. `useDelegationOverview` fills that in for the plans
+   * that can have a delegation; this is where the result arrives.
+   */
+  delegationOverride?: PlanDelegationSummary | null;
   /** Owner-callable, no administrator involved. */
   onTransfer?: () => void;
   /**
@@ -137,6 +179,12 @@ export default function PlanSyncCard({
   onPreviewPull,
   onResolveDivergence,
   onOpenDelegation,
+  delegations = null,
+  presenceByUserId = {},
+  onDownloadForDelegation,
+  onReconcile,
+  onRebuildShadow,
+  delegationOverride,
   onTransfer,
   onDeleteFromServer,
   onDiscardLocalCopy,
@@ -173,6 +221,24 @@ export default function PlanSyncCard({
   const [showDetails, setShowDetails] = useState(false);
   const [relationAnchor, setRelationAnchor] = useState<HTMLElement | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
+
+  const summary = delegationOverride ?? plan.delegation;
+  /**
+   * The two sentences that answer the questions people hesitate over — does a
+   * download wipe my work, does a publish wipe theirs. Both can be null, and the
+   * whole caption disappears when they are; a permanent reassurance stops being
+   * read within a week.
+   */
+  const assurance = syncAssurance(plan, summary);
+  const closeMore = (): void => setMoreAnchor(null);
+  const runMore = (action?: () => void) => () => {
+    closeMore();
+    action?.();
+  };
+  const hasMore =
+    (isOwner && onTransfer !== undefined) ||
+    (plan.published && (onReconcile !== undefined || onRebuildShadow !== undefined));
 
   const explainer = viewOnly
     ? VIEW_ONLY_EXPLAINER
@@ -241,9 +307,11 @@ export default function PlanSyncCard({
                 />
               </Tooltip>
             )}
-            {plan.handbacksPending > 0 && (
-              <Chip size="small" color="info" label={`${plan.handbacksPending} handed back`} />
-            )}
+            {/* The `N handed back` chip used to live here. It was the anonymous
+                version of a fact the people section below now states by name,
+                with the person it belongs to and a button that acts on it. Two
+                places saying the same thing at different resolutions is how a
+                card gets crowded. */}
             {adminTools && admin && (
               <Tooltip title="Support tools">
                 <IconButton
@@ -279,6 +347,26 @@ export default function PlanSyncCard({
             </Typography>
           </Box>
         </Stack>
+
+        {/* Below the one-sentence state, above the lease banner. The "somebody
+            has finished with Rooms" signal, now as a list of people rather than
+            an Alert — see PlanPeopleSection for why that swap matters. */}
+        {/* Nothing can be shared before it is on the server, so an unpublished
+            plan gets no people section at all — least of all the "Share a
+            department" empty state, which would send somebody to a page that can
+            only refuse them. */}
+        {!frozen && plan.published && (
+          <PlanPeopleSection
+            delegations={delegations}
+            presenceByUserId={presenceByUserId}
+            summary={summary}
+            relation={plan.relation}
+            departments={plan.departments}
+            busy={busy}
+            onDownloadFor={onDownloadForDelegation ?? (() => undefined)}
+            onOpenDelegation={onOpenDelegation}
+          />
+        )}
 
         {children}
 
@@ -346,19 +434,14 @@ export default function PlanSyncCard({
                     Review both versions
                   </Button>
                 )}
-                {/* `plan:delegate` is OWNER and ADMIN_LEASE — a demoted owner
-                    cannot grant, so the page they would land on has nothing on
-                    it but a refusal. */}
-                {canDelegate(plan.relation) && (
-                  <Button onClick={onOpenDelegation} disabled={busy}>
-                    Delegation
-                  </Button>
-                )}
-                {isOwner && onTransfer && (
-                  <Button onClick={onTransfer} disabled={busy}>
-                    Hand over
-                  </Button>
-                )}
+                {/* The Delegation button used to live here, for owners and
+                    delegates alike. It has gone: the people section above is the
+                    route now, and it is a better one — it says who and what
+                    before you get there instead of after. The one case that
+                    needed watching is a view-only delegate, who holds nothing
+                    writable and so used to fall through the strip entirely;
+                    `PlanPeopleSection` gives them a row of their own built from
+                    read scope, carrying the same "Who has what" label. */}
                 <Button
                   startIcon={<CloudDownloadOutlinedIcon />}
                   onClick={onPreviewPull}
@@ -368,7 +451,16 @@ export default function PlanSyncCard({
                   color={state.action === "pull" ? "primary" : "inherit"}
                   variant={state.action === "pull" ? "contained" : "text"}
                 >
-                  Download
+                  {/* "Download" reads as "download OVER" to somebody holding
+                      unpublished work — who is exactly the person who most needs
+                      to press it, an owner collecting a delegate's finished
+                      department. On a plan already here this is a per-row merge,
+                      and the count of what it would actually replace (usually
+                      zero) is one click away in the review. Not split into two
+                      buttons: the card cannot know which it is until the preview
+                      has fetched the delta, so promising either would be a
+                      promise it is not in a position to make. */}
+                  {plan.pendingChanges > 0 ? "Get changes" : "Download"}
                 </Button>
                 {/* Withheld rather than disabled for a view-only share. This is
                     the grant working as the owner intended, not a fault, and a
@@ -384,10 +476,34 @@ export default function PlanSyncCard({
                     Publish
                   </Button>
                 )}
+                {hasMore && (
+                  <Tooltip title="More">
+                    <IconButton
+                      size="small"
+                      onClick={(event) => setMoreAnchor(event.currentTarget)}
+                    >
+                      <MoreHorizIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </>
             )}
           </Stack>
         </Stack>
+
+        {/* One quiet line, right under the buttons it is about. The full answer
+            lives in the review dialog — this is only what somebody needs before
+            they are willing to open it. Unmounts entirely when there is nothing
+            live to say, because a permanent reassurance is not read. */}
+        {!frozen && plan.published && (assurance.download || assurance.publish) && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 1, textAlign: { xs: "left", sm: "right" } }}
+          >
+            {[assurance.download, assurance.publish].filter(Boolean).join(" ")}
+          </Typography>
+        )}
 
         <Collapse in={showDetails} unmountOnExit>
           <Stack direction="row" spacing={3} useFlexGap sx={{ flexWrap: "wrap", mt: 2 }}>
@@ -499,6 +615,36 @@ export default function PlanSyncCard({
           </Box>
         )}
       </Popover>
+
+      {/* Rare, ordinary, and none of it destructive. Deleting the server's copy
+          is NOT here: it stays in Details with the sentence that stops people
+          fearing it deletes their work, and a long way from Publish. */}
+      <Menu anchorEl={moreAnchor} open={moreAnchor !== null} onClose={closeMore}>
+        {isOwner && onTransfer && (
+          <MenuItem onClick={runMore(onTransfer)} disabled={busy}>
+            <ListItemText
+              primary="Hand over to a colleague"
+              secondary="Makes them the owner. You keep the plan on this computer."
+            />
+          </MenuItem>
+        )}
+        {plan.published && onReconcile && (
+          <MenuItem onClick={runMore(onReconcile)} disabled={busy}>
+            <ListItemText
+              primary="Check for differences"
+              secondary="Compares row by row. Changes nothing."
+            />
+          </MenuItem>
+        )}
+        {plan.published && onRebuildShadow && (
+          <MenuItem onClick={runMore(onRebuildShadow)} disabled={busy}>
+            <ListItemText
+              primary="Repair sync state"
+              secondary="After rebuilding the database or running an import."
+            />
+          </MenuItem>
+        )}
+      </Menu>
 
       <Menu anchorEl={menuAnchor} open={menuAnchor !== null} onClose={closeMenu}>
         <Box sx={{ px: 2, py: 1 }}>

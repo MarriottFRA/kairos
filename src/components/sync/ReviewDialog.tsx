@@ -23,6 +23,22 @@ import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
+import { UNCLASSIFIED_DEPARTMENT } from "../../shared/kairosSync/ipc";
+
+/** Above this the chip row stops being scannable and becomes a wall. */
+const DEPARTMENT_CHIP_LIMIT = 8;
+
+/**
+ * The bucket for rows carrying no department, spelled out.
+ *
+ * The plan's own row, calculation metadata, and the personal-details sidecar,
+ * which inherits its parent's department server-side. Rendered rather than
+ * hidden so the chips add up to the total — a breakdown that quietly does not
+ * sum invites the reader to wonder where the rest went.
+ */
+function departmentLabel(code: string): string {
+  return code === UNCLASSIFIED_DEPARTMENT ? "No department" : code;
+}
 
 /** Plain-English names for the entity types. Nobody should see `buyout_row`. */
 export const TYPE_LABELS: Record<string, string> = {
@@ -70,6 +86,34 @@ export interface ReviewDialogProps {
   collidingDepartments?: string[];
   /** Local rows not yet published, for phrasing the no-collision reassurance. */
   pendingChanges?: number;
+  /**
+   * Incoming rows by department — WHERE the download lands.
+   *
+   * The question an owner collecting a delegate's finished work is actually
+   * asking, and the one a per-type count cannot answer. Rows with no department
+   * of their own are bucketed under `UNCLASSIFIED_DEPARTMENT` and rendered as
+   * "No department", so the chips always sum to `total`.
+   */
+  byDepartment?: Record<string, number>;
+  /** Departments this machine has unpublished work in, for contrasting them. */
+  pendingDepartments?: string[];
+  /**
+   * Departments to lead with, listed before the rest and picked out in colour.
+   *
+   * Set when the download was started from one delegate's card. The pull itself
+   * is always whole-plan — the server has no per-delegate feed, `/changes` takes
+   * only `since` and a cursor — so these are sorted to the front and the
+   * remainder is still shown, never filtered away. Hiding the rest would make
+   * the dialog lie about what is arriving.
+   */
+  highlightDepartments?: string[];
+  /**
+   * Offered instead of forcing an overwrite, when something WOULD be overwritten.
+   *
+   * Publishing first is very often what the user actually wants and there was no
+   * way to get there from here without cancelling and hunting for the button.
+   */
+  onPublishFirst?: () => void;
   /**
    * Offer the button even when there is nothing to transfer.
    *
@@ -119,6 +163,10 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     collides = 0,
     collidingDepartments = [],
     pendingChanges = 0,
+    byDepartment,
+    pendingDepartments = [],
+    highlightDepartments = [],
+    onPublishFirst,
     allowEmpty = false,
     replacesLabel = null,
     labels = TYPE_LABELS,
@@ -128,6 +176,32 @@ export default function ReviewDialog(props: ReviewDialogProps) {
 
   const entries = Object.entries(byType).filter(([, count]) => count > 0);
   const nothing = total === 0;
+
+  // Highlighted departments first, then biggest first as before. The owner
+  // opened this from somebody's card and is looking for their departments; the
+  // rest still has to be visible, because it is also arriving.
+  const highlighted = new Set(highlightDepartments);
+  const departmentEntries = Object.entries(byDepartment ?? {})
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => {
+      const lead = Number(highlighted.has(b[0])) - Number(highlighted.has(a[0]));
+      return lead !== 0 ? lead : b[1] - a[1];
+    });
+
+  /**
+   * The verdict, decided once and used for both the banner and the button.
+   *
+   * "Download" had one label whatever it was about to do, so the safe case and
+   * the destructive one looked identical — which made owners hesitate over the
+   * one action that collects their delegate's finished work. `collides` is the
+   * fact that separates them, and it is already computed from the actual rows.
+   */
+  const verdict: "additive" | "overwrites" | "quiet" =
+    direction !== "pull" || pendingChanges === 0
+      ? "quiet"
+      : collides > 0
+        ? "overwrites"
+        : "additive";
 
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose} maxWidth="sm" fullWidth>
@@ -144,31 +218,64 @@ export default function ReviewDialog(props: ReviewDialogProps) {
 
         {/* Only ever asked on a pull, and only worth answering when there IS
             unpublished work to be anxious about. */}
-        {direction === "pull" && total > 0 && pendingChanges > 0 && (
-          collides > 0 ? (
-            <Alert severity="warning" sx={{ mb: 2 }}>
-              <AlertTitle>
-                {collides === 1
-                  ? "1 of these overwrites a change of yours"
-                  : `${collides} of these overwrite changes of yours`}
-              </AlertTitle>
-              {collidingDepartments.length > 0 && (
-                <>
-                  In <strong>{collidingDepartments.join(", ")}</strong>.{" "}
-                </>
-              )}
-              The server&apos;s version of those rows wins. Publish first if you
-              want to keep yours.
-            </Alert>
-          ) : (
-            <Alert severity="success" sx={{ mb: 2 }}>
-              <AlertTitle>None of these touch your unpublished work</AlertTitle>
-              You have {pendingChanges === 1 ? "1 change" : `${pendingChanges} changes`}{" "}
-              waiting to be published, and nothing arriving here lands on{" "}
-              {pendingChanges === 1 ? "it" : "any of them"}. Downloading is safe,
-              and you can publish afterwards as normal.
-            </Alert>
-          )
+        {total > 0 && verdict === "overwrites" && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            <AlertTitle>
+              {collides === 1
+                ? "1 of these replaces a change of yours"
+                : `${collides} of these replace changes of yours`}
+            </AlertTitle>
+            {collidingDepartments.length > 0 && (
+              <>
+                In <strong>{collidingDepartments.join(", ")}</strong>.{" "}
+              </>
+            )}
+            The server&apos;s version of those {collides === 1 ? "rows" : "rows"}{" "}
+            wins.
+            {/* The clause that was missing, and the reason a partial collision
+                read as though the whole plan were at risk. */}
+            {pendingChanges > collides && (
+              <>
+                {" "}
+                Your other{" "}
+                {pendingChanges - collides === 1
+                  ? "unpublished change is"
+                  : `${pendingChanges - collides} unpublished changes are`}{" "}
+                untouched.
+              </>
+            )}{" "}
+            Publish yours first if you want to keep them.
+          </Alert>
+        )}
+
+        {total > 0 && verdict === "additive" && (
+          // The safe case, said as a verdict rather than as the absence of a
+          // warning. This is the routine shape once delegation is in use: an
+          // owner editing F&B collecting a delegate's Rooms, where the two sets
+          // cannot touch by construction.
+          <Alert severity="success" sx={{ mb: 2 }}>
+            <AlertTitle>This adds to your work — it does not replace it</AlertTitle>
+            {total} {total === 1 ? "row is" : "rows are"} arriving
+            {departmentEntries.length > 0 && departmentEntries.length <= 4 && (
+              <>
+                , in{" "}
+                <strong>
+                  {departmentEntries
+                    .map(([code]) => departmentLabel(code))
+                    .join(", ")}
+                </strong>
+              </>
+            )}
+            . You have {pendingChanges === 1 ? "1 change" : `${pendingChanges} changes`}{" "}
+            waiting to be published
+            {pendingDepartments.length > 0 && (
+              <>
+                , in <strong>{pendingDepartments.map(departmentLabel).join(", ")}</strong>
+              </>
+            )}
+            , and not one of the rows arriving is a row you have changed. Download
+            now and publish yours afterwards as normal.
+          </Alert>
         )}
 
         {replacesLabel && (
@@ -213,6 +320,59 @@ export default function ReviewDialog(props: ReviewDialogProps) {
                   />
                 ))}
               </Stack>
+
+              {direction === "pull" && departmentEntries.length > 0 && (
+                // Where, not just how much. An owner collecting a handed-back
+                // department wants to recognise it by name.
+                <Box sx={{ mt: 1.5 }}>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: "block", mb: 0.5 }}
+                  >
+                    By department
+                  </Typography>
+                  <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                    {departmentEntries.slice(0, DEPARTMENT_CHIP_LIMIT).map(([code, count]) => (
+                      <Chip
+                        key={code}
+                        size="small"
+                        variant="outlined"
+                        // The one distinction that matters on this list: which of
+                        // these lands on something of mine. A collision outranks
+                        // the highlight — it is the one that can cost work.
+                        color={
+                          collidingDepartments.includes(code)
+                            ? "warning"
+                            : highlighted.has(code)
+                              ? "primary"
+                              : "default"
+                        }
+                        label={`${departmentLabel(code)}: ${count}`}
+                      />
+                    ))}
+                    {departmentEntries.length > DEPARTMENT_CHIP_LIMIT && (
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={`+${departmentEntries.length - DEPARTMENT_CHIP_LIMIT} more`}
+                      />
+                    )}
+                  </Stack>
+                  {highlightDepartments.length > 0 && (
+                    // Said plainly, because the button was pressed on one
+                    // person's card and the rest of the plan arriving with it
+                    // would otherwise be a surprise.
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: 1 }}
+                    >
+                      Downloading brings the whole plan, not just their departments.
+                    </Typography>
+                  )}
+                </Box>
+              )}
             </Box>
 
             {deleted > 0 && (
@@ -274,19 +434,31 @@ export default function ReviewDialog(props: ReviewDialogProps) {
         <Button onClick={onClose} disabled={busy}>
           {nothing && !allowEmpty ? "Close" : "Cancel"}
         </Button>
+        {/* The way out that was missing. Somebody told their work is about to be
+            replaced almost always wants to publish it first, and had to cancel
+            and go looking for the button to do it. */}
+        {verdict === "overwrites" && onPublishFirst && (
+          <Button variant="outlined" onClick={onPublishFirst} disabled={busy}>
+            Publish mine first
+          </Button>
+        )}
         {(!nothing || allowEmpty) && (
           <Button
             variant="contained"
             onClick={onConfirm}
             disabled={busy}
             startIcon={busy ? <CircularProgress size={16} /> : undefined}
-            color={deleted > 0 ? "warning" : "primary"}
+            color={deleted > 0 || verdict === "overwrites" ? "warning" : "primary"}
           >
             {direction !== "pull"
               ? "Publish"
               : nothing
                 ? "Add to this computer"
-                : "Download and apply"}
+                : verdict === "overwrites"
+                  ? `Download and replace ${collides} ${collides === 1 ? "row" : "rows"}`
+                  : verdict === "additive"
+                    ? "Add these changes"
+                    : "Download and apply"}
           </Button>
         )}
       </DialogActions>

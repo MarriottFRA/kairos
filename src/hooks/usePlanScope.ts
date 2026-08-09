@@ -26,7 +26,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { departmentOwnership } from "../services/kairosSyncService";
+import { departmentOwnership, listDelegations } from "../services/kairosSyncService";
 import { syncFailed } from "../shared/kairosSync/ipc";
 import {
   DepartmentOwnership,
@@ -50,6 +50,20 @@ export interface PlanScope {
   scopeKind: "FULL" | "PARTIAL" | null;
   /** False for a demoted owner: hide the blocks/allocations/KPI/SS editors. */
   structureEditable: boolean;
+  /**
+   * May this user create new positions?
+   *
+   * `canAddRows` is one of the four flags the owner set when they granted, and
+   * the server enforces it — but it is not on `/department-ownership`, so it
+   * takes a second call to `GET /plans/{id}/delegations` to learn. That call is
+   * granted to DELEGATE and returns only their own row, so it costs one request
+   * and discloses nothing.
+   *
+   * `undefined` means "not asked, or the ask failed", and every consumer reads
+   * that as PERMISSIVE. The server is the enforcement point; an offline delegate
+   * must not silently lose the ability to add rows they legitimately hold.
+   */
+  canAddRows: boolean | undefined;
   /**
    * The whole plan is read-only for this user.
    *
@@ -116,6 +130,7 @@ export function usePlanScope(
   const [notShared, setNotShared] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canAddRows, setCanAddRows] = useState<boolean | undefined>(undefined);
   const [nonce, setNonce] = useState(0);
 
   const refresh = useCallback(() => setNonce((value) => value + 1), []);
@@ -171,6 +186,39 @@ export function usePlanScope(
     };
   }, [ou, planId, nonce]);
 
+  /**
+   * The delegation's own permission flags, for the one flag the grid needs.
+   *
+   * Only ever fetched for somebody who actually holds a delegation — an owner's
+   * page must not pay a request to learn something that cannot apply to them.
+   * A failure leaves it `undefined`, which is permissive: see `canAddRows`.
+   */
+  useEffect(() => {
+    const relation = ownership?.me.relation;
+    if (!ou || !planId || relation !== "DELEGATE") {
+      setCanAddRows(undefined);
+      return;
+    }
+
+    let cancelled = false;
+    listDelegations(ou, planId)
+      .then((result) => {
+        if (cancelled || syncFailed(result)) return;
+        // The server returns only this caller's own grant on this route, so a
+        // single row is the expected shape. More than one would mean an owner is
+        // reading it, and `relation` has already ruled that out.
+        const mine = result.data.delegations[0];
+        if (mine) setCanAddRows(mine.canAddRows);
+      })
+      .catch(() => {
+        // Permissive on failure, deliberately.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ou, planId, ownership?.me.relation, nonce]);
+
   return useMemo<PlanScope>(() => {
     const departments = ownership?.departments ?? [];
     // A plan the server refuses to discuss has no writable departments and no
@@ -195,6 +243,7 @@ export function usePlanScope(
       // Unpublished plans keep the full editor — the demotion only applies to a
       // plan the server has an opinion about. A locked one is not unpublished.
       structureEditable: notShared ? false : ownership ? ownership.structureEditableByMe : true,
+      canAddRows: notShared ? false : canAddRows,
       planLocked: notShared || ownership?.me.relation === "GLOBAL_ADMIN",
       unpublished,
       notShared,
@@ -203,5 +252,5 @@ export function usePlanScope(
       error,
       refresh,
     };
-  }, [ownership, unpublished, notShared, loading, error, refresh]);
+  }, [ownership, unpublished, notShared, canAddRows, loading, error, refresh]);
 }

@@ -52,6 +52,9 @@ import {
 import {
   CollectDeps,
   LocalEntity,
+  PLAN_WIDE_ENTITY_TYPES,
+  UnpublishableReason,
+  UnpublishableRow,
   WriteScope,
   chunkEntities,
   collectLocalEntities,
@@ -100,9 +103,32 @@ export interface PublishResult {
   withheld: number;
   /** Rows we hard-deleted locally after publishing, sent as `op: "purge"`. */
   purged: number;
+  /** Broken rows on THIS computer that were never sent. Not server refusals. */
+  localProblems: LocalProblem[];
   /** True when nothing was sent because nothing had changed. */
   noop: boolean;
   dryRun: boolean;
+}
+
+/** One kind of local damage, counted. Individual ids are of no use to a user. */
+export interface LocalProblem {
+  entityType: string;
+  reason: UnpublishableReason;
+  count: number;
+}
+
+function summariseUnpublishable(rows: UnpublishableRow[]): LocalProblem[] {
+  const byKey = new Map<string, LocalProblem>();
+  for (const row of rows) {
+    const key = `${row.entityType}:${row.reason}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      byKey.set(key, { entityType: row.entityType, reason: row.reason, count: 1 });
+    }
+  }
+  return [...byKey.values()];
 }
 
 /** What a dry run reports, so the Sync page can say "12 positions, 1 deletion". */
@@ -111,6 +137,7 @@ export interface PublishPreview {
   total: number;
   chunks: number;
   withheld: LocalEntity[];
+  localProblems: LocalProblem[];
   /** Rows with no department: owner-only, and invisible to any delegate. */
   unclassified: LocalEntity[];
 }
@@ -128,7 +155,7 @@ export function previewPublish(
   db: Db,
   options: PublishOptions
 ): PublishPreview {
-  const entities = collectLocalEntities(deps, {
+  const { entities, unpublishable } = collectLocalEntities(deps, {
     ou: options.ou,
     planId: options.planId,
     includePii: options.includePii,
@@ -149,7 +176,14 @@ export function previewPublish(
     byType,
     total: commits.length,
     chunks: chunkEntities(commits, options.limits).length,
-    withheld,
+    // The plan's own rows were never this caller's to send, so listing them as
+    // "left behind" turned an entirely normal delegate publish into a report of
+    // things going wrong. Counted in `localProblems` if they are broken; simply
+    // not their business otherwise.
+    withheld: withheld.filter(
+      (entity) => !PLAN_WIDE_ENTITY_TYPES.has(entity.entityType)
+    ),
+    localProblems: summariseUnpublishable(unpublishable),
     unclassified: publishable.filter(
       (entity) =>
         entity.department === null &&
@@ -182,7 +216,7 @@ export async function publishPlan(
   const startBaseVersion = options.baseVersion;
   const watermarkBefore = getSyncState(db, planId)?.watermark ?? 0;
 
-  const entities = collectLocalEntities(deps, {
+  const { entities, unpublishable } = collectLocalEntities(deps, {
     ou,
     planId,
     includePii: options.includePii,
@@ -205,8 +239,12 @@ export async function publishPlan(
     conflicts: [],
     rejected: [],
     chunks: 0,
-    withheld: withheld.length,
+    // Plan-wide rows excluded: see the same filter in `previewPublish`.
+    withheld: withheld.filter(
+      (entity) => !PLAN_WIDE_ENTITY_TYPES.has(entity.entityType)
+    ).length,
     purged: purges.length,
+    localProblems: summariseUnpublishable(unpublishable),
     noop: commits.length === 0,
     dryRun: options.dryRun === true,
   };
