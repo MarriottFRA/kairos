@@ -412,6 +412,37 @@ describe("toCommitEntities", () => {
     expect(toCommitEntities([row], shadow)).toHaveLength(1);
   });
 
+  /**
+   * The stuck warning: add a row, publish it before it has a department, watch
+   * the server reject it, delete it because it was a mistake — and the soft
+   * delete leaves it here for ever, resent and re-rejected on every publish, on
+   * a row no longer in the grid to be given the department the message asks for.
+   */
+  it("does not send a tombstone for a row the server has never held", () => {
+    const row = { ...entity("position", "dud", null), deleted: true };
+    expect(toCommitEntities([row], new Map())).toHaveLength(0);
+  });
+
+  it("still sends a tombstone for a row the shadow knows the server holds", () => {
+    const row = { ...entity("position", "a", "D0410"), deleted: true };
+    const shadow = new Map<string, ShadowRow>([
+      [
+        shadowKey("position", "a"),
+        { entityType: "position", entityId: "a", hash: "old", serverSeq: 5, deleted: false },
+      ],
+    ]);
+    expect(toCommitEntities([row], shadow)).toHaveLength(1);
+  });
+
+  it("still sends a tombstone when the shadow cannot be trusted", () => {
+    // A rebuilt local store has an empty shadow for a plan the server may be
+    // full of. Dropping the delete there would lose it; the server sorts it out.
+    const row = { ...entity("position", "a", "D0410"), deleted: true };
+    const commits = toCommitEntities([row], new Map(), { shadowIsComplete: false });
+    expect(commits).toHaveLength(1);
+    expect(commits[0].deleted).toBe(true);
+  });
+
   it("never puts a department on an inherited row", () => {
     // The server derives it from the parent. Sending ours would be a second
     // source of truth for an authorization input.

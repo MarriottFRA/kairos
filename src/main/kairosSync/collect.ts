@@ -10,7 +10,8 @@
  *   1. **Soft-deleted rows are published, not skipped.** A row with `deleted_at`
  *      set is a tombstone the server must learn about; dropping it means every
  *      other client keeps a row its owner deleted. The delete travels as
- *      `deleted: true` with a payload, exactly like any other update.
+ *      `deleted: true` with a payload, exactly like any other update. The one
+ *      exception is a row the server has never held — see `toCommitEntities`.
  *   2. **Positions sort before their children.** The server sorts positions
  *      first *within* a chunk, but a child whose parent lands in a LATER chunk
  *      is an `ORPHAN_ENTITY`. Ordering here is what keeps the chunker honest.
@@ -301,6 +302,19 @@ export function filterToWriteScope(
   return { publishable, withheld };
 }
 
+export interface CommitOptions {
+  /**
+   * Whether "not in the shadow" may be read as "the server has never held it".
+   *
+   * True in every ordinary case. False only when the shadow itself is suspect —
+   * an empty shadow for a plan the server has a version for, which is what a
+   * rebuilt local store looks like until `rebuildShadowFromServer` has run.
+   * Getting that case wrong the other way would drop a real deletion, so it
+   * falls back to sending the tombstone and letting the server decide.
+   */
+  shadowIsComplete?: boolean;
+}
+
 /**
  * Turn mapped rows into the commit entities that actually need sending.
  *
@@ -308,11 +322,30 @@ export function filterToWriteScope(
  * sent and returned as `unchanged`: the server would answer correctly either
  * way, but on a plan where two cells changed that is the difference between a
  * 400-byte request and a two-megabyte one.
+ *
+ * ## A tombstone for a row the server never had says nothing
+ *
+ * Add a position, publish before giving it a department, delete it because it
+ * was a mistake — and the delete is a soft delete, so the row is still here with
+ * `deleted_at` set and still gets collected. It has no shadow entry, because the
+ * publish that would have created one was rejected, so every later publish sends
+ * it again and the server rejects it again: `DEPARTMENT_UNASSIGNED`, for ever,
+ * on a row that no longer appears in the grid and therefore cannot be given the
+ * department the message asks for. Downloading changes reports nothing, quite
+ * correctly — the server has never seen this row and there is nothing to
+ * reconcile.
+ *
+ * A tombstone is a fact about a row the other clients already have. Where they
+ * never had it, there is no fact to send, whatever the reason the row failed to
+ * land the first time. Dropping it here is what lets the warning clear itself on
+ * the next publish.
  */
 export function toCommitEntities(
   entities: LocalEntity[],
-  shadow: Map<string, ShadowRow>
+  shadow: Map<string, ShadowRow>,
+  options: CommitOptions = {}
 ): CommitEntity[] {
+  const shadowIsComplete = options.shadowIsComplete !== false;
   const out: CommitEntity[] = [];
 
   for (const entity of entities) {
@@ -320,6 +353,7 @@ export function toCommitEntities(
     if (known && known.hash === entity.hash && known.deleted === entity.deleted) {
       continue;
     }
+    if (!known && entity.deleted && shadowIsComplete) continue;
     out.push({
       entityType: entity.entityType,
       entityId: entity.entityId,
