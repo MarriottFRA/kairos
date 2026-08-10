@@ -124,7 +124,10 @@ function outRow(
     total: months.reduce((a, b) => a + b, 0),
     // The push reads dept/account/months/isStats only; these ride along so the
     // factory still satisfies the DTO the Results page now returns.
+    accountName: "",
+    departmentName: "",
     sources: ["ENGINE"],
+    blockLabels: [],
     valueKind: isStats ? "count" : "currency",
   };
 }

@@ -22,13 +22,17 @@ import {
   Button,
   Chip,
   CircularProgress,
+  InputAdornment,
   Stack,
+  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
 import CalculateOutlinedIcon from "@mui/icons-material/CalculateOutlined";
+import SearchIcon from "@mui/icons-material/Search";
+import SubjectOutlinedIcon from "@mui/icons-material/SubjectOutlined";
 import { OutputsResponse, SECURE_DB_LOCKED } from "../../shared/positions/ipc";
 import ResultsGrid, {
   ResultRow,
@@ -61,6 +65,10 @@ export default function Results() {
   const [scenario, setScenario] = useState<ScenarioDto | null>(null);
   const [outputs, setOutputs] = useState<OutputsResponse | null>(null);
   const [kind, setKind] = useState<Kind>("all");
+  const [quickFilter, setQuickFilter] = useState("");
+  // On by default: the whole point of the descriptions is that a GL code is not
+  // readable, and anyone who wants the compact view flips this off.
+  const [showDescriptions, setShowDescriptions] = useState(true);
   const [loading, setLoading] = useState(false);
   const [recalcBusy, setRecalcBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -269,6 +277,35 @@ export default function Results() {
           <ToggleButton value="stats">Statistics</ToggleButton>
         </ToggleButtonGroup>
 
+        <TextField
+          size="small"
+          placeholder="Search accounts, departments, blocks…"
+          value={quickFilter}
+          onChange={(event) => setQuickFilter(event.target.value)}
+          slotProps={{
+            input: {
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+            },
+          }}
+          sx={{ width: 260, "& .MuiOutlinedInput-root": { height: 36 } }}
+        />
+
+        <Tooltip title="Show account and department descriptions">
+          <ToggleButton
+            size="small"
+            value="descriptions"
+            selected={showDescriptions}
+            onChange={() => setShowDescriptions((previous) => !previous)}
+            sx={{ height: 36, px: 1.25 }}
+          >
+            <SubjectOutlinedIcon fontSize="small" />
+          </ToggleButton>
+        </Tooltip>
+
         <Stack direction="row" spacing={1} sx={{ ml: "auto", alignItems: "center" }}>
           <Chip size="small" variant="outlined" label={`Budget ${budgetYear}`} sx={{ height: 28, fontWeight: 600 }} />
           <Chip
@@ -302,6 +339,8 @@ export default function Results() {
                 loading={loading || recalcBusy}
                 selection={selection}
                 onSelect={setSelection}
+                quickFilter={quickFilter}
+                showDescriptions={showDescriptions}
               />
             </Box>
             {selection && selectedHotelOu && scenario && (
@@ -321,6 +360,21 @@ export default function Results() {
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
           The last run produced no output lines — check that your positions are
           active and your blocks have accounts.
+        </Typography>
+      )}
+      {/* The run DID produce rows; the grid looks empty because the search hid
+          them. Saying "no output lines" here would be a lie. */}
+      {rows.length > 0 && quickFilter.trim() !== "" && (
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
+          Showing rows matching “{quickFilter.trim()}” —{" "}
+          <Box
+            component="span"
+            onClick={() => setQuickFilter("")}
+            sx={{ cursor: "pointer", textDecoration: "underline" }}
+          >
+            clear the search
+          </Box>{" "}
+          to see the whole budget.
         </Typography>
       )}
     </Box>

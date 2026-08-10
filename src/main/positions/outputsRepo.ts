@@ -20,11 +20,14 @@ import type Database from "better-sqlite3-multiple-ciphers";
 import { accountAllowed } from "../../shared/positions/fields";
 import {
   accountVariants,
+  bareAccount,
+  bareDept,
   comboKeyOf,
   deptVariants,
   displayAccount,
   displayDept,
 } from "../../shared/positions/comboKey";
+import { listAccounts, listDepartments } from "../mappingTables/repo";
 import {
   OutputAggRowDto,
   OutputLineDto,
@@ -645,6 +648,38 @@ function resolveValueKind(
   return isStats ? "count" : "currency";
 }
 
+/** How many block names one row will carry. A row that names twenty blocks
+ *  answers nothing, and the inspector is where the full list belongs. */
+export const BLOCK_LABEL_CAP = 12;
+
+/**
+ * Code → description for accounts and departments, keyed on the CANONICAL code.
+ *
+ * Keyed bare (the comboKeyOf normalisation) because the output table holds
+ * whatever spelling each source wrote — a typed "988112" has to find the
+ * mapping table's "A988112" row, exactly as it already finds its way into the
+ * same aggregation row.
+ *
+ * Fail-soft by design: mapping tables are a downloaded cache, so a fresh
+ * install that has never synced has no account_maps table at all. A result row
+ * is still correct without a description, and refusing to load the whole
+ * Results page over a missing nicety would be the wrong trade.
+ */
+function nameLookup(db: Db): {
+  accounts: Map<string, string>;
+  departments: Map<string, string>;
+} {
+  const empty = { accounts: new Map<string, string>(), departments: new Map<string, string>() };
+  try {
+    return {
+      accounts: new Map(listAccounts(db).map((row) => [bareAccount(row.code), row.name])),
+      departments: new Map(listDepartments(db).map((row) => [bareDept(row.code), row.name])),
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export function readOutputs(
   structureDb: Db,
   valuesDb: Db,
@@ -661,9 +696,12 @@ export function readOutputs(
 
   if (!runRow) return { run: null, stale: false, rows: [] };
 
+  // `label` carries the block name for engine lines — the per-block grain the
+  // aggregation below throws away. It has always been on disk; selecting it is
+  // the whole cost of naming a row's blocks (no recalculation, no engine).
   const lineRows = prepared(
     valuesDb,
-    `SELECT dept, account, monthly_values, total, source
+    `SELECT dept, account, monthly_values, total, source, label
        FROM engine_output_lines
       WHERE ou = ? AND scenario_id = ?`
   ).all(scope.ou, scenarioId) as Array<{
@@ -672,10 +710,15 @@ export function readOutputs(
     monthly_values: string;
     total: number;
     source: string;
+    label: string | null;
   }>;
 
+  const names = nameLookup(structureDb);
   const byKey = new Map<string, OutputAggRowDto>();
   const sourcesByKey = new Map<string, Set<OutputSource>>();
+  /** Per row: block label → summed |contribution|, so the chips can be ordered
+   *  by what actually drives the number rather than by insertion. */
+  const blocksByKey = new Map<string, Map<string, number>>();
   for (const line of lineRows) {
     // Keyed on the canonical combo, not the raw strings: "D0410" and a typed
     // "0410" are one row on this page because they are one row in the BST.
@@ -686,16 +729,26 @@ export function readOutputs(
       row = {
         dept: displayDept(line.dept),
         account,
+        accountName: names.accounts.get(bareAccount(line.account)) ?? "",
+        departmentName: names.departments.get(bareDept(line.dept)) ?? "",
         isStats: isStatsAccount(account),
         months: new Array(MONTHS).fill(0),
         total: 0,
         sources: [],
+        blockLabels: [],
         valueKind: "currency",
       };
       byKey.set(key, row);
       sourcesByKey.set(key, new Set());
+      blocksByKey.set(key, new Map());
     }
-    sourcesByKey.get(key)!.add(normalizeSource(line.source));
+    const source = normalizeSource(line.source);
+    sourcesByKey.get(key)!.add(source);
+    const label = (line.label ?? "").trim();
+    if (source === "ENGINE" && label) {
+      const blocks = blocksByKey.get(key)!;
+      blocks.set(label, (blocks.get(label) ?? 0) + Math.abs(line.total));
+    }
     let months: number[] = [];
     try {
       months = JSON.parse(line.monthly_values) as number[];
@@ -709,6 +762,12 @@ export function readOutputs(
   for (const [key, row] of byKey) {
     const sources = sourcesByKey.get(key)!;
     row.sources = SOURCE_ORDER.filter((source) => sources.has(source));
+    row.blockLabels = [...blocksByKey.get(key)!.entries()]
+      // Biggest driver first, name as the tie-break so a row's chips are stable
+      // between reads (two blocks contributing zero must not swap places).
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, BLOCK_LABEL_CAP)
+      .map(([label]) => label);
     row.valueKind = resolveValueKind(row.isStats, sources);
   }
 

@@ -281,6 +281,12 @@ export type OutputValueKind = "currency" | "count" | "percent";
 export interface OutputAggRowDto {
   dept: string;
   account: string;
+  /** The chart-of-accounts description, from the synced mapping tables. "" when
+   *  they were never synced or the code is not in them — a result row is still
+   *  correct without a description, so the grid falls back to the bare code. */
+  accountName: string;
+  /** The department description, same contract as accountName. */
+  departmentName: string;
   /** Statistics account (the A9… range — count/hours/FTE lines, not currency).
    *  See STATS_ACCOUNT_FILTER; costs are every other account. */
   isStats: boolean;
@@ -299,6 +305,17 @@ export interface OutputAggRowDto {
    *  legitimately mix them — e.g. an engine-posted account a manual row also
    *  writes to. */
   sources: OutputSource[];
+  /**
+   * The engine blocks feeding this row, biggest absolute contribution first —
+   * the "what made this number" answer, in the row, without opening the
+   * inspector. An account can legitimately be fed by several blocks, so this is
+   * a list; it is capped at BLOCK_LABEL_CAP because a row that names twenty
+   * blocks answers nothing.
+   *
+   * Engine lines only. A manual/allocation/buyout line's label ("Buyout", the
+   * row description) says nothing its coloured source chip does not already say.
+   */
+  blockLabels: string[];
   valueKind: OutputValueKind;
 }
 

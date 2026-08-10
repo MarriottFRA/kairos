@@ -12,6 +12,7 @@
  */
 
 import Chip from "@mui/material/Chip";
+import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import type { ChipProps } from "@mui/material/Chip";
 import type { OutputSource } from "../../shared/positions/ipc";
@@ -74,6 +75,71 @@ export function SourceSummaryCell({ sources }: { sources: OutputSource[] }) {
           "& .MuiChip-label": { px: 0.75 },
         }}
       />
+    </Tooltip>
+  );
+}
+
+/**
+ * The blocks behind a row, as chips beside its source.
+ *
+ * The inspector already answers "what produced this number" perfectly, but it
+ * costs a click; for the common case — one or two blocks feed an account — the
+ * answer belongs in the row. An account CAN legitimately be fed by many blocks,
+ * so this shows the biggest contributors and counts the rest, the same bargain
+ * SourceSummaryCell strikes above.
+ *
+ * Deliberately colourless. The source chip is the coloured one and it answers a
+ * different question (where a number came from, not what made it); giving both
+ * a palette is what turned the old per-source chip strip into noise.
+ */
+export function BlockChips({
+  labels,
+  max = 2,
+}: {
+  labels: string[];
+  max?: number;
+}) {
+  if (!labels || labels.length === 0) return null;
+
+  const shown = labels.slice(0, max);
+  const hidden = labels.length - shown.length;
+
+  return (
+    <Tooltip title={<span style={{ whiteSpace: "pre-line" }}>{labels.join("\n")}</span>}>
+      <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", minWidth: 0 }}>
+        {shown.map((label) => (
+          <Chip
+            key={label}
+            size="small"
+            variant="outlined"
+            label={label}
+            sx={{
+              height: 20,
+              maxWidth: 130,
+              fontSize: "0.6875rem",
+              color: "text.secondary",
+              "& .MuiChip-label": {
+                px: 0.75,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              },
+            }}
+          />
+        ))}
+        {hidden > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`+${hidden}`}
+            sx={{
+              height: 20,
+              fontSize: "0.6875rem",
+              color: "text.secondary",
+              "& .MuiChip-label": { px: 0.625 },
+            }}
+          />
+        )}
+      </Stack>
     </Tooltip>
   );
 }

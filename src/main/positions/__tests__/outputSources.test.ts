@@ -472,6 +472,97 @@ describe("readOutputs over mixed sources", () => {
     expect(pure.months[0]).toBeCloseTo(50);
     expect(shared.valueKind).toBe("count");
   });
+
+  it("names the blocks behind a row, biggest contributor first, engine lines only", () => {
+    writeRun(
+      valuesDb,
+      scope,
+      SCENARIO,
+      { fingerprint: "fp", computedAt: NOW, positionCount: 2 },
+      [
+        // Two positions on the same block: one label, the contributions summed.
+        {
+          positionId: "p1",
+          componentDefId: "block-a:cost",
+          label: "Overtime",
+          dept: "D0410",
+          account: "A500100",
+          months: months(10),
+          total: 120,
+          source: "ENGINE",
+          sourceRef: "p1",
+        },
+        {
+          positionId: "p2",
+          componentDefId: "block-a:cost",
+          label: "Overtime",
+          dept: "D0410",
+          account: "A500100",
+          months: months(10),
+          total: 120,
+          source: "ENGINE",
+          sourceRef: "p2",
+        },
+        // A bigger block on the same account — an account can be fed by several.
+        {
+          positionId: "p1",
+          componentDefId: "block-b:cost",
+          label: "Base Salary",
+          dept: "D0410",
+          account: "A500100",
+          months: months(100),
+          total: 1200,
+          source: "ENGINE",
+          sourceRef: "p1",
+        },
+        // Not a block: its label says nothing the source chip doesn't.
+        ...projectBuyoutLines([
+          {
+            id: "b1",
+            departmentCode: "D0410",
+            accountCode: "A500100",
+            monthlyValues: months(10),
+            deletedAt: null,
+          },
+        ]),
+      ]
+    );
+
+    const { rows } = readOutputs(structureDb, valuesDb, scope, SCENARIO);
+    expect(rows).toHaveLength(1);
+    // 1200 of Base Salary beats 240 of Overtime; "Buyout" is not a block.
+    expect(rows[0].blockLabels).toEqual(["Base Salary", "Overtime"]);
+    expect(rows[0].sources).toEqual(["ENGINE", "BUYOUT"]);
+  });
+
+  it("still reads a run when the mapping tables were never synced", () => {
+    // structureDb here has no account_maps/department_maps at all — the state of
+    // a fresh install. Descriptions are a nicety; results are not.
+    writeRun(
+      valuesDb,
+      scope,
+      SCENARIO,
+      { fingerprint: "fp", computedAt: NOW, positionCount: 1 },
+      [
+        {
+          positionId: "p1",
+          componentDefId: "c1",
+          label: "Base Salary",
+          dept: "D0410",
+          account: "A500100",
+          months: months(100),
+          total: 1200,
+          source: "ENGINE",
+          sourceRef: "p1",
+        },
+      ]
+    );
+
+    const { rows } = readOutputs(structureDb, valuesDb, scope, SCENARIO);
+    expect(rows[0].accountName).toBe("");
+    expect(rows[0].departmentName).toBe("");
+    expect(rows[0].total).toBe(1200);
+  });
 });
 
 // ---------------------------------------------------------------------------

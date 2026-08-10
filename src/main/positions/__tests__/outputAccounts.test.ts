@@ -26,6 +26,7 @@ import {
 import { applyStructureColumns } from "../../blocks/schema";
 import { ensureSystemDefs } from "../../blocks/repo";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
+import { MAPPING_TABLES_SQL } from "../../mappingTables/schema";
 import { loadScenarioInput } from "../loadScenarioInput";
 import { resolveOuScope } from "../ouScope";
 import {
@@ -165,6 +166,39 @@ describe("Recalculate → Results rows", () => {
     // All under the position's own department — shown the way Kairos writes a
     // department code, whatever spelling the position was saved with.
     expect(new Set(outputs.rows.map((row) => row.dept))).toEqual(new Set(["D0410"]));
+  });
+
+  it("resolves account and department descriptions across code spellings", async () => {
+    // The mapping tables and the output table need not agree on the D/A prefix:
+    // the codes reach each store from different places (a picker, a typed cell,
+    // the legacy importer), which is exactly why comboKey exists. Seeded here in
+    // the OPPOSITE spelling to the one the run produces, in both directions.
+    structureDb.exec(MAPPING_TABLES_SQL);
+    structureDb
+      .prepare(
+        `INSERT INTO account_maps (base_account, account_description_detail_level_max)
+         VALUES (?, ?)`
+      )
+      .run("511000", "Salaries - Management");
+    structureDb
+      .prepare(
+        `INSERT INTO department_maps (base_department, department_description_detail_level_max)
+         VALUES (?, ?)`
+      )
+      .run("D0410", "Front Office");
+
+    writePosition(ACCOUNTS);
+    const { outputs } = await recalculate();
+
+    const salary = outputs.rows.find(
+      (row) => row.account === ACCOUNTS.salaryAccountCode
+    )!;
+    expect(salary.accountName).toBe("Salaries - Management");
+    expect(salary.departmentName).toBe("Front Office");
+    // An account with no mapping row gets nothing rather than an echo of itself.
+    const headcount = outputs.rows.find((row) => row.account === HEADCOUNT_ACCOUNT)!;
+    expect(headcount.accountName).toBe("");
+    expect(headcount.departmentName).toBe("Front Office");
   });
 
   it("reproduces the reported bug's shape when no account is picked", async () => {
