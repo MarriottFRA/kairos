@@ -57,7 +57,17 @@ export function usePlanDelegations(
       if (!canDelegate(plan.relation)) return false;
       const summary = delegationSummary(ownership[plan.planId]);
       if (summary.stale) return false;
-      return summary.delegatedOut.length + summary.handedBack.length > 0;
+      // `readOnly` counts. A read-only holder takes nothing away from the
+      // owner, but they are somebody with a grant on this plan — and after an
+      // ownership handover the outgoing owner is exactly that, so omitting them
+      // here would leave the new owner's card saying nobody else is on a plan
+      // their predecessor can read.
+      return (
+        summary.delegatedOut.length +
+          summary.readOnly.length +
+          summary.handedBack.length >
+        0
+      );
     })
     .map((plan) => plan.planId)
     .sort()

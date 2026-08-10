@@ -33,6 +33,7 @@ import {
   PlanPatch,
   PlanSummary,
   PlanVersion,
+  TransferResult,
 } from "../../shared/kairosSync/protocol";
 
 const plan = (planId: string) => `/plans/${encodeURIComponent(planId)}`;
@@ -102,14 +103,28 @@ export function deletePlan(client: KairosClient, planId: string): Promise<unknow
  * moves (`422 kairos_owner_not_eligible` otherwise), and any delegation they
  * held on this plan is revoked — an owner delegating to themselves is not a
  * coherent state.
+ *
+ * ## The outgoing owner keeps a read-only view
+ *
+ * Not a separate call. The same transaction leaves the previous owner a
+ * read-only delegation over every delegatable department, granted BY the
+ * incoming owner, who can withdraw it with the ordinary DELETE whenever they
+ * like. It is why the result is worth typing rather than discarding: retention
+ * is best effort and never fails the transfer, so the only way to know whether
+ * the person who just gave the plan away can still see it is to read
+ * `retainedDelegation` / `retainedReason` off this response. Exactly one of the
+ * two is non-null.
  */
 export function transferPlan(
   client: KairosClient,
   planId: string,
   newOwnerUserId: number,
   reason: string
-): Promise<unknown> {
-  return client.post(`${plan(planId)}/transfer`, { newOwnerUserId, reason });
+): Promise<TransferResult> {
+  return client.post<TransferResult>(`${plan(planId)}/transfer`, {
+    newOwnerUserId,
+    reason,
+  });
 }
 
 /**

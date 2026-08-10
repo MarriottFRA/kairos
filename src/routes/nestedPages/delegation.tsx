@@ -97,6 +97,10 @@ import {
   PartialOverlapContext,
   UnsyncedWorkContext,
 } from "../../shared/kairosSync/protocol";
+import {
+  holderEdits,
+  holderReadsOnly,
+} from "../../shared/kairosSync/delegationSummary";
 import { lockReasonText } from "../../shared/kairosSync/lockReason";
 import { contradictoryDepartments } from "../../shared/kairosSync/ownershipContradiction";
 import { changesWaiting } from "../../shared/kairosSync/planState";
@@ -324,17 +328,25 @@ export default function DelegationPage() {
   /**
    * Departments worth a row, and departments that are merely fine.
    *
-   * A row earns its place if somebody else is in it, or if you cannot edit it.
-   * Everything else is "you hold it and may edit it" — true of most departments
-   * on most plans, and it was pushing the three rows that carry information off
-   * the first screen. The same rule reads correctly for a delegate, whose own
-   * holdings are the writable ones and whose locked rows say why.
+   * A row earns its place if somebody else is WORKING in it, or if you cannot
+   * edit it. Everything else is "you hold it and may edit it" — true of most
+   * departments on most plans, and it was pushing the three rows that carry
+   * information off the first screen. The same rule reads correctly for a
+   * delegate, whose own holdings are the writable ones and whose locked rows
+   * say why.
+   *
+   * A read-only holder does NOT promote a row. They take nothing, the row stays
+   * writable, and after an ownership handover the new owner has one on every
+   * department — which would put every department in the interesting half and
+   * leave the split doing the exact thing it exists to prevent.
    */
   const [interestingRows, routineRows] = useMemo(() => {
     const rows = ownership?.departments ?? [];
+    const engaged = (row: DepartmentOwnershipRow): boolean =>
+      row.assignedTo.some((holder) => !holderReadsOnly(holder));
     return [
-      rows.filter((row) => row.assignedTo.length > 0 || !row.writable),
-      rows.filter((row) => row.assignedTo.length === 0 && row.writable),
+      rows.filter((row) => engaged(row) || !row.writable),
+      rows.filter((row) => !engaged(row) && row.writable),
     ];
   }, [ownership]);
 
@@ -1448,7 +1460,13 @@ function DepartmentRow({
   busy?: boolean;
   onHandBack?: () => void;
 }) {
-  const holders = row.assignedTo.filter((holder) => holder.state === "ACTIVE");
+  // Three-way, not two. An EDITING holder is who the department belongs to right
+  // now; a read-only one is merely who else can see it, and printing them in the
+  // same cell puts "held by someone else" on the same row as an "editable: Yes"
+  // chip — which is not an explanation but a contradiction, and the one an
+  // ownership handover produces on every department at once.
+  const holders = row.assignedTo.filter((holder) => holderEdits(holder));
+  const readOnly = row.assignedTo.filter((holder) => holderReadsOnly(holder));
   const handedBack = row.assignedTo.filter((holder) => holder.state === "HANDED_BACK");
 
   return (
@@ -1458,17 +1476,25 @@ function DepartmentRow({
         {holders.length > 0 ? (
           holders.map((holder) => holder.email).join(", ")
         ) : (
-          // Nobody delegated → the owner holds it. That is the whole rule,
-          // stated in the one place a user will look for it.
+          // Nobody EDITING → the owner holds it. That is the whole rule, stated
+          // in the one place a user will look for it.
           <Typography variant="body2" color="text.secondary">
             The plan owner
           </Typography>
+        )}
+        {readOnly.length > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            sx={{ ml: 1, color: "text.secondary" }}
+            label={`also visible to ${readOnly.map((holder) => holder.email).join(", ")}`}
+          />
         )}
         {handedBack.length > 0 && (
           <Chip
             size="small"
             color="info"
-            sx={{ ml: holders.length > 0 ? 1 : 0 }}
+            sx={{ ml: 1 }}
             label={`handed back by ${handedBack.map((holder) => holder.email).join(", ")}`}
           />
         )}

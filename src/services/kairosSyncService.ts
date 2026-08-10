@@ -61,6 +61,7 @@ import {
   PlanVersion,
   ScopeTrace,
   SupportDownload,
+  TransferResult,
   Activity,
 } from "../shared/kairosSync/protocol";
 
@@ -659,14 +660,21 @@ export function planVersion(
  * The successor must meet the full ownership bar, and a refusal comes back as
  * `kairos_owner_not_eligible` carrying a `context.required` block naming exactly
  * what they are missing. Render it; a generic "no" is unactionable.
+ *
+ * On success the result says where the handover leaves the CALLER —
+ * `retainedDelegation` when they kept a read-only view of the plan, and
+ * `retainedReason` when they did not. Exactly one is non-null; `transferOutcome`
+ * turns the pair into the sentence to show. Do not discard it: whether the
+ * person who just gave the plan away can still open it is the one thing the
+ * transfer changes that they cannot see for themselves.
  */
 export function transferPlan(
   ou: string,
   planId: string,
   newOwnerUserId: number,
   reason: string
-): Promise<SyncOutcome<unknown>> {
-  return call(KAIROS_SYNC_CHANNELS.transferPlan, {
+): Promise<SyncOutcome<TransferResult>> {
+  return call<TransferResult>(KAIROS_SYNC_CHANNELS.transferPlan, {
     ou,
     planId,
     newOwnerUserId,

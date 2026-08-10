@@ -486,6 +486,24 @@ export interface DelegatedHolder {
   state: "ACTIVE" | "HANDED_BACK";
 }
 
+/**
+ * A holder as `/department-ownership` discloses them, which is the one route
+ * that says whether they hold the pen.
+ *
+ * Narrower than `DelegatedHolder` on purpose. `/plans/{id}/departments` returns
+ * the same people in `delegatedTo` and does not document the flag, and a type
+ * that claimed it there would be a lie the compiler enforces.
+ */
+export interface OwnershipHolder extends DelegatedHolder {
+  /**
+   * false → they can look and change nothing, and they displace nobody: the
+   * department stays `writable: true, reason: null` for the owner. Read through
+   * `holderEdits`, never directly — a server that omits the field must read as
+   * editing, and that default belongs in one place.
+   */
+  canEdit: boolean;
+}
+
 export interface DelegatableDepartment {
   code: string;
   positionCount: number;
@@ -676,7 +694,7 @@ export interface DepartmentOwnershipRow {
    *  disagree with what a save will do. */
   writable: boolean;
   reason: NotWritableReason | null;
-  assignedTo: DelegatedHolder[];
+  assignedTo: OwnershipHolder[];
 }
 
 export interface DepartmentOwnership {
@@ -708,6 +726,54 @@ export interface ActivityEntry {
 export interface Activity {
   planId: string;
   present: ActivityEntry[];
+}
+
+// ----------------------------------------------------------- ownership transfer
+
+/**
+ * Why the outgoing owner was left nothing.
+ *
+ * Retention is best effort and never fails the transfer. The commonest reason to
+ * hand a plan over is that its owner is leaving, so `PREVIOUS_OWNER_INACTIVE` is
+ * the ordinary outcome rather than the exotic one — which is exactly why the
+ * transfer must not 4xx on it.
+ */
+export type RetainedReason =
+  | "SELF_TRANSFER"
+  | "PREVIOUS_OWNER_INACTIVE"
+  | "OU_ACCESS_REVOKED"
+  | "NO_KAIROS_APP"
+  | "NO_DEPARTMENT_ACCESS"
+  | "NO_GRANTABLE_DEPARTMENTS"
+  | "NO_OVERLAP"
+  | "ALREADY_DELEGATED";
+
+/**
+ * The read-only delegation the incoming owner grants the outgoing one.
+ *
+ * Deliberately NOT a `Delegation` — the transfer response carries five fields,
+ * with no `generation`, `canAddRows` or department states. Modelling them as one
+ * type would invite a screen to read a field that is not there. The full row
+ * arrives in the ordinary `GET .../delegations` list, and that is where any
+ * screen that needs the rest should get it.
+ */
+export interface RetainedDelegation {
+  id: string;
+  delegateUserId: number;
+  departments: string[];
+  canEdit: boolean;
+  canReadPii: boolean;
+}
+
+export interface TransferResult {
+  planId: string;
+  ownerUserId: number;
+  ownerEmail: string;
+  /** The incoming owner's own delegation, revoked in the same transaction. */
+  delegationsRevoked: number;
+  /** Non-null exactly when `retainedReason` is null, and vice versa. */
+  retainedDelegation: RetainedDelegation | null;
+  retainedReason: RetainedReason | null;
 }
 
 // ---------------------------------------------------------------------- lease

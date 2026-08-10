@@ -396,6 +396,7 @@ export const SYNC_ERROR_CODES = {
   DELEGATE_HAS_UNSYNCED_WORK: "kairos_delegate_has_unsynced_work",
   DELEGATION_PARTIAL_OVERLAP: "kairos_delegation_partial_overlap",
   DELEGATION_REVOKED: "kairos_delegation_revoked",
+  OWNER_NOT_ELIGIBLE: "kairos_owner_not_eligible",
   PLAN_NOT_SHARED: "kairos_plan_not_shared",
   STRUCTURE_PRECONDITION: "kairos_structure_precondition",
   WRITE_SCOPE_EMPTY: "kairos_write_scope_empty",

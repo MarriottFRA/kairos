@@ -21,7 +21,29 @@
  * from the holder list.
  */
 
-import type { DepartmentOwnership } from "./protocol";
+import type { DepartmentOwnership, OwnershipHolder } from "./protocol";
+
+/**
+ * Whether this holder holds the pen right now.
+ *
+ * The one place the rule is written, because five screens ask it and a
+ * disagreement between any two of them is a screen contradicting itself about
+ * the same department. A missing flag reads as EDITING: that is the safe
+ * direction against a server that predates it, since it can only over-report
+ * who holds something and never unlock a department the server locked.
+ */
+export function holderEdits(
+  holder: Pick<OwnershipHolder, "state"> & { canEdit?: boolean }
+): boolean {
+  return holder.state === "ACTIVE" && holder.canEdit !== false;
+}
+
+/** ACTIVE, but read-only: they can see the department and change nothing. */
+export function holderReadsOnly(
+  holder: Pick<OwnershipHolder, "state"> & { canEdit?: boolean }
+): boolean {
+  return holder.state === "ACTIVE" && holder.canEdit === false;
+}
 
 export interface DelegatedDepartment {
   code: string;
@@ -32,6 +54,18 @@ export interface DelegatedDepartment {
 export interface PlanDelegationSummary {
   /** Delegated away and still being worked on. Not writable by the owner. */
   delegatedOut: DelegatedDepartment[];
+  /**
+   * Somebody else can READ this department. Nothing is out of the owner's
+   * hands: `writable` stays true and a publish still sends it.
+   *
+   * Its own bucket rather than a filter on `delegatedOut`, because the two
+   * questions have opposite answers and both are asked. "What must I not
+   * promise to publish" is `delegatedOut`; "is anybody else on this plan at
+   * all" — the gate on fetching the grants, and the count of person rows on the
+   * card — has to include these, or the read-only delegation an ownership
+   * handover leaves behind is invisible to the new owner.
+   */
+  readOnly: DelegatedDepartment[];
   /** Handed back and not yet reopened. The owner's cue to download. */
   handedBack: DelegatedDepartment[];
   /** Departments I hold as a delegate and may still write. */
@@ -50,6 +84,7 @@ export interface PlanDelegationSummary {
 
 const EMPTY: PlanDelegationSummary = {
   delegatedOut: [],
+  readOnly: [],
   handedBack: [],
   mine: [],
   myHandedBack: [],
@@ -63,6 +98,7 @@ export function delegationSummary(
 
   const summary: PlanDelegationSummary = {
     delegatedOut: [],
+    readOnly: [],
     handedBack: [],
     mine: [],
     myHandedBack: [],
@@ -77,9 +113,12 @@ export function delegationSummary(
         email: holder.email,
         delegationId: holder.delegationId,
       };
-      (holder.state === "ACTIVE" ? summary.delegatedOut : summary.handedBack).push(
-        entry
-      );
+      const bucket = holderEdits(holder)
+        ? summary.delegatedOut
+        : holderReadsOnly(holder)
+          ? summary.readOnly
+          : summary.handedBack;
+      bucket.push(entry);
     }
     if (!isDelegate) continue;
     if (row.writable) {
@@ -99,6 +138,7 @@ export function delegationSummaryEmpty(
   if (!summary) return true;
   return (
     summary.delegatedOut.length === 0 &&
+    summary.readOnly.length === 0 &&
     summary.handedBack.length === 0 &&
     summary.mine.length === 0 &&
     summary.myHandedBack.length === 0

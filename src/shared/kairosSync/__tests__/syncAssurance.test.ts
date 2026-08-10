@@ -45,6 +45,7 @@ function plan(overrides: Partial<PlanSyncStatus> = {}): PlanSyncStatus {
 function summary(overrides: Partial<PlanDelegationSummary> = {}): PlanDelegationSummary {
   return {
     delegatedOut: [],
+    readOnly: [],
     handedBack: [],
     mine: [],
     myHandedBack: [],
@@ -113,6 +114,29 @@ describe("syncAssurance — the publish line, as an owner", () => {
     ).publish;
     expect(line).toContain("ROOMS stays theirs");
     expect(line).not.toContain("and 1 more");
+  });
+
+  it("DROPS a read-only holder — nothing of theirs is at risk from a publish", () => {
+    // The bug an ownership handover produced. The transfer leaves the outgoing
+    // owner a read-only delegation over EVERY department, so a line built from
+    // "somebody holds this" told the new owner their whole plan stayed somebody
+    // else's until handed back — while a publish sent all of it. Exactly the
+    // class of statement this module exists not to make.
+    const line = syncAssurance(
+      plan(),
+      summary({ delegatedOut: [HELD("FB")], readOnly: [HELD("ROOMS"), HELD("SPA")] })
+    ).publish;
+    expect(line).toContain("FB stays theirs");
+    expect(line).not.toContain("ROOMS");
+    expect(line).not.toContain("SPA");
+  });
+
+  it("says nothing at all when every holder is read-only", () => {
+    // The handover case in full: one delegate, every department, no pen. There
+    // is nothing to warn about, so there is no line.
+    expect(
+      syncAssurance(plan(), summary({ readOnly: [HELD("ROOMS"), HELD("FB")] })).publish
+    ).toBeNull();
   });
 
   it("DROPS a handed-back department — the owner can overwrite it again", () => {

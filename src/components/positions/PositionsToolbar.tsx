@@ -11,7 +11,6 @@ import ArrowDropDownIcon from "@mui/icons-material/ArrowDropDown";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DashboardCustomizeOutlinedIcon from "@mui/icons-material/DashboardCustomizeOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
-import DownloadIcon from "@mui/icons-material/Download";
 import FilterAltOutlinedIcon from "@mui/icons-material/FilterAltOutlined";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
 import SearchIcon from "@mui/icons-material/Search";
@@ -88,7 +87,6 @@ export interface PositionsToolbarProps {
    *  menu opens, which MUI anchors to the grid rather than to this button. */
   onOpenFilters: () => void;
   onClearFilters: () => void;
-  onExportCsv: () => void;
 }
 
 /**
@@ -171,7 +169,6 @@ export default function PositionsToolbar({
   onQuickFilter,
   onOpenFilters,
   onClearFilters,
-  onExportCsv,
 }: PositionsToolbarProps) {
   // Both menus and the custom-count prompt are the toolbar's own business —
   // the page above it only ever hears the resulting intent.
@@ -521,20 +518,6 @@ export default function PositionsToolbar({
             sx={{ height: CONTROL_HEIGHT, px: 2 }}
           >
             Copy from…
-          </Button>
-        </span>
-      </Tooltip>
-
-      <Tooltip title="Export the grid as CSV (masked PII exports as dots)">
-        <span>
-          <Button
-            variant="outlined"
-            startIcon={<DownloadIcon />}
-            onClick={onExportCsv}
-            disabled={disabled}
-            sx={{ height: CONTROL_HEIGHT, px: 2 }}
-          >
-            CSV
           </Button>
         </span>
       </Tooltip>

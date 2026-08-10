@@ -1276,12 +1276,6 @@ export default function Positions() {
     setUndoRows(null);
   }, [undoRows]);
 
-  const handleExportCsv = useCallback(() => {
-    apiRef.current?.exportDataAsCsv({
-      fileName: `positions_${selectedHotelOu ?? "hotel"}_${scenario?.label ?? "scenario"}`,
-    });
-  }, [apiRef, selectedHotelOu, scenario]);
-
   // ── Column filters ──
   // The panel itself lives inside the grid (MUI anchors it to the headers), so
   // the toolbar button only has to ask for it. A column's three-dots menu opens
@@ -1832,7 +1826,6 @@ export default function Positions() {
           onQuickFilter={setQuickFilter}
           onOpenFilters={handleOpenFilters}
           onClearFilters={handleClearFilters}
-          onExportCsv={handleExportCsv}
         />
       </Box>
 

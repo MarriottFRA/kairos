@@ -86,6 +86,7 @@ import {
 import {
   PlanSyncStatus,
   PublishResponse,
+  SYNC_ERROR_CODES,
   SyncStatusResponse,
   syncFailed,
 } from "../../shared/kairosSync/ipc";
@@ -100,6 +101,7 @@ import { useAdminTools } from "../../hooks/useAdminTools";
 import { useDelegationOverview } from "../../hooks/useDelegationOverview";
 import { usePlanDelegations } from "../../hooks/usePlanDelegations";
 import { delegationSummary } from "../../shared/kairosSync/delegationSummary";
+import { transferOutcome } from "../../shared/kairosSync/retainedAccess";
 import PlanSyncCard, { PlanAdminActions } from "../../components/sync/PlanSyncCard";
 import CloudPlanCard from "../../components/sync/CloudPlanCard";
 import DeletePlanDialog, {
@@ -867,7 +869,7 @@ export default function Sync() {
           // The eligibility refusal carries the list of conditions the successor
           // fails. Keep the dialog open and render it, rather than reducing it
           // to a toast that says "no".
-          if (result.error.code === "kairos_owner_not_eligible") {
+          if (result.error.code === SYNC_ERROR_CODES.OWNER_NOT_ELIGIBLE) {
             setTransferIneligible(result.error.context ?? {});
             return;
           }
@@ -876,7 +878,11 @@ export default function Sync() {
         }
         setDialog(null);
         setTransferIneligible(null);
-        setToast({ severity: "success", message: "Ownership transferred." });
+        // The plan has moved either way, so this is never a failure — but what
+        // it leaves the person who pressed the button is not something they can
+        // see for themselves. Retention is best effort: they normally keep a
+        // read-only view of the whole plan, and a departed owner keeps nothing.
+        setToast(transferOutcome(result.data));
         await refresh();
       });
     },

@@ -16,12 +16,31 @@
  *
  * ## What the dialog has to say out loud
  *
- * Transferring is not reversible from this end: afterwards you are an ordinary
- * member of the hotel on this plan and cannot transfer it back. The incoming
- * owner's own delegation is revoked in the same transaction, because an owner is
- * not a delegate of themselves; everybody else's survives, so the new owner
- * inherits the existing delegates intact. And BST push moves with ownership,
- * which for most hotels is the point of doing it.
+ * Transferring is not reversible from this end: afterwards you cannot edit the
+ * plan or transfer it back. The incoming owner's own delegation is revoked in
+ * the same transaction, because an owner is not a delegate of themselves;
+ * everybody else's survives, so the new owner inherits the existing delegates
+ * intact. And BST push moves with ownership, which for most hotels is the point
+ * of doing it.
+ *
+ * ## You do not lose sight of the plan
+ *
+ * The bullets used to say you become an ordinary member of the hotel on this
+ * plan, which was true and was the problem: hotel access confers no read, so the
+ * person who built the numbers dropped to seeing the plan exist and not one byte
+ * of it. The handover now leaves them a read-only delegation over every
+ * department, granted by the incoming owner — an ordinary delegation, withdrawn
+ * by the ordinary DELETE whenever the new owner likes.
+ *
+ * Saying so here matters more than it looks. The bullets are what somebody reads
+ * while deciding whether to press the button, and "I will lose the plan" is the
+ * belief that stops a handover happening at all — which is how a plan ends up
+ * stranded on a departing owner's account instead.
+ *
+ * What this dialog must NOT promise is that they definitely keep it. Retention
+ * is best effort and is skipped for an owner who has already been deactivated —
+ * the commonest reason to hand a plan over. The Sync page reads the outcome off
+ * the response and says which way it went; the bullet stays hedged.
  *
  * The candidate list is `/delegation-candidates`, which is the same set of
  * people and the same eligibility data. Note it answers a slightly different
@@ -93,8 +112,9 @@ export default function TransferOwnershipDialog({
           <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
             <li>They can delegate, publish and push this plan to the budget workbook.</li>
             <li>
-              You become an ordinary member of the hotel on this plan — you can see it,
-              but not edit it or take it back.
+              You keep a read-only view of it — you can open it and read every
+              department, but not edit it or take it back. The new owner can withdraw
+              that view whenever they like.
             </li>
             <li>
               Everyone you have delegated to keeps their departments. If the new owner

@@ -55,11 +55,12 @@ function ownership(
   };
 }
 
-const holder = (state: "ACTIVE" | "HANDED_BACK") => ({
+const holder = (state: "ACTIVE" | "HANDED_BACK", canEdit = true) => ({
   userId: 7,
   email: "bob@example.com",
   delegationId: "del-1",
   state,
+  canEdit,
 });
 
 /** The correct owner-side answer once D0610 has come back. */

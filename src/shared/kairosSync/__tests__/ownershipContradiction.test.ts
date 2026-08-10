@@ -18,17 +18,22 @@ import {
   ownershipContradicted,
 } from "../ownershipContradiction";
 import type {
-  DelegatedHolder,
   DepartmentOwnership,
   DepartmentOwnershipRow,
+  OwnershipHolder,
   Relation,
 } from "../protocol";
 
-const holder = (state: DelegatedHolder["state"]): DelegatedHolder => ({
+/** Editing unless told otherwise — what every case below was written against. */
+const holder = (
+  state: OwnershipHolder["state"],
+  canEdit = true
+): OwnershipHolder => ({
   userId: 7,
   email: "bob@example.com",
   delegationId: "del-1",
   state,
+  canEdit,
 });
 
 function ownership(
@@ -46,7 +51,7 @@ function ownership(
         readable: true,
         writable: false,
         reason: null,
-        assignedTo: [] as DelegatedHolder[],
+        assignedTo: [] as OwnershipHolder[],
         ...row,
       })
     ),
@@ -85,6 +90,36 @@ describe("contradictoryDepartments", () => {
       ownershipContradicted(
         ownership("OWNER", [
           { code: "D0410", reason: "DELEGATED", assignedTo: [holder("ACTIVE")] },
+        ])
+      )
+    ).toBe(false);
+  });
+
+  it("names a DELEGATED department whose only holder cannot edit", () => {
+    // A read-only delegate displaces nobody: the department should have come
+    // back `writable: true, reason: null`. A DELEGATED lock justified by
+    // somebody who holds no pen is as unjustified as one with no holder at all,
+    // and after an ownership handover it is the shape that would otherwise sit
+    // on every department at once.
+    expect(
+      contradictoryDepartments(
+        ownership("OWNER", [
+          { code: "D0410", reason: "DELEGATED", assignedTo: [holder("ACTIVE", false)] },
+        ])
+      )
+    ).toEqual(["D0410"]);
+  });
+
+  it("accepts a lock justified by an editing holder standing beside a read-only one", () => {
+    // The post-handover plan that already had a delegate. One editor is enough.
+    expect(
+      ownershipContradicted(
+        ownership("OWNER", [
+          {
+            code: "D0410",
+            reason: "DELEGATED",
+            assignedTo: [holder("ACTIVE", false), holder("ACTIVE")],
+          },
         ])
       )
     ).toBe(false);

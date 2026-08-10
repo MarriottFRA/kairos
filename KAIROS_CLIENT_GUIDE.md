@@ -939,7 +939,9 @@ partial view of the plan does not produce incomplete numbers, it destroys good o
 `relation in (OWNER, ADMIN_LEASE)` *and* full read scope. This is the main reason ownership
 transfer exists. If the person who set a plan up is not the person who loads it into the
 workbook — an HR director building it, a finance director pushing it — the plan has to be
-handed over with `POST /plans/{id}/transfer`, not delegated.
+handed over with `POST /plans/{id}/transfer`, not delegated. The HR director does not lose
+sight of the plan by doing so: the transfer leaves them a
+[read-only delegation](#ownership-transfer) on the way out.
 
 #### `POST /kairos/plans/{planId}/bst-push/log` → 204
 
@@ -1072,7 +1074,9 @@ Owner only. Rate limited 60/hour.
 delegated in one flat layer from the plan owner — a delegate holding Rooms cannot subdivide
 it further. "A delegate cannot sub-delegate" is the single most important containment
 property in the feature. Where an owner needs someone else to run the delegation, the answer
-is ownership transfer, not a deeper tree.
+is [ownership transfer](#ownership-transfer), not a deeper tree — which is also why transfer
+leaves the outgoing owner a read-only delegation rather than nothing: handing the plan on is
+already the escape hatch, and it should not cost them their view of it.
 
 The delegation stores **intent** — the full set the owner asked for — and is never mutated by
 ordinary data edits. If the delegate's own department access is later widened, the grant
@@ -1187,6 +1191,7 @@ somebody's afternoon, and to back the soft-presence display. Rate limited 120/ho
 ] }
 ```
 
+<a id="get-kairosplansplaniddepartment-ownership"></a>
 #### `GET /kairos/plans/{planId}/department-ownership`
 
 **The one call the grid makes on every render.**
@@ -1197,7 +1202,8 @@ somebody's afternoon, and to back the soft-presence display. Rate limited 120/ho
   "structureEditableByMe": true,
   "departments": [
     { "code": "ROOMS", "readable": true, "writable": false,
-      "reason": "DELEGATED", "assignedTo": [{ "userId": 42, "state": "ACTIVE" }] }
+      "reason": "DELEGATED",
+      "assignedTo": [{ "userId": 42, "state": "ACTIVE", "canEdit": true }] }
   ] }
 ```
 
@@ -1206,9 +1212,16 @@ to guess and never disagrees with what happens on save.
 
 Reasons: `DELEGATED`, `HANDED_BACK`, `NOT_IN_WRITE_SCOPE`.
 
-**A department with an `ACTIVE` delegate is not writable by the owner.** The delegate is the
-one editing it; the owner's route back is to withdraw the delegation, which is a deliberate,
-audited act rather than a silent override.
+**A department with an `ACTIVE`, editing delegate is not writable by the owner.** The delegate
+is the one editing it; the owner's route back is to withdraw the delegation, which is a
+deliberate, audited act rather than a silent override.
+
+**A read-only delegate (`canEdit: false`) displaces nobody.** The owner granted a look while
+keeping the pen, so the department stays `writable: true` with `reason: null` and the holder
+still appears in `assignedTo`. Render the two differently: an editing holder is who the
+department belongs to right now, a read-only one is merely who else can see it. This is also
+what keeps the [read-only delegation the outgoing owner keeps after a
+transfer](#ownership-transfer) invisible to the new owner's lock list.
 
 **A `HANDED_BACK` department is writable by the owner again.** The delegate has declared it
 finished, so nobody else is editing it — the grant survives to keep their read access and to
@@ -1330,6 +1343,7 @@ control.
 
 Kairos audit rows, filtered. Reads the existing append-only table.
 
+<a id="ownership-transfer"></a>
 #### `POST /kairos/plans/{planId}/transfer`
 
 ```json
@@ -1349,8 +1363,51 @@ Delegations held by the **incoming** owner are revoked in the same transaction �
 not a delegate of themselves — but **everyone else's delegations survive the handover**, so
 the new owner inherits the existing delegates and their departments intact.
 
+##### The outgoing owner keeps read access
+
+The **previous** owner is left with a [read-only delegation](#delegation-permission-flags) on
+the plan, covering every delegatable department, **granted by the incoming owner**. Handing a
+plan over is not the same as being evicted from it: without this the person who built the
+numbers drops to `OU_VISITOR` the instant the transfer commits — the plan visible, not one byte
+of it readable — with no route back except asking their successor for a grant.
+
+It is an ordinary delegation and there is nothing new to build for it. It appears in the new
+owner's `GET .../delegations` list like any other, with `canEdit: false`, and they withdraw it
+whenever they like with the ordinary `DELETE /kairos/plans/{planId}/delegations/{delegationId}`.
+It never expires on its own — withdrawal is the new owner's decision, not a timer's — and it
+takes nothing away from them: a read-only holder does not lock a department in
+[`department-ownership`](#get-kairosplansplaniddepartment-ownership).
+
+Retention is **best effort and never fails the transfer.** A predecessor who has been
+deactivated, has lost access to the property, or holds none of the plan's departments simply
+gets no row, and `retainedReason` says which — the commonest reason to hand a plan over is that
+its owner is leaving, so this is the normal case rather than the exotic one:
+
+| `retainedReason` | Meaning |
+|---|---|
+| `SELF_TRANSFER` | New owner is the current owner; nothing was handed over. |
+| `PREVIOUS_OWNER_INACTIVE` | Deactivated or unapproved — the usual outcome once offboarding has run. |
+| `OU_ACCESS_REVOKED` | No live access to the property any more. |
+| `NO_KAIROS_APP` / `NO_DEPARTMENT_ACCESS` | Their own grants no longer support a delegation. |
+| `NO_GRANTABLE_DEPARTMENTS` | The plan has no department with live rows. |
+| `NO_OVERLAP` | No delegatable department intersects their department access. |
+| `ALREADY_DELEGATED` | They already hold a live delegation on this plan. |
+
+Response:
+
+```json
+{ "planId": "...", "ownerUserId": 42, "ownerEmail": "successor@example.com",
+  "delegationsRevoked": 1,
+  "retainedDelegation": { "id": "...", "delegateUserId": 7, "departments": ["ROOMS"],
+                          "canEdit": false, "canReadPii": true },
+  "retainedReason": null }
+```
+
+`retainedDelegation` is `null` exactly when `retainedReason` is set, and vice versa.
+
 Transferring to yourself is permitted: reassigning a departed owner's plan is legitimate. It
-confers ownership only, never the admin-author carve-out described in §3.
+retains nothing (`retainedReason: "SELF_TRANSFER"`), and it confers ownership only, never the
+admin-author carve-out described in §3.
 
 ### Clusters
 

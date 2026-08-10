@@ -1358,6 +1358,13 @@ export function createKairosSyncHandlers(
           // Ownership just moved, so every cached authorization answer for this
           // plan is now a claim about the past. Drop them rather than let the
           // grid keep locking rows against the previous relation.
+          //
+          // On THIS computer that relation has usually inverted outright: the
+          // caller was the owner a moment ago and is now a read-only delegate,
+          // holding the read-only delegation the transfer left them. Nothing
+          // short of re-reading can discover that, and `relation` has to go with
+          // the ownership body or the next read is answered from a cache that
+          // still thinks this machine owns the plan.
           updateSyncState(secureDb(), request.planId, {
             relation: null,
             scopeKind: null,

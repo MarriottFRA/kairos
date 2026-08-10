@@ -11,8 +11,14 @@
  * `DepartmentOwnershipRow.assignedTo[].state` is `ACTIVE | HANDED_BACK`. Two
  * shapes are provably wrong:
  *
- *   reason === "HANDED_BACK"                   — a delegate's sentence, to the owner
- *   reason === "DELEGATED", no ACTIVE holder   — the stated reason has no holder
+ *   reason === "HANDED_BACK"                    — a delegate's sentence, to the owner
+ *   reason === "DELEGATED", no EDITING holder   — the stated reason has no holder
+ *
+ * "Editing", not merely ACTIVE. A read-only delegate displaces nobody — the
+ * department stays `writable: true, reason: null` — so a `DELEGATED` lock whose
+ * only ACTIVE holder cannot edit is as unjustified as one with no holder at all.
+ * Strictly stronger than the ACTIVE test it replaces, and safe: the only thing
+ * this predicate ever triggers is asking the server again.
  *
  * Deliberately NOT included: `NOT_IN_WRITE_SCOPE` with no holders. That is
  * legitimate for an `OWNER_DEGRADED` whose hotel access shrank, and a predicate
@@ -38,6 +44,7 @@
  */
 
 import type { DepartmentOwnership } from "./protocol";
+import { holderEdits } from "./delegationSummary";
 import { ownsPlan } from "./relations";
 
 /**
@@ -59,10 +66,7 @@ export function contradictoryDepartments(
       disputed.push(row.code);
       continue;
     }
-    if (
-      row.reason === "DELEGATED" &&
-      !row.assignedTo.some((holder) => holder.state === "ACTIVE")
-    ) {
+    if (row.reason === "DELEGATED" && !row.assignedTo.some(holderEdits)) {
       disputed.push(row.code);
     }
   }

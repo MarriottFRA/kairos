@@ -109,10 +109,23 @@ export default function PlanPeopleSection({
 
   // `stale` is UNKNOWN, not empty. Rendering the "nobody holds anything" empty
   // state from it would be the reassuring reading and the wrong one.
+  //
+  // Counted by DELEGATION, not by department. This section draws one row per
+  // person, so a department count is the wrong unit for both the emptiness test
+  // and the skeletons — and an ownership handover is the case that makes the
+  // difference obvious, leaving one delegate holding every department at once.
+  //
+  // `readOnly` is included: they hold no department away from the owner, but
+  // they are somebody with access, and this section's whole question is who
+  // else is on the plan.
   const stale = summary?.stale ?? true;
   const expected =
     summary !== null && !stale
-      ? summary.delegatedOut.length + summary.handedBack.length
+      ? new Set(
+          [...summary.delegatedOut, ...summary.readOnly, ...summary.handedBack].map(
+            (entry) => entry.delegationId
+          )
+        ).size
       : 0;
 
   if (stale) return <Frame><Skeleton height={28} /></Frame>;
