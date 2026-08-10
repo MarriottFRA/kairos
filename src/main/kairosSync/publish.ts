@@ -60,6 +60,7 @@ import {
   collectLocalEntities,
   filterToWriteScope,
   purgesFor,
+  shadowIsComplete,
   toCommitEntities,
 } from "./collect";
 import {
@@ -84,17 +85,9 @@ type Db = InstanceType<typeof Database>;
  */
 const NEVER_AGREED = "";
 
-/**
- * Whether an absent shadow entry really means the server has never held the row.
- *
- * The same test as `bootstrap` below, and for the same reason: a rebuilt local
- * store has an empty shadow for a plan the server may be full of, so on its own
- * "not in the shadow" proves nothing. Paired with a server version of zero it
- * does — there is nothing there to have held anything.
- */
-function shadowIsComplete(shadow: Map<string, unknown>, baseVersion: number): boolean {
-  return shadow.size > 0 || baseVersion === 0;
-}
+// Whether an absent shadow entry really means the server has never held the row
+// is `shadowIsComplete` in collect.ts — the same test as `bootstrap` below, and
+// shared with the pending counter so the badge and the publish agree.
 
 export interface PublishOptions {
   planId: string;
@@ -199,7 +192,7 @@ export function previewPublish(
   const shadow = loadShadowMap(db, options.planId);
   const commits = [
     ...toCommitEntities(publishable, shadow, {
-      shadowIsComplete: shadowIsComplete(shadow, options.baseVersion),
+      shadowIsComplete: shadowIsComplete(shadow.size, options.baseVersion),
     }),
     // The FULL collected set, not `publishable` — a row withheld by write scope
     // is one we hold and may not send, which is the opposite of one we deleted.
@@ -274,7 +267,7 @@ export async function publishPlan(
   const shadow = loadShadowMap(db, planId);
 
   const updates = toCommitEntities(publishable, shadow, {
-    shadowIsComplete: shadowIsComplete(shadow, options.baseVersion),
+    shadowIsComplete: shadowIsComplete(shadow.size, options.baseVersion),
   });
   // The FULL collected set — see the header on `purgesFor`.
   const purges = purgesFor(entities, shadow, {

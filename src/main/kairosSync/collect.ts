@@ -316,6 +316,40 @@ export interface CommitOptions {
 }
 
 /**
+ * Can an absent shadow entry be read as "the server has never held this row"?
+ *
+ * On its own it cannot: a rebuilt local store has an empty shadow for a plan the
+ * server may be full of. Paired with a base version of zero it can — there is
+ * nothing there to have held anything.
+ *
+ * Exported because more than the publish path asks this question. The pending
+ * counter behind the Sync badge asks it too, and the two disagreeing is what put
+ * a plan into "needs attention" with nothing on it that a publish would send.
+ */
+export function shadowIsComplete(shadowSize: number, baseVersion: number): boolean {
+  return shadowSize > 0 || baseVersion === 0;
+}
+
+/**
+ * Would a publish carry this row?
+ *
+ * The single definition of "changed since the server last confirmed it", used by
+ * the collector and by the pending counter. Any second copy of this comparison
+ * drifts, and when it drifts the user is told they have changes to publish that
+ * publishing does not clear.
+ *
+ * See the tombstone note on `toCommitEntities` for the `shadowIsComplete` half.
+ */
+export function isUnsent(
+  known: ShadowRow | null | undefined,
+  local: { hash: string; deleted: boolean },
+  shadowIsComplete = true
+): boolean {
+  if (known) return known.hash !== local.hash || known.deleted !== local.deleted;
+  return !(local.deleted && shadowIsComplete);
+}
+
+/**
  * Turn mapped rows into the commit entities that actually need sending.
  *
  * A row whose hash already matches the shadow is skipped outright rather than
@@ -345,15 +379,12 @@ export function toCommitEntities(
   shadow: Map<string, ShadowRow>,
   options: CommitOptions = {}
 ): CommitEntity[] {
-  const shadowIsComplete = options.shadowIsComplete !== false;
+  const complete = options.shadowIsComplete !== false;
   const out: CommitEntity[] = [];
 
   for (const entity of entities) {
     const known = shadow.get(shadowKey(entity.entityType, entity.entityId));
-    if (known && known.hash === entity.hash && known.deleted === entity.deleted) {
-      continue;
-    }
-    if (!known && entity.deleted && shadowIsComplete) continue;
+    if (!isUnsent(known, entity, complete)) continue;
     out.push({
       entityType: entity.entityType,
       entityId: entity.entityId,

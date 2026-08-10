@@ -22,7 +22,9 @@ import {
   chunkEntities,
   collectLocalEntities,
   filterToWriteScope,
+  isUnsent,
   purgesFor,
+  shadowIsComplete,
   toCommitEntities,
   LocalEntity,
 } from "../collect";
@@ -449,6 +451,65 @@ describe("toCommitEntities", () => {
     const pii = entity("position_pii", "pos-1", "D0410");
     const commits = toCommitEntities([pii], new Map());
     expect(commits[0].department).toBeNull();
+  });
+});
+
+/**
+ * The same question the Sync badge asks.
+ *
+ * `pendingCount` in the IPC layer used to make this comparison itself, and after
+ * `toCommitEntities` learned to drop a tombstone the server never had, the two
+ * disagreed: a plan permanently reading "1 change not published yet" with
+ * nothing a publish would send. One definition, both callers.
+ */
+describe("isUnsent", () => {
+  const local = { hash: "h1", deleted: false };
+  const known = (over: Partial<ShadowRow> = {}): ShadowRow => ({
+    entityType: "position",
+    entityId: "a",
+    hash: "h1",
+    serverSeq: 5,
+    deleted: false,
+    ...over,
+  });
+
+  it("is false when the shadow already holds this exact row", () => {
+    expect(isUnsent(known(), local)).toBe(false);
+  });
+
+  it("is true when the content moved", () => {
+    expect(isUnsent(known({ hash: "old" }), local)).toBe(true);
+  });
+
+  it("is true for a delete of a row the server holds", () => {
+    expect(isUnsent(known(), { ...local, deleted: true })).toBe(true);
+  });
+
+  it("is true for an unpublished row that still exists", () => {
+    expect(isUnsent(null, local)).toBe(true);
+  });
+
+  it("is false for a delete of a row the server has never held", () => {
+    expect(isUnsent(null, { ...local, deleted: true })).toBe(false);
+  });
+
+  it("is true for that same delete when the shadow cannot be trusted", () => {
+    expect(isUnsent(null, { ...local, deleted: true }, false)).toBe(true);
+  });
+});
+
+describe("shadowIsComplete", () => {
+  it("trusts a shadow that has rows in it", () => {
+    expect(shadowIsComplete(12, 40)).toBe(true);
+  });
+
+  it("trusts an empty shadow on a plan the server has nothing for", () => {
+    expect(shadowIsComplete(0, 0)).toBe(true);
+  });
+
+  it("does not trust an empty shadow on a plan the server has a version for", () => {
+    // A rebuilt local store, before `rebuildShadowFromServer` has run.
+    expect(shadowIsComplete(0, 40)).toBe(false);
   });
 });
 

@@ -47,6 +47,7 @@ import * as plansApi from "../../main/kairosSync/plans";
 import * as admin from "../../main/kairosSync/admin";
 import {
   clearShadow,
+  countShadow,
   deleteSyncState,
   getShadow,
   getSyncState,
@@ -60,7 +61,7 @@ import {
   Row,
   toEntity,
 } from "../../shared/kairosSync/entityMap";
-import { WriteScope } from "../../main/kairosSync/collect";
+import { WriteScope, isUnsent, shadowIsComplete } from "../../main/kairosSync/collect";
 import {
   KAIROS_SYNC_CHANNELS,
   PendingByDepartment,
@@ -1956,7 +1957,9 @@ export function createKairosSyncHandlers(
  *
  * A row with no shadow entry counts however it hashes — never published, or
  * withheld from a publish for being outside this caller's write scope, and both
- * are genuinely pending.
+ * are genuinely pending. The exception is a row that is BOTH unknown to the
+ * server and deleted here, which a publish deliberately does not send: see
+ * `pendingShadowIsComplete`.
  *
  * `kairos_sync_shadow` lives in the encrypted store alongside all four of these
  * tables, so stage one is a join rather than a second round trip.
@@ -2009,6 +2012,26 @@ function candidateSql(
 const PENDING_REFINE_LIMIT = 500;
 
 /**
+ * Whether "no shadow entry" may be read here as "the server has never held it".
+ *
+ * The publish path drops a tombstone for a row the server never had — there is
+ * no fact in it for anybody else to learn (see `toCommitEntities`). Counting one
+ * here would then be a change the user is told to publish that publishing does
+ * not clear: a plan stuck on "1 change not published yet" for ever, on a row no
+ * longer in the grid.
+ *
+ * Same test as the publish path, with the watermark standing in for the base
+ * version — it is the last server version this machine has taken in, so an empty
+ * shadow beside a non-zero one is a shadow that has been lost rather than one
+ * that was never needed. That way round the tombstone is counted AND sent, which
+ * is the safe disagreement to have.
+ */
+function pendingShadowIsComplete(planId: string): boolean {
+  const db = secureDb();
+  return shadowIsComplete(countShadow(db, planId), getSyncState(db, planId)?.watermark ?? 0);
+}
+
+/**
  * WHICH rows are pending, not how many — `entityType:entityId`, the same key a
  * `/changes` page can be matched on.
  *
@@ -2020,17 +2043,15 @@ const PENDING_REFINE_LIMIT = 500;
  */
 function pendingEntityKeys(planId: string, ou: string): ReadonlySet<string> {
   const db = secureDb();
+  const complete = pendingShadowIsComplete(planId);
   const keys = new Set<string>();
   for (const source of PENDING_SOURCES) {
     const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
     for (const row of rows) {
       const mapped = toEntity(source.entityType as PublishedEntityType, row);
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
-      const changed =
-        !known ||
-        known.hash !== contentHash(mapped.payload) ||
-        known.deleted !== mapped.deleted;
-      if (changed) keys.add(`${source.entityType}:${mapped.entityId}`);
+      const local = { hash: contentHash(mapped.payload), deleted: mapped.deleted };
+      if (isUnsent(known, local, complete)) keys.add(`${source.entityType}:${mapped.entityId}`);
     }
   }
   return keys;
@@ -2057,6 +2078,7 @@ function pendingEntityKeys(planId: string, ou: string): ReadonlySet<string> {
  */
 function pendingByDepartment(planId: string, ou: string): Record<string, number> {
   const db = secureDb();
+  const complete = pendingShadowIsComplete(planId);
   const byDepartment: Record<string, number> = {};
 
   for (const source of PENDING_SOURCES) {
@@ -2090,11 +2112,8 @@ function pendingByDepartment(planId: string, ou: string): Record<string, number>
     for (const row of rows) {
       const mapped = toEntity(source.entityType as PublishedEntityType, row);
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
-      const changed =
-        !known ||
-        known.hash !== contentHash(mapped.payload) ||
-        known.deleted !== mapped.deleted;
-      if (!changed) continue;
+      const local = { hash: contentHash(mapped.payload), deleted: mapped.deleted };
+      if (!isUnsent(known, local, complete)) continue;
 
       const department =
         mapped.department ??
@@ -2136,20 +2155,17 @@ function pendingCount(planId: string, ou: string): number {
    * construction, so this costs a few hundred hashes at most.
    */
   let changed = 0;
+  const complete = pendingShadowIsComplete(planId);
   for (const source of PENDING_SOURCES) {
     const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
     for (const row of rows) {
       const mapped = toEntity(source.entityType as PublishedEntityType, row);
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
       // No shadow entry means the server has never confirmed this row, whatever
-      // its hash happens to be. That genuinely is pending.
-      if (!known || known.hash !== contentHash(mapped.payload)) {
-        changed += 1;
-        continue;
-      }
-      // Content agrees; a local delete the server has not been told about does
-      // not, and is exactly the change a publish would carry.
-      if (known.deleted !== mapped.deleted) changed += 1;
+      // its hash happens to be — genuinely pending, unless the row is a deletion
+      // of something the server never had. See `pendingShadowIsComplete`.
+      const local = { hash: contentHash(mapped.payload), deleted: mapped.deleted };
+      if (isUnsent(known, local, complete)) changed += 1;
     }
   }
 
