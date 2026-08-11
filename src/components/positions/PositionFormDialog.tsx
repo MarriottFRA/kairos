@@ -66,7 +66,7 @@ import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { CLUSTER_LINK_ROW_KEY } from "../../shared/positions/clusterSync";
 import { FieldCatalog, FieldDef } from "../../shared/positions/fields";
-import { BlockResultsById } from "../../shared/positions/liveSim";
+import type { DerivedRowValuesRef } from "../../shared/positions/derivedRowValues";
 import {
   buildPositionForm,
   fieldSpan,
@@ -82,6 +82,7 @@ import {
   blockAccountKey,
   blockFieldKey,
   blockInputSlots,
+  blockDepartmentKey,
   blockStatsAccountKey,
 } from "../../shared/positions/blockRows";
 import { buildColumns, cellEditable, ColumnFactoryContext } from "./columnFactory";
@@ -136,14 +137,15 @@ export interface PositionFormDialogProps {
   row: PositionRow | null;
   catalog: FieldCatalog;
   blocks: BlockDto[];
-  blockResults: BlockResultsById | null;
   departments: DepartmentOption[];
   /** Which of them may be chosen. Omit for no restriction. */
   departmentPicks?: DepartmentPickList;
   accounts: AccountOption[];
-  vacationCostById: ReadonlyMap<string, number>;
-  manhoursWorkedById: ReadonlyMap<string, number>;
-  fteById: ReadonlyMap<string, number>;
+  /** Vacation cost, manhours, FTE and live block totals per row — the same ref
+   *  the grid gets, so the form and the cell behind it can never disagree. The
+   *  form re-renders on every page render (the live row is looked up by id), so
+   *  reading through the ref keeps it current without rebuilding its columns. */
+  derived: DerivedRowValuesRef;
   hotelClusters: HotelClusterDto[];
   currentOu: string | null;
   hotelNames?: ReadonlyMap<string, string>;
@@ -177,13 +179,10 @@ export default function PositionFormDialog({
   row,
   catalog,
   blocks,
-  blockResults,
   departments,
   departmentPicks,
   accounts,
-  vacationCostById,
-  manhoursWorkedById,
-  fteById,
+  derived,
   hotelClusters,
   currentOu,
   hotelNames,
@@ -224,9 +223,7 @@ export default function PositionFormDialog({
       departments,
       departmentPicks,
       accounts,
-      vacationCostById,
-      manhoursWorkedById,
-      fteById,
+      derived,
       hotelClusters,
       currentOu,
       hotelNames,
@@ -239,21 +236,21 @@ export default function PositionFormDialog({
       ...buildBlockColumns(blocks, {
         numberFormat: ctx.numberFormat,
         accounts,
-        blockResults,
+        departments,
+        derived,
       }),
     ];
     return new Map(all.map((column) => [column.field, column]));
+    // As in PositionsGrid: `derived` is a stable ref, so nothing here moves
+    // while the user types. The form reads live values through the ref.
   }, [
     catalog,
     blocks,
-    blockResults,
     masked,
     departments,
     departmentPicks,
     accounts,
-    vacationCostById,
-    manhoursWorkedById,
-    fteById,
+    derived,
     hotelClusters,
     currentOu,
     hotelNames,
@@ -292,6 +289,11 @@ export default function PositionFormDialog({
       labels.set(blockStatsAccountKey(block.costDefId), {
         short: "Stats account",
         unit: "posts to",
+        block: block.label,
+      });
+      labels.set(blockDepartmentKey(block.costDefId), {
+        short: "Department",
+        unit: "books to",
         block: block.label,
       });
     }

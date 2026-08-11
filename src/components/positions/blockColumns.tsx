@@ -20,9 +20,11 @@ import {
   useGridApiContext,
 } from "@mui/x-data-grid-premium";
 import { BlockDto } from "../../shared/blocks/ipc";
-import { AccountOption } from "../../shared/mappingTables/types";
+import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import {
   blockAccountKey,
+  blockDepartmentKey,
+  blockDepartmentRowKeys,
   blockFieldKey,
   blockInputSlots,
   blockTotalKey,
@@ -36,9 +38,10 @@ import {
   poolShareWeight,
   PoolMembershipSpec,
 } from "../../shared/positions/poolSpread";
-import { BlockResultsById } from "../../shared/positions/liveSim";
+import type { DerivedRowValuesRef } from "../../shared/positions/derivedRowValues";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
+import DepartmentAutocomplete from "../common/DepartmentAutocomplete";
 import { makeNumberPasteParser } from "../../shared/positions/pasteParsers";
 
 export interface BlockColumnsContext {
@@ -46,8 +49,18 @@ export interface BlockColumnsContext {
   /** Whole account cache for the per-row account cells of unlocked blocks;
    *  the user may pick ANY account here (no prefix filter). */
   accounts: AccountOption[];
-  /** Per-row live-sim results; null while structure/calendar still load. */
-  blockResults: BlockResultsById | null;
+  /** Whole department cache for the per-row department cells of MULTIPLIER
+   *  blocks in PER_ROW mode. Deliberately unrestricted by delegation write
+   *  scope: this only moves where a cost REPORTS, and the server resolves a
+   *  component value's own permissions from its parent position anyway. */
+  departments: DepartmentOption[];
+  /**
+   * The displayed-but-not-stored per-row values, including this block's live-sim
+   * totals. A ref so a re-simulation does NOT rebuild the columns — read
+   * `ctx.derived.current` inside the cell callback, never at build time. See
+   * shared/positions/derivedRowValues.
+   */
+  derived: DerivedRowValuesRef;
 }
 
 /**
@@ -68,6 +81,39 @@ function BlockAccountEditCell(
 
   return (
     <AccountAutocomplete
+      options={options}
+      value={typeof value === "string" ? value : ""}
+      inputRef={inputRef}
+      autoFocus
+      openOnFocus
+      variant="standard"
+      sx={{ px: 1 }}
+      onChange={(code) => {
+        void Promise.resolve(
+          apiRef.current.setEditCellValue({ id, field, value: code })
+        ).then(() => apiRef.current.stopCellEditMode({ id, field }));
+      }}
+    />
+  );
+}
+
+/**
+ * Type-ahead editor for a PER_ROW block's department cell. Same commit-on-pick
+ * pattern as BlockAccountEditCell, over department CODES.
+ */
+function BlockDepartmentEditCell(
+  props: GridRenderEditCellParams<PositionRow> & { options: DepartmentOption[] }
+) {
+  const { id, field, value, options, hasFocus } = props;
+  const apiRef = useGridApiContext();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (hasFocus) inputRef.current?.focus();
+  }, [hasFocus]);
+
+  return (
+    <DepartmentAutocomplete
       options={options}
       value={typeof value === "string" ? value : ""}
       inputRef={inputRef}
@@ -111,6 +157,13 @@ function poolRowSubject(row: PositionRow) {
 /** "1", "1.5", "1.25" — never "1.00", so a column of plain shares stays quiet. */
 const WEIGHT_FORMAT = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 3,
+});
+
+/** Money-ish totals. Module scope for the same reason WEIGHT_FORMAT is: a
+ *  `toLocaleString(undefined, {...})` builds a fresh Intl.NumberFormat on every
+ *  call, and a valueFormatter runs per visible cell per render. */
+const TOTAL_FORMAT = new Intl.NumberFormat(undefined, {
+  maximumFractionDigits: 2,
 });
 
 /**
@@ -244,6 +297,15 @@ export function buildBlockColumns(
   // thousands separators, which the grid's default numeric parser reads back
   // as NaN, so a copied amount never pastes without the inverse.
   const parsePastedNumber = makeNumberPasteParser(ctx.numberFormat);
+  // Department code → name, built once per column set. The per-row department
+  // cell renders the name beside the code, and a linear scan for it inside a
+  // renderCell is O(departments) per visible cell per render — with a synced
+  // account_maps cache running to thousands of departments (see columnFactory's
+  // note on capping the picker), that is tens of thousands of string compares
+  // every time the grid repaints.
+  const departmentNameByCode = new Map(
+    ctx.departments.map((option) => [option.code, option.name])
+  );
 
   for (const block of blocks) {
     const slots = blockInputSlots(block);
@@ -265,6 +327,15 @@ export function buildBlockColumns(
         const ruled = block.poolEligibilityMode === "RULE";
         const spec = poolMembership(block);
         const summary = poolRuleSummary(block);
+        // Everything below is loop-invariant — it depends on the block and the
+        // slot index, never on the row — so it is built once per column instead
+        // of per cell per render. `cellClassName` and `renderCell` are two of
+        // the hottest callbacks MUI has.
+        const numClass = index === 0 ? "pos-cell--num pos-cell--sectionStart" : "pos-cell--num";
+        const mutedClass = `${numClass} pos-cell--derived`;
+        const notInPoolTitle = ruled
+          ? `Not in this pool. The block shares its pot with ${summary}.`
+          : "Not in this pool. Type how many shares this position should take — 1 is a normal share.";
         columns.push({
           field: key,
           headerName: `${block.label} — ${short}`,
@@ -278,16 +349,10 @@ export function buildBlockColumns(
           editable: true,
           sortable: true,
           headerClassName: headerClasses.join(" "),
+          // Muted whenever the number shown was not typed on this row — the
+          // rule's default, or no share at all.
           cellClassName: (params) =>
-            [
-              "pos-cell--num",
-              index === 0 ? "pos-cell--sectionStart" : "",
-              // Muted whenever the number shown was not typed on this row —
-              // the rule's default, or no share at all.
-              clampPoolWeight(params.value) > 0 ? "" : "pos-cell--derived",
-            ]
-              .filter(Boolean)
-              .join(" "),
+            clampPoolWeight(params.value) > 0 ? numClass : mutedClass,
           renderHeader: renderBlockHeader(short, unit),
           renderCell: (params) => {
             const row = params.row as PositionRow | undefined;
@@ -305,9 +370,7 @@ export function buildBlockColumns(
                 ? `Takes ${WEIGHT_FORMAT.format(
                     effective
                   )} share${effective === 1 ? "" : "s"} of the pot — the block's default. Type a number here to give this position more or less.`
-                : ruled
-                  ? `Not in this pool. The block shares its pot with ${summary}.`
-                  : "Not in this pool. Type how many shares this position should take — 1 is a normal share.";
+                : notInPoolTitle;
             return (
               <Tooltip title={title}>
                 <Box component="span" sx={{ color: "text.disabled" }}>
@@ -386,6 +449,38 @@ export function buildBlockColumns(
       );
     }
 
+    // Per-row department cell (MULTIPLIER blocks set to "each row picks"):
+    // blank falls back to the row's own department, shown muted.
+    if (blockDepartmentRowKeys(block).length > 0) {
+      columns.push({
+        field: blockDepartmentKey(block.costDefId),
+        headerName: `${block.label} — Department`,
+        description: `${block.label}: the department this row's cost books to. Blank uses the row's own department.`,
+        width: 156,
+        editable: true,
+        sortable: true,
+        headerClassName: "pos-col--blocks",
+        renderHeader: renderBlockHeader("Department", "blank = row's own"),
+        renderEditCell: (params) => (
+          <BlockDepartmentEditCell {...params} options={ctx.departments} />
+        ),
+        renderCell: (params) => {
+          const override = typeof params.value === "string" ? params.value : "";
+          if (!override) {
+            return (
+              <Box component="span" sx={{ color: "text.disabled" }}>
+                —
+              </Box>
+            );
+          }
+          // Show the name so the cell reads like the grid's own Department
+          // column; fall back to the bare code if the maps have not synced.
+          const name = departmentNameByCode.get(override);
+          return <span>{name ? `${override} — ${name}` : override}</span>;
+        },
+      });
+    }
+
     // The Total: the engine's own figure for this row's line, full year. Blank
     // (not zero) while the position is inactive or the simulation is loading.
     columns.push({
@@ -408,15 +503,13 @@ export function buildBlockColumns(
       ),
       valueGetter: (_value: unknown, row: PositionRow) => {
         if (!row) return null;
-        const result = ctx.blockResults?.get(row.id)?.get(block.costDefId);
+        const result = ctx.derived.current.blockResults.get(row.id)?.get(block.costDefId);
         return result ? result.total : null;
       },
       valueFormatter: (value: number | null | undefined) => {
         if (value === null || value === undefined) return "";
         const num = Number(value);
-        return Number.isFinite(num)
-          ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : "";
+        return Number.isFinite(num) ? TOTAL_FORMAT.format(num) : "";
       },
     });
   }
@@ -491,6 +584,7 @@ export function buildBlockGroupingEntries(
       ...(block.blockType === "COUNT_RATE" && !block.statsAccountLocked
         ? [{ field: blockStatsAccountKey(block.costDefId) }]
         : []),
+      ...blockDepartmentRowKeys(block).map((field) => ({ field })),
       { field: blockTotalKey(block) },
     ],
   }));

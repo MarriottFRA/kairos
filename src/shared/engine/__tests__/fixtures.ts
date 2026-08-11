@@ -25,6 +25,38 @@ import {
 
 export const SCENARIO_ID = "scn-1" as ScenarioId;
 
+/** The plan year every fixture scenario runs on — service days are relative to
+ *  it, so the hiring months below and makeScenario() must agree. */
+export const FIXTURE_YEAR = 2027;
+
+/** Calendar days per month of FIXTURE_YEAR (2027 is not a leap year). */
+const CALENDAR_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Service days for a position hired in month `hireMonth` (0-based) on day
+ * `hireDay`, or never (`hireMonth < 0`).
+ *
+ * Deliberately a local generator rather than a call into
+ * shared/positions/serviceDays: the engine may not import outside its own
+ * folder, and these fixtures only need the SHAPES the loaders produce — the
+ * date arithmetic itself is pinned by serviceDays.test.ts, and the wiring
+ * between the two loaders by liveSimParity.
+ */
+function fixtureServiceDays(
+  hireMonth: number,
+  hireDay: number,
+  priorYears: number
+): { serviceDaysPerMonth: number[]; serviceDaysOpening: number } {
+  const perMonth = new Array<number>(MONTHS).fill(0);
+  if (hireMonth < 0) return { serviceDaysPerMonth: perMonth, serviceDaysOpening: 0 };
+  for (let m = 0; m < MONTHS; m++) {
+    if (m < hireMonth) continue;
+    // Both endpoints inclusive, so the hiring day itself counts.
+    perMonth[m] = m === hireMonth ? CALENDAR_DAYS[m] - hireDay + 1 : CALENDAR_DAYS[m];
+  }
+  return { serviceDaysPerMonth: perMonth, serviceDaysOpening: priorYears * 365 };
+}
+
 export function defId(id: string): ComponentDefId {
   return id as ComponentDefId;
 }
@@ -38,7 +70,13 @@ const SYNC: { updatedAt: string; deletedAt: string | null } = {
 };
 
 export function makeScenario(): Scenario {
-  return { id: SCENARIO_ID, ou: "0410", year: 2027, label: "Budget 2027", ...SYNC };
+  return {
+    id: SCENARIO_ID,
+    ou: "0410",
+    year: FIXTURE_YEAR,
+    label: `Budget ${FIXTURE_YEAR}`,
+    ...SYNC,
+  };
 }
 
 /** Flat 20 productive days per month unless overridden — keeps math hand-checkable.
@@ -238,6 +276,33 @@ export function standardDefinitions(): CostComponentDefinition[] {
       sortOrder: 17,
       baseSelector: { kind: "VACATION" },
     }),
+    // Length-of-service bases. Both modes, and a WEIGHTED_BY_BASE over the
+    // month increments too — the increments are the shape an indemnity accrual
+    // spreads a yearly figure across, so parity must cover that path as well.
+    makeDef({
+      id: "def-multservice",
+      spreadMethod: "PERCENT_OF",
+      label: "Service Day Accrual",
+      accountCode: "628400",
+      sortOrder: 17.1,
+      baseSelector: { kind: "SERVICE", mode: "MONTH" },
+    }),
+    makeDef({
+      id: "def-multservicetotal",
+      spreadMethod: "PERCENT_OF",
+      label: "Indemnity Liability",
+      accountCode: "628500",
+      sortOrder: 17.2,
+      baseSelector: { kind: "SERVICE", mode: "TOTAL" },
+    }),
+    makeDef({
+      id: "def-weightedservice",
+      spreadMethod: "WEIGHTED_BY_BASE",
+      label: "Service-Weighted Award",
+      accountCode: "628600",
+      sortOrder: 17.3,
+      baseSelector: { kind: "SERVICE", mode: "MONTH" },
+    }),
     makeDef({
       id: "def-multhours",
       spreadMethod: "PERCENT_OF",
@@ -315,6 +380,83 @@ export function standardDefinitions(): CostComponentDefinition[] {
   ];
 }
 
+/**
+ * Pads the standard set out to `targetWidth` definitions, for benching the
+ * WIDTH axis. A real install carries far more blocks than the 28 shapes above —
+ * 50-100 is plausible — and width is not interchangeable with row count: the
+ * aggregate matrix is sized by definitions × departments (not rows), and the
+ * count × weight post-pass in execute.ts walks defCount per position. Stacking
+ * on more rows never surfaces either.
+ *
+ * The extras cycle the accumulator-generating shapes, because those are what
+ * real blocks mostly are and what dominates the instruction stream. Ids,
+ * accounts and sortOrders are disjoint from the standard set, and sortOrder
+ * starts at 100 so the base 28 keep their exact topological order.
+ */
+export function widenDefinitions(
+  base: CostComponentDefinition[],
+  targetWidth: number
+): CostComponentDefinition[] {
+  const out = [...base];
+  for (let i = 0; out.length < targetWidth; i++) {
+    const id = `def-wide-${String(i).padStart(3, "0")}`;
+    const common = {
+      id,
+      label: `Wide Block ${i}`,
+      accountCode: `7${String(i).padStart(5, "0")}`,
+      sortOrder: 100 + i,
+    };
+    switch (i % 6) {
+      case 0: // PERCENT_OF over the base salary — the commonest block by far
+        out.push(makeDef({ ...common, spreadMethod: "PERCENT_OF" }));
+        break;
+      case 1: // PERCENT_OF over another line (ACC_ADD_LINE rather than ACC_ADD_GROSS)
+        out.push(
+          makeDef({
+            ...common,
+            spreadMethod: "PERCENT_OF",
+            baseSelector: { kind: "COMPONENTS", componentIds: [defId("def-housing")] },
+          })
+        );
+        break;
+      case 2:
+        out.push(makeDef({ ...common, spreadMethod: "WEIGHTED_BY_BASE" }));
+        break;
+      case 3: // a non-accumulator shape, so the mix does not become all-ACC
+        out.push(makeDef({ ...common, spreadMethod: "FLAT_PER_ACTIVE_MONTH" }));
+        break;
+      case 4: // the 6-instruction COMBINE shape
+        out.push(
+          makeDef({
+            ...common,
+            spreadMethod: "PERCENT_OF",
+            baseSelector: {
+              kind: "COMBINE",
+              op: "ADD",
+              left: { kind: "BASE_SALARY" },
+              right: { kind: "COMPONENTS", componentIds: [defId("def-housing")] },
+            },
+          })
+        );
+        break;
+      default:
+        out.push(
+          makeDef({
+            ...common,
+            spreadMethod: "PERCENT_OF",
+            baseSelector: { kind: "CALENDAR", series: "PAY_DAYS" },
+          })
+        );
+    }
+  }
+  return out;
+}
+
+/** True when `widenDefinitions` gave this def a `yearlyValue`-shaped method. */
+function wideDefWantsYearly(index: number): boolean {
+  return index % 6 === 2 || index % 6 === 3;
+}
+
 // ---------------------------------------------------------------------------
 // Seeded RNG + randomized scenario generator (for parity/invariant tests)
 // ---------------------------------------------------------------------------
@@ -331,10 +473,24 @@ export function rng(seed: number): () => number {
   };
 }
 
-export function randomScenario(seed: number, positionCount: number): ScenarioInput {
+/**
+ * `defWidth` pads the definition set out for the width-axis benches. It is
+ * OPTIONAL and off by default on purpose: every existing caller (goldenPlan,
+ * repackParity, reference-parity, invariants, the tripwires) must keep getting
+ * a byte-identical scenario, and goldenPlan snapshots the plan shape. When it
+ * is omitted no extra rand() call is made, so the RNG stream is untouched.
+ */
+export function randomScenario(
+  seed: number,
+  positionCount: number,
+  defWidth?: number
+): ScenarioInput {
   const rand = rng(seed);
   const pick = <T,>(items: T[]): T => items[Math.floor(rand() * items.length)];
-  const definitions = standardDefinitions();
+  const standard = standardDefinitions();
+  const definitions =
+    defWidth === undefined ? standard : widenDefinitions(standard, defWidth);
+  const wideDefs = definitions.slice(standard.length);
 
   // Vary the bank-holiday knobs per seed so parity covers every branch of
   // bankHolidayCoefficient — hourly vs salaried eligibility, the paid-when-off
@@ -361,6 +517,18 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
     // monthly amount (the two inputs are mutually exclusive), so the parity /
     // invariant / emission / disassemble suites cover the BASE_SALARY_HOURLY op.
     const hourly = rand() < 0.3;
+    // Length of service, in the three buckets the loaders produce: ~20% with no
+    // hiring date at all (the zero series the SERVICE bases must resolve to
+    // rather than inventing a liability from a blank cell), ~30% hired inside
+    // the plan year (a partial month, then full ones), the rest long-serving
+    // (a big prior-years carry-in).
+    const hireRoll = rand();
+    const service =
+      hireRoll < 0.2
+        ? fixtureServiceDays(-1, 0, 0)
+        : hireRoll < 0.5
+          ? fixtureServiceDays(Math.floor(rand() * 12), 1 + Math.floor(rand() * 28), 0)
+          : fixtureServiceDays(0, 1, 1 + Math.floor(rand() * 15));
 
     positions.push(
       makePosition({
@@ -388,11 +556,21 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
         vacationDays: Math.floor(rand() * 30),
         vacationMonthlyWeights: weights,
         accrualDaysPerMonth: rand() < 0.4 ? 0 : Math.round(rand() * 3 * 100) / 100,
+        // Length of service, built through the real loader helper so parity
+        // runs on the shapes production produces: long-serving staff (a large
+        // carry-in), a mid-year hire (a partial month then full ones), and
+        ...service,
       })
     );
 
     componentValues.push(
-      makeValue(id, "def-pension", { rate: Math.round(rand() * 20 * 100) / 10000 }),
+      // ~20% carry a per-row department override so the aggregate-rebuild
+      // parity check exercises the PER_ROW path. It moves the line's
+      // dept×account key and nothing else, so per-line parity is unaffected.
+      makeValue(id, "def-pension", {
+        rate: Math.round(rand() * 20 * 100) / 10000,
+        ...(rand() < 0.2 ? { departmentCode: "1910" } : {}),
+      }),
       makeValue(id, "def-indemnity", { yearlyValue: Math.round(rand() * 3000 * 100) / 100 }),
       makeValue(id, "def-housing", { yearlyValue: Math.round(rand() * 12000 * 100) / 100 }),
       makeValue(id, "def-transport", { yearlyValue: Math.round(rand() * 4000 * 100) / 100 }),
@@ -415,8 +593,28 @@ export function randomScenario(seed: number, positionCount: number): ScenarioInp
       makeValue(id, "def-combadd", { rate: Math.round(rand() * 10 * 100) / 10000 }),
       makeValue(id, "def-combsub", { rate: Math.round(rand() * 10 * 100) / 10000 }),
       makeValue(id, "def-combmul", { rate: Math.round(rand() * 100) / 10000 }),
+      makeValue(id, "def-multservice", { rate: Math.round(rand() * 50 * 100) / 100 }),
+      makeValue(id, "def-multservicetotal", { rate: Math.round(rand() * 5 * 100) / 10000 }),
+      makeValue(id, "def-weightedservice", {
+        yearlyValue: Math.round(rand() * 2500 * 100) / 100,
+      }),
       makeValue(id, "def-costperhour", { rate: 1 })
     );
+
+    // Width-axis extras. Appended AFTER the standard values so the RNG stream
+    // above is bit-identical to the unwidened scenario; when defWidth is
+    // omitted wideDefs is empty and this loop never draws a number.
+    for (let w = 0; w < wideDefs.length; w++) {
+      componentValues.push(
+        makeValue(
+          id,
+          wideDefs[w].id,
+          wideDefWantsYearly(w)
+            ? { yearlyValue: Math.round(rand() * 3000 * 100) / 100 }
+            : { rate: Math.round(rand() * 10 * 100) / 10000 }
+        )
+      );
+    }
   }
 
   const realDays = Array.from({ length: MONTHS }, () => 18 + Math.floor(rand() * 5));

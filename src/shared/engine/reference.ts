@@ -25,6 +25,7 @@ import {
   CostComponentDefinition,
   MONTHS,
   Position,
+  serviceSeries,
   SocialSecurityScheme,
 } from "./types";
 
@@ -408,6 +409,15 @@ export function referencePosition(
             ? calendar.holidayDays
             : days;
       for (let m = 0; m < MONTHS; m++) base[m] = series[m] * seas[m];
+      return base;
+    }
+    if (selector.kind === "SERVICE") {
+      // Length of service in calendar days since the hiring date — the month's
+      // own days (MONTH) or the running total including prior years (TOTAL).
+      // Whole days, seasonality-gated rather than seasonality-scaled — see
+      // serviceSeries. Mirror of the ACC_ADD_SERVICE emission in compile.ts.
+      const series = serviceSeries(position, selector.mode);
+      for (let m = 0; m < MONTHS; m++) base[m] = series[m];
       return base;
     }
     if (selector.kind === "VACATION") {

@@ -58,7 +58,8 @@ import { OuScope } from "./ouScope";
 import { prepared } from "./stmtCache";
 import { getComponentDefinitions, getSsSchemes } from "./structureRepo";
 import { getSeries } from "../kpiDrivers/repo";
-import { loadScenarioValues } from "./positionsRepo";
+import { getHiringDates, loadScenarioValues } from "./positionsRepo";
+import { serviceDaysFor } from "../../shared/positions/serviceDays";
 
 type Db = InstanceType<typeof Database>;
 
@@ -136,6 +137,11 @@ export async function loadScenarioInput(
 
   const values = loadScenarioValues(valuesDb, scope, scenarioId);
 
+  // Hiring dates only — the SERVICE bases need each position's length of
+  // service. Narrow by design: no name, number or title is read, so the
+  // ScenarioInput below still carries nothing but numbers. See getHiringDates.
+  const hiringDates = getHiringDates(valuesDb, scope, scenarioId);
+
   // Hotel-cluster definitions (cross-OU, plaintext store). The stored value is
   // the cluster ID; the engine gets the resolved NAME (its staffing-stats
   // rollup key) and this hotel's WEIGHT. Must mirror runLiveSim exactly —
@@ -154,6 +160,9 @@ export async function loadScenarioInput(
         record.clusterMultiplierOverride,
         clusterById
       );
+      // Length of service from the hiring date, for the SERVICE bases. Mirrors
+      // runLiveSim; serviceDaysParity pins the two.
+      const service = serviceDaysFor(hiringDates.get(record.id), scenario.year);
       return {
       id: record.id as PositionId,
       scenarioId: record.scenarioId as ScenarioId,
@@ -200,6 +209,8 @@ export async function loadScenarioInput(
       // the value available to anything referencing it as a base. Mirrors
       // rowToEnginePosition.
       accrualDaysPerMonth: record.vacationDays / 12,
+      serviceDaysPerMonth: service.perMonth,
+      serviceDaysOpening: service.opening,
       updatedAt: record.updatedAt,
       deletedAt: null,
       };
@@ -217,6 +228,7 @@ export async function loadScenarioInput(
       ssOpeningBase: record.ssOpeningBase ?? undefined,
       accountCode: record.accountCode ?? undefined,
       statsAccountCode: record.statsAccountCode ?? undefined,
+      departmentCode: record.departmentCode ?? undefined,
       updatedAt: record.updatedAt,
       deletedAt: null,
     })
@@ -258,6 +270,7 @@ export async function loadScenarioInput(
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,
       statsAccountLocked: block.statsAccountLocked,
+      departmentPerRow: block.departmentMode === "PER_ROW",
     }))
   );
 

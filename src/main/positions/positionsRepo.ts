@@ -139,7 +139,7 @@ export function loadScenarioValues(
       db,
       `SELECT position_id, component_def_id, rate, yearly_value, monthly_values,
               qty, unit_rate, ss_opening_base, account_code, stats_account_code,
-              updated_at
+              department_code, updated_at
          FROM component_values
         WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
     ).all(scope.ou, scenarioId) as Array<Record<string, unknown>>
@@ -155,6 +155,7 @@ export function loadScenarioValues(
       ssOpeningBase: (row.ss_opening_base as number | null) ?? null,
       accountCode: (row.account_code as string | null) ?? null,
       statsAccountCode: (row.stats_account_code as string | null) ?? null,
+      departmentCode: (row.department_code as string | null) ?? null,
       updatedAt: row.updated_at as string,
     })
   );
@@ -206,6 +207,35 @@ export function getPii(
       extraValues: parseJsonObject(row.extra_values),
       updatedAt: row.updated_at as string,
     };
+  }
+  return out;
+}
+
+/**
+ * Hiring dates only, keyed by position id — a deliberately narrow slice of PII
+ * for the engine loader, which derives each position's length of service from
+ * it (see shared/positions/serviceDays.ts). Names, employee numbers and titles
+ * are not read, so the date never travels with anything identifying and the
+ * ScenarioInput the engine receives still holds only numbers.
+ *
+ * Kept separate from getPii for exactly that reason: getPii is the read path
+ * for the PII the UI displays, this is the one field a budget calculation needs.
+ * The same narrowing openingBalances.hiredInSimYear does for the NI opening base.
+ */
+export function getHiringDates(
+  db: Db,
+  scope: OuScope,
+  scenarioId: string
+): Map<string, string | null> {
+  const rows = prepared(
+    db,
+    `SELECT position_id, hiring_date FROM position_pii
+      WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
+  ).all(scope.ou, scenarioId) as Array<Record<string, unknown>>;
+
+  const out = new Map<string, string | null>();
+  for (const row of rows) {
+    out.set(row.position_id as string, (row.hiring_date as string | null) ?? null);
   }
   return out;
 }
@@ -292,10 +322,15 @@ const COMPONENT_VALUE_COLUMNS: Record<string, string> = {
   ssOpeningBase: "ss_opening_base",
   accountCode: "account_code",
   statsAccountCode: "stats_account_code",
+  departmentCode: "department_code",
 };
 
-/** The two per-row account overrides are TEXT; everything else numeric. */
-const COMPONENT_VALUE_TEXT_FIELDS = new Set(["accountCode", "statsAccountCode"]);
+/** The per-row account and department overrides are TEXT; the rest numeric. */
+const COMPONENT_VALUE_TEXT_FIELDS = new Set([
+  "accountCode",
+  "statsAccountCode",
+  "departmentCode",
+]);
 
 export function batchWrite(
   db: Db,

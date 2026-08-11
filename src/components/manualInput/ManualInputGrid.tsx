@@ -31,6 +31,10 @@ import type { DepartmentPickList } from "../../shared/positions/departmentPickLi
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { buildManualColumns, isRateLockedField, ManualViewMode } from "./columns";
 import { isRateDriven, ManualGridRow } from "./rowModel";
+import CellSelectionStats, {
+  CELL_SELECTION_PERF_SX,
+} from "../common/CellSelectionStats";
+import { makeCellRangePasteSplitter } from "../common/cellRangePaste";
 
 export interface ManualInputGridProps {
   rows: ManualGridRow[];
@@ -85,6 +89,21 @@ export default function ManualInputGrid({
   onRowUpdateError,
   onSelectionChange,
 }: ManualInputGridProps) {
+  // The page passes its own handle so it can focus a freshly added row; this
+  // fallback exists because the prop is optional and the selection readout
+  // needs a handle either way. Calling the hook unconditionally is required —
+  // the unused one costs a ref.
+  const ownApiRef = useGridApiRef();
+  const gridApiRef = apiRef ?? ownApiRef;
+
+  // Only reachable now that a cell range can be selected here at all; without
+  // it, pasting one copied row into a multi-row range fills the first row and
+  // silently drops the others, which is what the positions grid already fixed.
+  const splitClipboardPastedText = useMemo(
+    () => makeCellRangePasteSplitter(gridApiRef),
+    [gridApiRef]
+  );
+
   const { columns, grouping } = useMemo(
     () =>
       buildManualColumns({
@@ -146,14 +165,18 @@ export default function ManualInputGrid({
   );
 
   return (
-    <Box sx={{ height: "100%", width: "100%" }}>
+    <Box sx={{ position: "relative", height: "100%", width: "100%" }}>
       <DataGridPremium
-        apiRef={apiRef}
+        apiRef={gridApiRef}
         rows={rows}
         columns={columns}
         columnGroupingModel={grouping}
         loading={loading}
         density="compact"
+        // Ranges, so a few months of one line can be totalled without exporting
+        // them. Editing is untouched: cell selection is a mouse/keyboard range
+        // on top of it, and the checkboxes still own row selection.
+        cellSelection
         checkboxSelection
         disableRowSelectionOnClick
         onRowSelectionModelChange={handleSelectionChange}
@@ -161,15 +184,20 @@ export default function ManualInputGrid({
         getRowClassName={getRowClassName}
         processRowUpdate={onRowUpdate}
         onProcessRowUpdateError={onRowUpdateError}
+        splitClipboardPastedText={splitClipboardPastedText}
         showToolbar
         hideFooterSelectedRowCount
         rowBufferPx={200}
         sx={{
+          // Required by cellSelection — see where it is defined.
+          ...(CELL_SELECTION_PERF_SX as object),
           "& .MuiDataGrid-columnHeaderTitle": { fontWeight: 600 },
           "& .pos-cell--derived": { color: "text.disabled" },
           "& .manual-row--locked": { color: "text.disabled" },
         }}
       />
+      {/* Cleared of the footer, which prints the row count. */}
+      <CellSelectionStats apiRef={gridApiRef} bottom={56} />
     </Box>
   );
 }

@@ -42,7 +42,10 @@ export function initializeIpc(deps: {
   ipcRegistry.use(securityMiddleware());
   ipcRegistry.use(errorHandlingMiddleware(logger));
   ipcRegistry.use(loggingMiddleware(logger));
-  ipcRegistry.use(performanceMiddleware(1000)); // 1 second slow threshold
+  // 250 ms: long enough that a recalc, a publish or a legacy import stays
+  // quiet, short enough that a load path which blocks a page for ~15 frames
+  // shows up in the log instead of being felt and never diagnosed.
+  ipcRegistry.use(performanceMiddleware(250));
 
   // Register auth handlers (backed by the main-process AuthController)
   const authHandlers = createAuthHandlers(authController);

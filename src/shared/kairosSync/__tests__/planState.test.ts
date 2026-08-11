@@ -25,6 +25,7 @@ function plan(overrides: Partial<PlanSyncStatus> = {}): PlanSyncStatus {
     readable: true,
     scopeKind: "FULL",
     departments: null,
+    scopeWidened: false,
     writeScope: "FULL",
     structureEditable: true,
     handbacksPending: 0,
@@ -93,6 +94,46 @@ describe("planState", () => {
   it("singularises a count of one", () => {
     const state = planState(plan({ pendingChanges: 1 }));
     expect(state.headline).toContain("1 change ");
+  });
+
+  describe("a scope that has widened", () => {
+    /**
+     * The state the counters cannot express. A delegate handed more departments
+     * — or made the plan's owner — is level on every measure the page has, over
+     * a copy missing most of the plan.
+     */
+    it("outranks UP_TO_DATE, which is what it looked like before", () => {
+      const state = planState(plan({ scopeWidened: true }));
+      expect(state.kind).toBe("SCOPE_WIDENED");
+      expect(state.action).toBe("pull");
+      expect(state.needsAttention).toBe(true);
+    });
+
+    it("outranks DIVERGED, and says the local work is unaffected", () => {
+      const state = planState(
+        plan({ scopeWidened: true, serverVersion: 47, watermark: 42, pendingChanges: 3 })
+      );
+      expect(state.kind).toBe("SCOPE_WIDENED");
+      // `pull` routes through the preview, which names what it would land on
+      // before applying anything — so it stays safe with work outstanding.
+      expect(state.action).toBe("pull");
+      expect(state.detail).toContain("3 changes");
+    });
+
+    it("still yields to a revocation and to a lease", () => {
+      // Both mean nothing the user could press will work, which is a more
+      // useful thing to say than "there is more to download".
+      expect(planState(plan({ scopeWidened: true, revoked: {} })).kind).toBe("REVOKED");
+      expect(planState(plan({ scopeWidened: true }), EXCLUSIVE).kind).toBe("LOCKED");
+    });
+
+    it("does not fire for a plan this computer does not hold", () => {
+      // `CLOUD_ONLY` already says "download it", and `runPull` full-pulls a
+      // plan with no local copy regardless of any watermark.
+      expect(planState(plan({ scopeWidened: true, onThisComputer: false })).kind).toBe(
+        "CLOUD_ONLY"
+      );
+    });
   });
 
   describe("blocking states win over the counters", () => {

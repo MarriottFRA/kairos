@@ -29,6 +29,7 @@ import {
 } from "../fields";
 import {
   blockAccountKey,
+  blockDepartmentKey,
   blockFieldKey,
   blockInputSlots,
   blockStatsAccountKey,
@@ -298,6 +299,30 @@ describe("block cards", () => {
       .nodes.flatMap((node) => (node.kind === "field" ? [node.key] : []));
     expect(openKeys).toContain(blockAccountKey(open.costDefId));
     expect(openKeys).toContain(blockStatsAccountKey(open.costDefId));
+  });
+
+  it("shows the per-row department cell only for a PER_ROW multiplier", () => {
+    const formKeys = (dto: BlockDto) =>
+      buildPositionForm(BUILTIN_CATALOG, [dto])
+        .at(-1)!
+        .nodes.flatMap((node) => (node.kind === "field" ? [node.key] : []));
+
+    const normal = block({ blockType: "MULTIPLIER" });
+    expect(formKeys(normal)).not.toContain(blockDepartmentKey(normal.costDefId));
+
+    const fixed = block({ blockType: "MULTIPLIER", departmentMode: "FIXED" });
+    expect(formKeys(fixed)).not.toContain(blockDepartmentKey(fixed.costDefId));
+
+    const perRow = block({ blockType: "MULTIPLIER", departmentMode: "PER_ROW" });
+    expect(formKeys(perRow)).toContain(blockDepartmentKey(perRow.costDefId));
+
+    // Double-gated on the type: PER_ROW is rejected at save time for anything
+    // but a multiplier, so a config carrying it arrived hand-edited or from a
+    // peer and must not sprout a cell.
+    const wrongType = block({ blockType: "FLAT_MONTHLY", departmentMode: "PER_ROW" });
+    expect(formKeys(wrongType)).not.toContain(
+      blockDepartmentKey(wrongType.costDefId)
+    );
   });
 
   it("keeps one card per block, in the block list's order", () => {

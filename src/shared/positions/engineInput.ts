@@ -329,21 +329,30 @@ export function injectKpiSeries(
 const STAT_SUFFIX = ":stat";
 const COST_SUFFIX = ":cost";
 
-/** A block's account-lock configuration — whether stored per-row account
- *  overrides apply (unlocked) or the block's default always wins (locked). */
-export interface BlockAccountPolicy {
+/** A block's override configuration — which stored per-row overrides apply and
+ *  which are ignored in favour of the block's own answer. */
+export interface BlockOverridePolicy {
   costDefId: string;
   accountLocked: boolean;
   statsAccountLocked: boolean;
+  /** MULTIPLIER + departmentMode PER_ROW: a stored per-row department compiles.
+   *  Anything else discards it, so switching the block back to POSITION/FIXED
+   *  makes every line book to the block's answer again while the stored value
+   *  survives in the DB and returns if the block is switched back. */
+  departmentPerRow: boolean;
 }
+
+/** @deprecated Use BlockOverridePolicy — kept so existing call sites read. */
+export type BlockAccountPolicy = BlockOverridePolicy;
 
 /**
  * Resolve block values before compile:
  *
- *   1. Account-lock policy: a stored per-row account override only survives
- *      while its block is "unlocked" — re-locking a block makes every line
- *      post to the configured default again (the stored override is kept in
- *      the DB so unlocking restores it, but it must not compile).
+ *   1. Override policy: a stored per-row account override only survives while
+ *      its block is "unlocked", and a stored per-row department only while its
+ *      block is in PER_ROW mode — re-locking a block makes every line post to
+ *      the configured default again (the stored override is kept in the DB so
+ *      unlocking restores it, but it must not compile).
  *   2. Dual-output ("Count × Rate") blocks: ONE stored row per position,
  *      under the cost definition, holding qty + unitRate. Both compiled
  *      definitions read the yearlyValue slot, so this synthesizes
@@ -358,7 +367,7 @@ export interface BlockAccountPolicy {
 export function resolveBlockValues(
   definitions: CostComponentDefinition[],
   componentValues: ComponentValue[],
-  policies?: BlockAccountPolicy[]
+  policies?: BlockOverridePolicy[]
 ): ComponentValue[] {
   const policyByDef = new Map(
     (policies ?? []).map((policy) => [policy.costDefId, policy])
@@ -380,12 +389,26 @@ export function resolveBlockValues(
       policy?.accountLocked ? undefined : value.accountCode ?? undefined;
     const statsAccount =
       policy?.statsAccountLocked ? undefined : value.statsAccountCode ?? undefined;
+    // Only an explicit policy drops the override — with no policies at all,
+    // stored values pass through untouched, matching the account rule above
+    // and this function's contract.
+    const department =
+      policy && !policy.departmentPerRow
+        ? undefined
+        : value.departmentCode ?? undefined;
 
     if (!dualCostIds.has(defId)) {
-      if (account === value.accountCode) out.push(value);
-      else out.push({ ...value, accountCode: account });
+      // Identity fast path: with nothing overridden both sides are undefined,
+      // so a plan with no overrides still clones nothing.
+      if (account === value.accountCode && department === value.departmentCode) {
+        out.push(value);
+      } else {
+        out.push({ ...value, accountCode: account, departmentCode: department });
+      }
       continue;
     }
+    // Dual (COUNT_RATE) blocks carry no department override — PER_ROW is
+    // MULTIPLIER-only, so there is deliberately no stats-line twin.
     const qty = value.qty ?? 0;
     const statDefId = defId.slice(0, -COST_SUFFIX.length) + STAT_SUFFIX;
     out.push({

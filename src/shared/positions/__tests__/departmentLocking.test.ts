@@ -32,6 +32,7 @@ import { describe, expect, it } from "vitest";
 import { BUILTIN_CATALOG } from "../fieldSeed";
 import { DEPARTMENT_CODE_KEY } from "../fields";
 import { PositionRow } from "../rowModel";
+import { staticDerivedRowValues } from "../derivedRowValues";
 import {
   EditabilityContext,
   buildColumns,
@@ -54,9 +55,7 @@ function anyEditableColumn() {
     numberFormat: new Intl.NumberFormat(),
     departments: [],
     accounts: [],
-    vacationCostById: new Map(),
-    manhoursWorkedById: new Map(),
-    fteById: new Map(),
+    derived: staticDerivedRowValues(),
     hotelClusters: [],
     currentOu: OU,
   });
@@ -186,9 +185,7 @@ describe("department write scope", () => {
       numberFormat: new Intl.NumberFormat(),
       departments: [],
       accounts: [],
-      vacationCostById: new Map(),
-      manhoursWorkedById: new Map(),
-      fteById: new Map(),
+      derived: staticDerivedRowValues(),
       hotelClusters: [],
       currentOu: OU,
     });

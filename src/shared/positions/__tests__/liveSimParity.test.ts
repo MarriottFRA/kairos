@@ -44,12 +44,13 @@ import {
 } from "../../../main/positions/structureRepo";
 import {
   batchWrite,
+  getPii,
   loadScenarioValues,
 } from "../../../main/positions/positionsRepo";
 import { loadScenarioInput } from "../../../main/positions/loadScenarioInput";
 import { applyComponentValuesToRow } from "../blockRows";
 import { buildFieldMap, toRow } from "../rowModel";
-import { runLiveSim } from "../liveSim";
+import { createLiveSimCache, runLiveSim } from "../liveSim";
 
 type Db = InstanceType<typeof Database>;
 
@@ -141,9 +142,32 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     { blockType: "MULTIPLIER", label: "Daily Levy", accountCode: "516000", accountLocked: true, base: { kind: "CALENDAR", series: "PAY_DAYS" } },
     NOW
   );
+  // Both length-of-service bases. pos-1 is a long-serving hire (a prior-years
+  // carry-in) and pos-2 was hired mid-year, so the partial-month and the
+  // carry-in legs are both live on this parity run.
+  const multServiceId = saveBlock(
+    structureDb, SCOPE,
+    { blockType: "MULTIPLIER", label: "Service Day Accrual", accountCode: "516500", accountLocked: true, base: { kind: "SERVICE", mode: "MONTH" } },
+    NOW
+  );
+  const multServiceTotalId = saveBlock(
+    structureDb, SCOPE,
+    { blockType: "MULTIPLIER", label: "Indemnity Liability", accountCode: "516600", accountLocked: true, base: { kind: "SERVICE", mode: "TOTAL" } },
+    NOW
+  );
   const multVacId = saveBlock(
     structureDb, SCOPE,
     { blockType: "MULTIPLIER", label: "Vacation Levy", accountCode: "", accountLocked: true, base: { kind: "VACATION" } },
+    NOW
+  );
+  // "Each row picks" its department: the override moves the aggregation key
+  // only, so both paths must still produce identical line VALUES.
+  const multPerRowId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Shared Services Levy", accountCode: "519000",
+      accountLocked: true, base: { kind: "BASE_SALARY" }, departmentMode: "PER_ROW",
+    },
     NOW
   );
   const countRateId = saveBlock(
@@ -231,6 +255,13 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
           },
         },
       ],
+      // Hiring dates live on position_pii, not the positions table. pos-1 is a
+      // long-serving hire (a prior-years carry-in), pos-2 was hired mid-plan-year
+      // (a partial month) — both legs of the SERVICE bases are exercised.
+      piiPatches: [
+        { positionId: "pos-1", fields: { hiringDate: "2019-06-01" } },
+        { positionId: "pos-2", fields: { hiringDate: `${YEAR}-03-15` } },
+      ],
       componentValuePatches: [
         { positionId: "pos-1", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 120 } },
         { positionId: "pos-1", componentDefId: `${multSalaryId}:cost`, fields: { rate: 0.05 } },
@@ -238,6 +269,18 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         { positionId: "pos-1", componentDefId: `${multHoursId}:cost`, fields: { rate: 0.75 } },
         { positionId: "pos-1", componentDefId: `${multDaysId}:cost`, fields: { rate: 12.25 } },
         { positionId: "pos-1", componentDefId: `${multVacId}:cost`, fields: { rate: 0.2 } },
+        { positionId: "pos-1", componentDefId: `${multServiceId}:cost`, fields: { rate: 3.75 } },
+        { positionId: "pos-1", componentDefId: `${multServiceTotalId}:cost`, fields: { rate: 0.0125 } },
+        { positionId: "pos-2", componentDefId: `${multServiceId}:cost`, fields: { rate: 2.5 } },
+        { positionId: "pos-2", componentDefId: `${multServiceTotalId}:cost`, fields: { rate: 0.004 } },
+        // Per-row department override on pos-1; pos-2 leaves it blank and falls
+        // back to its own department.
+        {
+          positionId: "pos-1",
+          componentDefId: `${multPerRowId}:cost`,
+          fields: { rate: 0.03, departmentCode: "1910" },
+        },
+        { positionId: "pos-2", componentDefId: `${multPerRowId}:cost`, fields: { rate: 0.03 } },
         // Unlocked cost account: pos-1 overrides the block default per row.
         {
           positionId: "pos-1",
@@ -279,8 +322,17 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     list.push(value);
     valuesByPosition.set(value.positionId, list);
   }
+  // The renderer holds PII (it displays names), and the SERVICE bases derive
+  // length of service from the hiring date — so the row must carry it or the
+  // live sim would silently read a blank date while the loader reads the real
+  // one. Passing it here is what makes that divergence a test failure.
+  const pii = getPii(valuesDb, SCOPE, scenarioId);
   const rows = loaded.positions.map((record) =>
-    applyComponentValuesToRow(toRow(record), valuesByPosition.get(record.id), blocks)
+    applyComponentValuesToRow(
+      toRow(record, pii[record.id]),
+      valuesByPosition.get(record.id),
+      blocks
+    )
   );
 
   const live = runLiveSim({
@@ -329,8 +381,47 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 10 blocks + 1 dual stat line, × 2 positions.
-  expect(comparedLines).toBe(22);
+  // 13 blocks + 1 dual stat line, × 2 positions.
+  expect(comparedLines).toBe(28);
+
+  // ── The structure cache must not change a single number ──
+  // Same call, twice, through a cache: the first run compiles and fills it, the
+  // second reuses the compiled structure and repacks only the values. Run on
+  // THIS fixture rather than a synthetic one because it is the one carrying
+  // every block type, a per-row account override, a dual stat line and a KPI
+  // series — the shapes most likely to be mis-cached.
+  const cache = createLiveSimCache();
+  const cachedArgs = {
+    rows,
+    blocks,
+    definitions: getComponentDefinitions(structureDb, SCOPE),
+    ssSchemes: getSsSchemes(structureDb, SCOPE),
+    calendarYear: CALENDAR,
+    kpiSeries: (driverId: string) =>
+      driverId === GRAT_DRIVER ? [{ deptKey: "*", values: GRAT_SERIES }] : [],
+    scenarioId,
+    ou: SCOPE.ou,
+    fullTime: FULL_TIME,
+    cache,
+  };
+  const firstRun = runLiveSim(cachedArgs);
+  expect(firstRun.timings?.structureReused).toBe(false);
+  const secondRun = runLiveSim(cachedArgs);
+  expect(secondRun.timings?.structureReused, "second run should reuse the structure").toBe(
+    true
+  );
+
+  for (const positionId of ["pos-1", "pos-2"]) {
+    const uncached = live.results.get(positionId)!;
+    const reused = secondRun.results.get(positionId)!;
+    expect(reused.size).toBe(uncached.size);
+    for (const defId of blockDefIds) {
+      expect(
+        Array.from(reused.get(defId)!.months),
+        `cached line ${positionId} ${defId}`
+      ).toEqual(Array.from(uncached.get(defId)!.months));
+    }
+  }
 
   // Per-row account override (unlocked Meals cost account): pos-1 posts to its
   // own account, pos-2 falls back to the block default — visible in the
@@ -473,8 +564,17 @@ it("resolves a hotel-cluster weight identically in both paths and flexes block t
     list.push(value);
     valuesByPosition.set(value.positionId, list);
   }
+  // The renderer holds PII (it displays names), and the SERVICE bases derive
+  // length of service from the hiring date — so the row must carry it or the
+  // live sim would silently read a blank date while the loader reads the real
+  // one. Passing it here is what makes that divergence a test failure.
+  const pii = getPii(valuesDb, SCOPE, scenarioId);
   const rows = loaded.positions.map((record) =>
-    applyComponentValuesToRow(toRow(record), valuesByPosition.get(record.id), blocks)
+    applyComponentValuesToRow(
+      toRow(record, pii[record.id]),
+      valuesByPosition.get(record.id),
+      blocks
+    )
   );
 
   const live = runLiveSim({

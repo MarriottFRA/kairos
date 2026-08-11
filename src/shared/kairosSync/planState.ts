@@ -50,6 +50,12 @@ export type PlanStateKind =
   | "SERVER_AHEAD"
   /** Both. Neither side is simply right, so the user has to look. */
   | "DIVERGED"
+  /**
+   * We may now read more of this plan than we hold, and the counters cannot say
+   * so. Above `DIVERGED` because it is the more informative fact and the remedy
+   * is the same download either way.
+   */
+  | "SCOPE_WIDENED"
   /** This user cannot write this plan at all. */
   | "READ_ONLY"
   /** An administrator holds an exclusive lease; nobody else can save. */
@@ -247,6 +253,37 @@ export function planState(plan: PlanSyncStatus, lease?: Lease | null): PlanState
       action: behind > 0 ? "pull" : null,
       tone: "neutral",
       needsAttention: false,
+    };
+  }
+
+  /**
+   * More of the plan is readable than is here — and every counter says level.
+   *
+   * Above the three below on purpose, because it is the one state they cannot
+   * express. A delegate handed a second department, or made the plan's owner,
+   * has `serverVersion == watermark` over a copy missing most of the plan:
+   * `behind` is 0, so without this the card reads "Everything is published" and
+   * offers nothing. The download that fixes it is a full pull, which `runPull`
+   * arranges off the same predicate.
+   *
+   * `pull`, not `review`, even with local work outstanding — the action routes
+   * through the preview, which fetches the delta and names exactly what it
+   * would land on before anything is applied.
+   */
+  if (plan.scopeWidened) {
+    return {
+      kind: "SCOPE_WIDENED",
+      headline: "You can now see more of this plan than you have downloaded",
+      detail:
+        (ahead > 0
+          ? `Your ${count(ahead, "change")} here are not affected. `
+          : "") +
+        "Departments that were not shared with you before are on the server " +
+        "and not on this computer. Downloading brings the rest of the plan " +
+        "down; you will be shown what it would land on first.",
+      action: "pull",
+      tone: "attention",
+      needsAttention: true,
     };
   }
 

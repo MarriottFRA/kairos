@@ -38,6 +38,7 @@ import { AccountOption, DepartmentOption } from "../../shared/mappingTables/type
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import { PositionRow } from "../../shared/positions/rowModel";
 import AccountAutocomplete from "../common/AccountAutocomplete";
+import DepartmentAutocomplete from "../common/DepartmentAutocomplete";
 import {
   commitValue,
   dayToDate,
@@ -200,6 +201,28 @@ export default function PositionFormField({
           onChange={(code) => commit(code)}
           size="small"
           openOnFocus
+          sx={{ width: "100%", "& .MuiInputBase-root": { fontSize: "0.8125rem" } }}
+        />
+      </FieldRow>
+    );
+  }
+
+  // ── Block department cells ──────────────────────────────────────────
+  // A block's per-row department override has no catalog def and stores the
+  // CODE, so it must be handled BEFORE the name-based department branch below —
+  // that one would write a department name into a code cell. Unrestricted by
+  // write scope, matching the grid's BlockDepartmentEditCell.
+  const isBlockDepartmentCell = !def && /:department$/.test(column.field);
+  if (isBlockDepartmentCell && departments.length > 0) {
+    return (
+      <FieldRow {...rowProps}>
+        <DepartmentAutocomplete
+          options={departments}
+          value={typeof value === "string" ? value : ""}
+          onChange={(code) => commit(code)}
+          size="small"
+          openOnFocus
+          placeholder="Row's own department"
           sx={{ width: "100%", "& .MuiInputBase-root": { fontSize: "0.8125rem" } }}
         />
       </FieldRow>

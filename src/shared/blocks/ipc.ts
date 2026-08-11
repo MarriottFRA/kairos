@@ -61,6 +61,23 @@ export type BlockSpread =
   | "WEIGHTED_FTE"; // proportional to the FTE curve
 
 /**
+ * Where a block's cost line books.
+ *
+ * POSITION is the normal answer and what almost every block wants. The other
+ * two exist for the rare case where a cost belongs somewhere other than the
+ * person who generates it — a shared service billed to one department, say.
+ *
+ * PER_ROW is MULTIPLIER-only (validated in the blocks repo) and is the exact
+ * analogue of an unlocked account: the grid grows a dropdown column for the
+ * block, and a blank cell falls back to the row's own department. Because the
+ * fallback IS `POSITION`, the compiled definition stores PER_ROW as POSITION —
+ * the definition only ever has to answer "what does a blank resolve to?", so
+ * `cost_component_definitions.department_mode` keeps its two-value CHECK and
+ * needs no table rebuild. The per-row value itself lives on component_values.
+ */
+export type BlockDepartmentMode = "POSITION" | "FIXED" | "PER_ROW";
+
+/**
  * What a MULTIPLIER block multiplies against. BASE_SALARY / BLOCK / COMPOSITE
  * compile to the engine's existing BaseSelector; KPI compiles to the
  * kpi_driver_id path (series × per-row multiplier, resolved at engine load).
@@ -81,6 +98,16 @@ export type BlockBaseRef =
   | { kind: "KPI"; kpiDriverId: string }
   | { kind: "STAT"; stat: "HOURS" | "HOURS_PAID" | "HEADCOUNT" | "FTE" }
   | { kind: "CALENDAR"; series: "PAY_DAYS" | "REAL_DAYS" | "HOLIDAY_DAYS" }
+  /**
+   * Length of service in pure calendar days from the position's hiring date —
+   * what end-of-service / indemnity accruals are written against. MONTH is the
+   * days falling in that month, TOTAL the running service to date with prior
+   * years included. A row with no hiring date contributes zero.
+   *
+   * Shares the engine's own SERVICE selector shape verbatim so it rides the
+   * base_ref JSON column unchanged, exactly like CALENDAR/VACATION.
+   */
+  | { kind: "SERVICE"; mode: "MONTH" | "TOTAL" }
   | { kind: "VACATION" }
   /**
    * The compound block: two bases and an operation between them, so the
@@ -236,8 +263,10 @@ export interface BlockInput {
   spread?: BlockSpread;
   /** Apply the merit increase from the position's increase month onward. */
   increaseAware?: boolean;
-  /** Book to each position's own department, or always to a fixed one. */
-  departmentMode?: "POSITION" | "FIXED";
+  /** Where the cost line books. See BlockDto for the semantics; PER_ROW is
+   *  MULTIPLIER-only and rejected for every other type by the repo. */
+  departmentMode?: BlockDepartmentMode;
+  /** FIXED only: the department code every row books to. */
   fixedDepartment?: string;
   /** SOCIAL_SECURITY only: the scheme (brackets + caps + contributory base) this
    *  block runs. Unset = unconfigured → compiles to no def (harmless), grid
@@ -273,7 +302,8 @@ export interface BlockDto {
   ratioNoHeadcount?: boolean;
   spread: BlockSpread;
   increaseAware: boolean;
-  departmentMode: "POSITION" | "FIXED";
+  departmentMode: BlockDepartmentMode;
+  /** FIXED only: the department code every row books to. */
   fixedDepartment?: string;
   /** SOCIAL_SECURITY only: attached scheme id ("" = unconfigured). */
   ssSchemeId?: string;

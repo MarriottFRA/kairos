@@ -103,6 +103,30 @@ export function blockAccountRowKeys(block: BlockDto): string[] {
   return keys;
 }
 
+/** Per-row department cell — present only while the block is in PER_ROW mode. */
+export function blockDepartmentKey(defId: string): string {
+  return `${BLOCK_KEY_PREFIX}${defId}:department`;
+}
+
+/**
+ * The department row keys a block currently exposes.
+ *
+ * Double-gated on the block type as well as the mode: PER_ROW is rejected for
+ * non-MULTIPLIER blocks at save time, so a config carrying it on another type
+ * can only have arrived hand-edited or from a peer, and must not sprout a
+ * column here.
+ */
+export function blockDepartmentRowKeys(block: BlockDto): string[] {
+  return block.blockType === "MULTIPLIER" && block.departmentMode === "PER_ROW"
+    ? [blockDepartmentKey(block.costDefId)]
+    : [];
+}
+
+/** Every non-numeric per-row override cell a block exposes (account + dept). */
+export function blockOverrideRowKeys(block: BlockDto): string[] {
+  return [...blockAccountRowKeys(block), ...blockDepartmentRowKeys(block)];
+}
+
 /**
  * The block's read-only full-year Total. NOT a stored row key — the grid and
  * the position form both resolve it from the live simulation's BlockResultsById
@@ -155,6 +179,9 @@ export function applyComponentValuesToRow(
     if (block.blockType === "COUNT_RATE" && !block.statsAccountLocked) {
       row[blockStatsAccountKey(block.costDefId)] = value.statsAccountCode ?? null;
     }
+    if (block.blockType === "MULTIPLIER" && block.departmentMode === "PER_ROW") {
+      row[blockDepartmentKey(block.costDefId)] = value.departmentCode ?? null;
+    }
   }
   return row;
 }
@@ -163,7 +190,7 @@ export function applyComponentValuesToRow(
 // Row -> storage patch
 // ---------------------------------------------------------------------------
 
-/** Diff two rows over the blocks' input + account keys. */
+/** Diff two rows over the blocks' input + account + department keys. */
 export function changedBlockKeys(
   oldRow: PositionRow,
   newRow: PositionRow,
@@ -171,7 +198,7 @@ export function changedBlockKeys(
 ): string[] {
   const changed: string[] = [];
   for (const block of blocks) {
-    for (const key of [...blockRowKeys(block), ...blockAccountRowKeys(block)]) {
+    for (const key of [...blockRowKeys(block), ...blockOverrideRowKeys(block)]) {
       if (!Object.is(oldRow[key], newRow[key])) changed.push(key);
     }
   }
@@ -179,8 +206,8 @@ export function changedBlockKeys(
 }
 
 /** Coercion for block inputs — pasted text becomes numbers, junk reverts to
- *  the previous value, empty clears to null. Account cells are strings; empty
- *  normalizes to null ("use the block's default account"). */
+ *  the previous value, empty clears to null. Account and department cells are
+ *  strings; empty normalizes to null ("use the block's own default"). */
 export function sanitizeBlockInputs(
   row: PositionRow,
   oldRow: PositionRow,
@@ -221,7 +248,7 @@ export function sanitizeBlockInputs(
       const num = typeof value === "number" ? value : Number(String(value).trim());
       out[key] = Number.isFinite(num) ? num : oldRow[key] ?? null;
     }
-    for (const key of blockAccountRowKeys(block)) {
+    for (const key of blockOverrideRowKeys(block)) {
       const value = out[key];
       if (value === undefined || value === null) continue;
       const text = String(value).trim();
@@ -265,6 +292,7 @@ export function blockPatchesFromRow(
     else if (slot === POOL_WEIGHT_SLOT) fields.rate = numberOrNull(row[key]);
     else if (slot === "account") fields.accountCode = stringOrNull(row[key]);
     else if (slot === "statsAccount") fields.statsAccountCode = stringOrNull(row[key]);
+    else if (slot === "department") fields.departmentCode = stringOrNull(row[key]);
     else if (/^m\d{1,2}$/.test(slot)) touchedMonthsByDef.add(defId);
     else continue;
     byDef.set(defId, fields);
@@ -307,6 +335,7 @@ export function rowToComponentValues(
       ssOpeningBase: null,
       accountCode: null,
       statsAccountCode: null,
+      departmentCode: null,
       updatedAt: "",
     };
     let hasValue = false;
@@ -338,6 +367,13 @@ export function rowToComponentValues(
       const statsAccount = stringOrNull(row[blockStatsAccountKey(block.costDefId)]);
       if (statsAccount !== null) {
         record.statsAccountCode = statsAccount;
+        hasValue = true;
+      }
+    }
+    if (block.blockType === "MULTIPLIER" && block.departmentMode === "PER_ROW") {
+      const department = stringOrNull(row[blockDepartmentKey(block.costDefId)]);
+      if (department !== null) {
+        record.departmentCode = department;
         hasValue = true;
       }
     }

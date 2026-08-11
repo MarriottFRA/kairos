@@ -40,6 +40,7 @@ import {
   SALARY_ENTRY_MODE_KEY,
 } from "../fields";
 import { PositionRow } from "../rowModel";
+import { staticDerivedRowValues } from "../derivedRowValues";
 import { HotelClusterDto } from "../../hotelClusters/ipc";
 
 const SINGLE: HotelClusterDto = {
@@ -67,9 +68,7 @@ function ctx(overrides: Partial<ColumnFactoryContext> = {}): ColumnFactoryContex
     numberFormat: new Intl.NumberFormat("en-GB"),
     departments: [],
     accounts: [],
-    vacationCostById: new Map(),
-    manhoursWorkedById: new Map(),
-    fteById: new Map(),
+    derived: staticDerivedRowValues(),
     hotelClusters: [SINGLE, SHARED],
     currentOu: "H001",
     ...overrides,
@@ -163,7 +162,9 @@ describe("date fields", () => {
 });
 
 describe("manhours worked — auto unless overridden", () => {
-  const context = ctx({ manhoursWorkedById: new Map([["p1", 1800]]) });
+  const context = ctx({
+    derived: staticDerivedRowValues({ manhoursWorkedById: new Map([["p1", 1800]]) }),
+  });
   const manhours = col("yearlyHoursWorked", context);
   const row: PositionRow = { id: "p1", yearlyHoursWorked: null };
 

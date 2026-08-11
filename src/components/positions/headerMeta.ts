@@ -39,7 +39,11 @@ const OVERRIDES: Readonly<
       "but excludes it from the budget entirely.",
   },
   empNumber: { unit: "id", hint: "Payroll employee number." },
-  hiringDate: { hint: "Start date. Drives pro-rating in the first budget year." },
+  hiringDate: {
+    hint:
+      "Start date. Drives the Service Days block bases (length of service in " +
+      "calendar days). Left blank, a row counts as zero service.",
+  },
   departmentCode: { unit: "code", hint: "Department the position is budgeted under." },
   deptName: { short: "Dept Name", unit: "text" },
   jobTypeCode: {

@@ -19,7 +19,7 @@
 
 import { BlockDto } from "../blocks/ipc";
 import {
-  blockAccountRowKeys,
+  blockOverrideRowKeys,
   blockFieldKey,
   blockInputSlots,
   blockTotalKey,
@@ -194,8 +194,9 @@ function blockCard(block: BlockDto): FormCard {
       keys: months.map((slot) => blockFieldKey(block.costDefId, slot)),
     });
   }
-  // Per-row account cells exist only while the block is unlocked.
-  for (const key of blockAccountRowKeys(block)) {
+  // Per-row account cells exist only while the block is unlocked, and the
+  // department cell only while it is in PER_ROW mode.
+  for (const key of blockOverrideRowKeys(block)) {
     nodes.push({ kind: "field", key });
   }
 

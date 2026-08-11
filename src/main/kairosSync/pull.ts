@@ -32,7 +32,13 @@ import { UNCLASSIFIED_DEPARTMENT } from "../../shared/kairosSync/ipc";
 import { FALLBACK_APPLY_ORDER } from "../../shared/kairosSync/entityMap";
 import { ApplyDeps, applyEntities } from "./apply";
 import { contentHash } from "./hash";
-import { clearShadow, completePull, updateSyncState, writeShadow } from "./repo";
+import {
+  clearShadow,
+  completePull,
+  ensureSyncState,
+  updateSyncState,
+  writeShadow,
+} from "./repo";
 
 type Db = InstanceType<typeof Database>;
 
@@ -238,6 +244,21 @@ async function runPull(
   }
 
   if (apply) {
+    // The row has to exist before the watermark can land on it.
+    //
+    // `completePull` and `updateSyncState` are both bare UPDATEs — deliberately,
+    // so a partial patch cannot conjure a state row for a plan we have never
+    // been told about. The only INSERT is here and in `heads.ts`, and the heads
+    // one is skipped for a plan the caller cannot read AND skipped wholesale on
+    // a 304. Between those two gaps a pull could apply every page and then
+    // record NOTHING: no watermark, no `last_pulled_at`, no scope. The download
+    // reported success, the card never moved, and the next attempt re-downloaded
+    // the entire plan — for ever, with nothing on screen to say why.
+    //
+    // Idempotent (`ON CONFLICT DO UPDATE SET ou = excluded.ou`), so this is free
+    // on the path where heads already made the row, which is nearly all of them.
+    ensureSyncState(db, planId, options.ou);
+
     // THE watermark write. Once, here, after the last page — see the module
     // docstring. Nothing else in this feature advances it.
     completePull(db, planId, last.toVersion, last.syncEpoch, new Date().toISOString());

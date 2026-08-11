@@ -24,6 +24,7 @@ import {
   BLOCK_TYPES,
   BlockBaseRef,
   BLOCK_COMBINE_OPS,
+  BlockDepartmentMode,
   BlockDto,
   BlockInput,
   BlockSpread,
@@ -64,7 +65,7 @@ interface StoredConfig {
   ratioNoHeadcount?: boolean;
   spread: BlockSpread;
   increaseAware: boolean;
-  departmentMode: "POSITION" | "FIXED";
+  departmentMode: BlockDepartmentMode;
   fixedDepartment?: string;
   /** SOCIAL_SECURITY only: attached scheme id (undefined = unconfigured). The
    *  scheme owns its own contributory-base membership now. */
@@ -381,6 +382,14 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
   if (input.departmentMode === "FIXED" && !String(input.fixedDepartment ?? "").trim()) {
     throw new Error("Choose the department the block should book to.");
   }
+  // PER_ROW gives the grid a department column keyed by the block's cost def,
+  // which only a MULTIPLIER has as its single output. FIXED stays legal for
+  // every type — it is already reachable from the importers and from sync.
+  if (input.departmentMode === "PER_ROW" && input.blockType !== "MULTIPLIER") {
+    throw new Error(
+      "Only a Multiplier block can let each row choose its own department."
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +440,8 @@ function toEngineSelector(base: BlockBaseRef, ou: string): BaseSelector {
       };
     case "CALENDAR":
       return { kind: "CALENDAR", series: base.series };
+    case "SERVICE":
+      return { kind: "SERVICE", mode: base.mode };
     case "VACATION":
       return { kind: "VACATION" };
     case "COMBINE":
@@ -466,7 +477,7 @@ function collectBlockBaseRefIds(base: BlockBaseRef, ou: string): string[] {
         walk(node.right);
         break;
       default:
-        break; // BASE_SALARY / CALENDAR / VACATION reference no line by id
+        break; // BASE_SALARY / CALENDAR / SERVICE / VACATION reference no line by id
     }
   };
   walk(base);
@@ -596,7 +607,7 @@ export function compileBlockDefs(
         def.baseRefDefIds = collectBlockBaseRefIds(base, ou);
         def.countExempt = input.ratioNoHeadcount ?? base.op === "DIV";
       } else {
-        // CALENDAR / VACATION — engine base kinds beyond the legacy CHECK,
+        // CALENDAR / SERVICE / VACATION — engine base kinds beyond the legacy CHECK,
         // carried as base_ref JSON (read preference in getComponentDefinitions).
         def.baseRefJson = JSON.stringify(base);
       }
@@ -732,7 +743,12 @@ export function saveBlock(
     spread: input.spread ?? "ACTIVE_MONTHS",
     increaseAware: input.increaseAware ?? false,
     departmentMode: input.departmentMode ?? "POSITION",
-    fixedDepartment: input.fixedDepartment,
+    // Dropped unless FIXED, so a stale code can never ride along on a block
+    // that has since been switched to POSITION or PER_ROW.
+    fixedDepartment:
+      input.departmentMode === "FIXED"
+        ? input.fixedDepartment?.trim() || undefined
+        : undefined,
     ssSchemeId: input.ssSchemeId?.trim() ? input.ssSchemeId.trim() : undefined,
     ...(input.blockType === "POOL_SPREAD"
       ? {
@@ -816,7 +832,12 @@ export function saveBlock(
         def.spreadMethod,
         def.label,
         def.accountCode,
-        config.departmentMode,
+        // PER_ROW projects as POSITION: the definition only ever has to answer
+        // "what does a blank per-row cell fall back to?", and that answer is
+        // the position's department. Keeping the compiled column to the two
+        // values its CHECK allows avoids a table rebuild (SQLite cannot ALTER
+        // a CHECK) and keeps older sync peers able to insert the row.
+        config.departmentMode === "FIXED" ? "FIXED" : "POSITION",
         config.departmentMode === "FIXED" ? config.fixedDepartment ?? null : null,
         def.increaseAware ? 1 : 0,
         sortOrder,

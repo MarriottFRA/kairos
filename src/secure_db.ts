@@ -5,6 +5,7 @@ import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
   ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
+  applyComponentValueDepartment,
   applyOutputLineProvenance,
   applyValueStoreV12,
 } from "./main/positions/schema";
@@ -67,7 +68,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -249,6 +250,9 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
     applyOutputLineProvenance(handle);
     applyManualInputScenarioScope(handle);
   },
+  // Per-row department overrides: a MULTIPLIER block can let each row choose
+  // where its cost line books. component_values.department_code.
+  4: applyComponentValueDepartment,
 };
 
 function createSchema(handle: SecureDb): void {

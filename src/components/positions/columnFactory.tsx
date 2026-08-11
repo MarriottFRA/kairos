@@ -52,6 +52,7 @@ import {
   VectorName,
 } from "../../shared/positions/fields";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
+import type { DerivedRowValuesRef } from "../../shared/positions/derivedRowValues";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
 import {
   clusterMapById,
@@ -105,17 +106,18 @@ export interface ColumnFactoryContext {
    *  Empty when the mapping tables have not been synced — those fields then stay
    *  free text. */
   accounts: AccountOption[];
-  /** Simulated vacation cost per row id, from the engine (reference.ts). Feeds
-   *  the read-only Vacation Cost column; empty while the calendar is loading. */
-  vacationCostById: ReadonlyMap<string, number>;
-  /** Calendar-derived Manhours Worked per row id (net productive days −
-   *  vacation × daily hours). Shown when the cell carries no manual override;
-   *  empty while the calendar is loading. */
-  manhoursWorkedById: ReadonlyMap<string, number>;
-  /** Derived FTE per row id — the row's contract measured against the hotel-year
-   *  full-time reference (see engineInput.deriveFte). Empty until the hotel's
-   *  position defaults load, which leaves the read-only FTE column blank. */
-  fteById: ReadonlyMap<string, number>;
+  /**
+   * The per-row values that are DISPLAYED but not stored — vacation cost,
+   * derived manhours, derived FTE, live block totals.
+   *
+   * A ref, not the maps themselves, and deliberately so: these change on every
+   * committed edit, and as plain props they were column-memo dependencies, so
+   * one edit rebuilt every column. Read `ctx.derived.current.x` inside a
+   * callback, which runs when the cell renders; never at column-build time,
+   * which would capture a snapshot and freeze it. See
+   * shared/positions/derivedRowValues for the refresh invariant.
+   */
+  derived: DerivedRowValuesRef;
   /** Hotel-cluster definitions for the Cluster picker + Multiplier column.
    *  Empty until loaded — the Cluster field then degrades to read-only text,
    *  like an unsynced departments picker. */
@@ -128,6 +130,16 @@ export interface ColumnFactoryContext {
    *  which is worse to read but never wrong. */
   hotelNames?: ReadonlyMap<string, string>;
 }
+
+// Formatters for the derived read-only columns. Module scope, NOT ctx.numberFormat:
+// that one carries the grid's default 3 fraction digits, and these two want 2 and
+// 0. Hoisted because `toLocaleString(undefined, {...})` constructs a fresh
+// Intl.NumberFormat on every call, and a valueFormatter runs per visible cell per
+// render — the same reason blockColumns keeps WEIGHT_FORMAT at module scope.
+/** Vacation Cost, FTE and the other derived numbers. */
+const DERIVED_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+/** Manhours Worked — whole hours; a fractional hour is noise at this scale. */
+const HOURS_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 
 const MONTH_SELECT_OPTIONS = [
   ...Array.from({ length: 12 }, (_, index) => ({
@@ -1029,15 +1041,17 @@ function buildColumn(
     (isEngineCost || isFte || COMPUTES[def.computeKey])
   ) {
     const compute = COMPUTES[def.computeKey];
-    const derivedMap = isEngineCost
-      ? ctx.vacationCostById
+    // Which map, resolved now; WHICH VALUES, resolved per call — the ref is
+    // dereferenced inside the getter so a re-simulated total lands without the
+    // column being rebuilt.
+    const readDerived = isEngineCost
+      ? (row: PositionRow) => ctx.derived.current.vacationCostById.get(row.id)
       : isFte
-        ? ctx.fteById
+        ? (row: PositionRow) => ctx.derived.current.fteById.get(row.id)
         : null;
     column.editable = false;
-    column.valueGetter = derivedMap
-      ? (_value: unknown, row: PositionRow) =>
-          row ? derivedMap.get(row.id) ?? 0 : 0
+    column.valueGetter = readDerived
+      ? (_value: unknown, row: PositionRow) => (row ? readDerived(row) ?? 0 : 0)
       : (_value: unknown, row: PositionRow) => (row ? compute(row) : 0);
     column.cellClassName = "pos-cell--num pos-cell--derived";
     // A PERCENT-typed derived column keeps the % formatter the switch above
@@ -1046,9 +1060,7 @@ function buildColumn(
     if (def.dataType !== "PERCENT") {
       column.valueFormatter = (value: number | null | undefined) => {
         const num = Number(value);
-        return Number.isFinite(num)
-          ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : "";
+        return Number.isFinite(num) ? DERIVED_FORMAT.format(num) : "";
       };
     }
 
@@ -1084,7 +1096,7 @@ function buildColumn(
   if (def.key === "yearlyHoursWorked") {
     const derivedOf = (row: PositionRow | undefined): number | null => {
       if (!row) return null;
-      const value = ctx.manhoursWorkedById.get(row.id);
+      const value = ctx.derived.current.manhoursWorkedById.get(row.id);
       return typeof value === "number" ? value : null;
     };
     const storedOverride = (row: PositionRow | undefined): number | null => {
@@ -1109,7 +1121,7 @@ function buildColumn(
     column.valueFormatter = (value: number | null | undefined) => {
       const num = Number(value);
       return value !== null && value !== undefined && Number.isFinite(num)
-        ? num.toLocaleString(undefined, { maximumFractionDigits: 0 })
+        ? HOURS_FORMAT.format(num)
         : "";
     };
     column.cellClassName = (params) =>

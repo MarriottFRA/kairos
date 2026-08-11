@@ -16,7 +16,8 @@
     "test:watch": "vitest",
     "db:browse": "node ./scripts/secure-db-browse.js",
     "icons": "node ./scripts/generate-brand-icons.mjs",
-    "bench": "vitest bench --run"
+    "bench": "vitest bench --run",
+    "bench:prod": "node ./scripts/bench-prod.js"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",

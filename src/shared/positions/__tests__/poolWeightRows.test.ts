@@ -55,6 +55,7 @@ function stored(rate: number | null): ComponentValueRecord[] {
       ssOpeningBase: null,
       accountCode: null,
       statsAccountCode: null,
+      departmentCode: null,
       updatedAt: "",
     },
   ];

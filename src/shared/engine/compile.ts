@@ -33,6 +33,8 @@ import {
   PositionId,
   ScenarioId,
   ScenarioInput,
+  SERVICE_MODE_ARG,
+  serviceSeries,
   SocialSecurityScheme,
   SS_MAX_BRACKETS,
   StatKey,
@@ -49,6 +51,11 @@ export interface CompiledPlan {
   /** Emission (topological) order. Every def emits exactly one line per
    *  position: line = p × componentDefs.length + defIndex. */
   componentDefs: CostComponentDefinition[];
+  /** Per definition: 1 when the count × cluster-weight pass scales its line, 0
+   *  when it is exempt (the HEADCOUNT stat, DIRECT_ABS lines, ratios). The
+   *  compiled form of the predicates at the end of reference.referencePosition
+   *  — resolved here so the VM never touches a CostComponentDefinition. */
+  countScaled: Uint8Array;
 
   // ---- line matrix layout ----
   lineCount: number;
@@ -125,10 +132,10 @@ export function collectBaseRefIds(
  * True when the selector needs a topo edge to the BASE_SALARY def.
  *
  * Everything except a pure COMPONENTS list gets one: BASE_SALARY and VACATION
- * read its scratch directly, SS_BASE reads its net line, and CALENDAR is given
- * one conservatively (it needs no series, but BASE_SALARY is a source node so
- * the edge only pins ordering — kept to preserve the pre-COMBINE emission
- * order). A COMBINE inherits the need from either side.
+ * read its scratch directly, SS_BASE reads its net line, and CALENDAR/SERVICE
+ * are given one conservatively (they need no series, but BASE_SALARY is a
+ * source node so the edge only pins ordering — kept to preserve the pre-COMBINE
+ * emission order). A COMBINE inherits the need from either side.
  */
 function selectorNeedsBaseSalary(selector: BaseSelector | undefined): boolean {
   if (!selector) return true; // default base = base salary
@@ -249,21 +256,23 @@ function validate(
     }
   }
 
-  for (const position of positions) {
-    const vectors: Array<[string, number[]]> = [
-      ["seasonality", position.seasonality],
-      ["additionalMonthlyCosts", position.additionalMonthlyCosts],
-      ["vacationMonthlyWeights", position.vacationMonthlyWeights],
-    ];
-    for (const [name, vector] of vectors) {
-      if (!Array.isArray(vector) || vector.length !== MONTHS) {
-        errors.push({
-          code: "INVALID_POSITION",
-          message: `Position ${position.id}: ${name} must have ${MONTHS} entries.`,
-          refs: [position.id],
-        });
-      }
+  // Three named checks rather than a [name, vector] tuple array: that array,
+  // plus its three inner tuples, was four allocations per position — 20k at 5k
+  // positions, to validate something that is almost always fine.
+  const checkVector = (position: Position, name: string, vector: number[]): void => {
+    if (!Array.isArray(vector) || vector.length !== MONTHS) {
+      errors.push({
+        code: "INVALID_POSITION",
+        message: `Position ${position.id}: ${name} must have ${MONTHS} entries.`,
+        refs: [position.id],
+      });
     }
+  };
+
+  for (const position of positions) {
+    checkVector(position, "seasonality", position.seasonality);
+    checkVector(position, "additionalMonthlyCosts", position.additionalMonthlyCosts);
+    checkVector(position, "vacationMonthlyWeights", position.vacationMonthlyWeights);
     // The loaders' resolver guarantees a sane weight; reject junk here so a
     // loader bug fails loudly instead of silently zeroing (≤ 0) or inflating
     // (> 1) every line.
@@ -387,20 +396,90 @@ function topoSort(
 
 // ---------------------------------------------------------------------------
 
-/** Growable instruction/param buffers used during emission. */
+/**
+ * Instruction/param buffers used during emission.
+ *
+ * Plain `number[]` rather than typed arrays because the final sizes are not
+ * known until the last instruction is emitted — but they ARE known after the
+ * first pack of a given structure, and a plan is re-packed on every edit. So
+ * the caller passes the previous run's sizes as capacity hints and the arrays
+ * are allocated once at the right length instead of doubling their way there
+ * (~2.7M pushes at 5k positions, each a bounds check plus an occasional realloc
+ * and copy of the whole buffer).
+ *
+ * The hints are advisory in both directions: too small and it appends as
+ * before, too large and the tail is trimmed. Getting one wrong costs
+ * performance, never correctness.
+ */
 class Emitter {
-  op: number[] = [];
-  outLine: number[] = [];
-  arg0: number[] = [];
-  paramOfs: number[] = [];
-  paramPool: number[] = [];
+  op: number[];
+  outLine: number[];
+  arg0: number[];
+  paramOfs: number[];
+  paramPool: number[];
+  /** Write cursors — `length` on a pre-sized array is the capacity, not the
+   *  number of instructions emitted, so the counts are tracked explicitly. */
+  private n = 0;
+  private p = 0;
+
+  constructor(instructionHint = 0, paramHint = 0) {
+    this.op = new Array<number>(instructionHint);
+    this.outLine = new Array<number>(instructionHint);
+    this.arg0 = new Array<number>(instructionHint);
+    this.paramOfs = new Array<number>(instructionHint);
+    this.paramPool = new Array<number>(paramHint);
+  }
+
+  /** Instructions emitted so far — what positionInstrStart records. */
+  get length(): number {
+    return this.n;
+  }
+
+  /** Cuts the buffers back to what was actually emitted, so an over-generous
+   *  hint cannot leave `undefined` holes for TypedArray.from to read as NaN. */
+  finish(): void {
+    this.op.length = this.n;
+    this.outLine.length = this.n;
+    this.arg0.length = this.n;
+    this.paramOfs.length = this.n;
+    this.paramPool.length = this.p;
+  }
 
   emit(op: number, outLine: number, arg0: number, params: number[]): void {
-    this.op.push(op);
-    this.outLine.push(outLine);
-    this.arg0.push(arg0);
-    this.paramOfs.push(this.paramPool.length);
-    for (const param of params) this.paramPool.push(param);
+    const i = this.n++;
+    this.op[i] = op;
+    this.outLine[i] = outLine;
+    this.arg0[i] = arg0;
+    this.paramOfs[i] = this.p;
+    for (const param of params) this.paramPool[this.p++] = param;
+  }
+
+  /**
+   * Emits an instruction and reserves `count` param slots, returning the offset
+   * to write them at — so a twelve-month vector goes straight into the pool
+   * instead of through a throwaway array.
+   *
+   * `emit` stays for the small fixed-arity ops, where a `[rate]` literal reads
+   * better than an offset and a pair of indexed writes. Used only where the
+   * array was ≥ 12 long, or was being built with a spread or a `.fill()` — at
+   * those sites this deletes the temporary AND reads more directly.
+   *
+   * The layout contract is unchanged: paramOfs[i] is instruction i's first
+   * param, and paramOfs[i+1] − paramOfs[i] is its arity. Reserving before
+   * writing preserves both, which is what emission.test asserts by slicing
+   * paramPool between consecutive offsets.
+   */
+  emitInto(op: number, outLine: number, arg0: number, count: number): number {
+    const i = this.n++;
+    this.op[i] = op;
+    this.outLine[i] = outLine;
+    this.arg0[i] = arg0;
+    const offset = this.p;
+    this.paramOfs[i] = offset;
+    // Zero-filled, not left holey: several callers write only the slots they
+    // need (VACATION_WEIGHTED's "no spread" case) and rely on the rest reading 0.
+    for (let k = 0; k < count; k++) this.paramPool[this.p++] = 0;
+    return offset;
   }
 }
 
@@ -420,11 +499,122 @@ class KeyInterner<K> {
   }
 }
 
-export function compile(input: ScenarioInput): CompileResult {
-  const definitions = input.definitions.filter((def) => def.deletedAt === null);
-  const positions = [...input.positions.filter((p) => p.deletedAt === null)].sort((a, b) =>
+/** Interns strings to small integer ids. One per dimension (departments,
+ *  accounts), so the pair interner below can key on two numbers. */
+class StringInterner {
+  private ids = new Map<string, number>();
+
+  idOf(value: string): number {
+    let id = this.ids.get(value);
+    if (id === undefined) {
+      id = this.ids.size;
+      this.ids.set(value, id);
+    }
+    return id;
+  }
+}
+
+/**
+ * Interns (dept, account) PAIRS to dense aggregate-row indices.
+ *
+ * Same contract as KeyInterner — `keys` stays insertion-ordered, and that order
+ * is the row index every `lineAggRow` entry points at — but keyed on two
+ * pre-interned integers instead of a `${dept}|${account}` template string. That
+ * string, plus the `{dept, account}` object literal that had to be built even
+ * when the interner HIT, was one allocation pair per line: 140k of each per
+ * compile at 5k positions.
+ *
+ * Nested maps rather than a `deptId * K + acctId` composite deliberately. The
+ * composite measured 0.07 ms faster over 140k lookups and needs a stride
+ * constant that, if account cardinality ever exceeded it, would silently
+ * collide — booking two different dept×account pairs onto one row. That is
+ * money in the wrong account to save nothing.
+ */
+class AggRowInterner {
+  keys: AggregateKey[] = [];
+  private byDept = new Map<number, Map<number, number>>();
+
+  intern(deptId: number, acctId: number, dept: string, account: string): number {
+    let byAcct = this.byDept.get(deptId);
+    if (byAcct === undefined) {
+      byAcct = new Map();
+      this.byDept.set(deptId, byAcct);
+    }
+    let row = byAcct.get(acctId);
+    if (row === undefined) {
+      row = this.keys.length;
+      byAcct.set(acctId, row);
+      this.keys.push({ dept, account }); // allocated on a MISS only
+    }
+    return row;
+  }
+}
+
+/**
+ * The half of a compiled plan that does NOT depend on any edited number.
+ *
+ * Validation, the topological order, the interned dept×account and cluster×job
+ * dimensions, and which aggregate row each line books to — none of it moves
+ * when a user retypes a salary. `packPlan` produces everything that does.
+ *
+ * Held across edits by the renderer (see shared/positions/liveSim), guarded by
+ * `structureKey`. Treat every field as FROZEN once built: a plan produced by
+ * packPlan aliases `aggKeys`, `statKeys`, `lineAggRow`, `positionStatRow` and
+ * `countScaled` rather than copying them, so mutating one here would reach back
+ * into every plan already handed out.
+ */
+export interface PlanStructure {
+  componentDefs: CostComponentDefinition[];
+  defCount: number;
+  defIndexById: Map<string, number>;
+  baseDefIndex: number;
+  /** Position ids in the plan's canonical (sorted) order. */
+  positionIds: PositionId[];
+  positionIndex: Map<string, number>;
+  positionCount: number;
+  schemeById: Map<string, SocialSecurityScheme>;
+  aggKeys: AggregateKey[];
+  statKeys: StatKey[];
+  lineAggRow: Uint32Array;
+  positionStatRow: Uint32Array;
+  countScaled: Uint8Array;
+  buyoutAggRow: Uint32Array;
+  buyoutCount: number;
+  /**
+   * What the last pack of this structure emitted, as capacity hints for the
+   * next one.
+   *
+   * Mutated by packPlan — the one field here that is not frozen. Purely a
+   * performance hint: the emitter grows past a low hint and trims a high one,
+   * so a wrong value costs a reallocation and never a wrong number. The
+   * instruction count can legitimately differ between packs of the SAME
+   * structure, because whether a position is hourly picks between BASE_SALARY
+   * and BASE_SALARY_HOURLY — same arity, but nothing here relies on that.
+   */
+  lastEmitSizes: { instructions: number; params: number };
+}
+
+export type StructureResult = { structure: PlanStructure } | { errors: CompileError[] };
+
+/** Positions in the plan's canonical order: soft-deleted dropped, then sorted
+ *  by id so the line matrix's layout never depends on query order. */
+function planPositions(input: ScenarioInput): Position[] {
+  return [...input.positions.filter((p) => p.deletedAt === null)].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0
   );
+}
+
+/**
+ * Phase A — everything that is a pure function of the plan's SHAPE.
+ *
+ * Split out so a value-only edit can reuse it (see structureKey and the cache in
+ * shared/positions/liveSim). `compile` calls this and `packPlan` back to back,
+ * and so does the cached path — there is exactly one code path that produces a
+ * plan, which is what stops the fast route and the full route from drifting.
+ */
+export function compileStructure(input: ScenarioInput): StructureResult {
+  const definitions = input.definitions.filter((def) => def.deletedAt === null);
+  const positions = planPositions(input);
   const buyouts = input.buyouts.filter((row) => row.deletedAt === null);
   const schemeById = new Map(
     input.ssSchemes.filter((s) => s.deletedAt === null).map((s) => [s.id as string, s])
@@ -453,20 +643,227 @@ export function compile(input: ScenarioInput): CompileResult {
   const baseDefIndex = componentDefs.findIndex((def) => def.kind === "BASE_SALARY");
   const positionCount = positions.length;
 
-  // ---- per-(position, component) values, keyed for O(1) lookup ----
-  const valueByKey = new Map<string, ComponentValue>();
+  const positionIndex = new Map<string, number>();
+  for (let p = 0; p < positionCount; p++) positionIndex.set(positions[p].id as string, p);
+
+  /**
+   * Line → its per-row department / account override, for the lines that have
+   * one.
+   *
+   * SPARSE on purpose. This phase needs nothing from a component value except
+   * whether it redirects the line somewhere — and overrides are the exception,
+   * not the rule (an "unlocked" block, or a MULTIPLIER in PER_ROW mode). The
+   * dense P × D array packPlan builds would be a second 1.1 MB allocation and a
+   * second full pass at 5k positions, to carry information almost every entry
+   * does not have.
+   *
+   * Same two `undefined` guards as packPlan's index, and for the same reason: a
+   * value can name a position or a definition that is not in the plan, and with
+   * an index rather than a string key that would write at a WRONG line. Single
+   * forward pass, so duplicates keep last-write-wins.
+   */
+  const overrideByLine = new Map<number, ComponentValue>();
   for (const value of input.componentValues) {
-    if (value.deletedAt === null) {
-      valueByKey.set(`${value.positionId}|${value.componentDefId}`, value);
-    }
+    if (value.deletedAt !== null) continue;
+    if (value.departmentCode === undefined && value.accountCode === undefined) continue;
+    const p = positionIndex.get(value.positionId as string);
+    if (p === undefined) continue;
+    const di = defIndexById.get(value.componentDefId as string);
+    if (di === undefined) continue;
+    overrideByLine.set(p * defCount + di, value);
   }
 
   // ---- interning ----
-  const aggInterner = new KeyInterner<AggregateKey>();
+  const aggInterner = new AggRowInterner();
   const statInterner = new KeyInterner<StatKey>();
+  const deptStrings = new StringInterner();
+  const acctStrings = new StringInterner();
+
+  // Each definition's account, and its FIXED department when it has one, as
+  // interned ids — hoisted out of the position × definition loop, where they
+  // were re-resolved P times each. `-1` means "this def does not pin a
+  // department", which keeps the `departmentMode === "FIXED" && fixedDepartment`
+  // second conjunct: a FIXED def with a blank department still falls through to
+  // the position's own.
+  /**
+   * Which definitions the count × cluster-weight pass scales — 1 = scale.
+   *
+   * All three predicates are definition-derived, so resolving them once here
+   * lets the VM's tail loop read a typed array instead of dereferencing a
+   * CostComponentDefinition per position. That removes the LAST object access
+   * from execute.ts, which is what makes its "one loop over typed arrays"
+   * claim literally true and the plan genuinely worker-transferable.
+   *
+   * Compile time is the right moment, not execute time: injectKpiSeries
+   * (shared/positions/engineInput) rewrites spreadMethod to DIRECT_ABS BEFORE
+   * compile is called, so the answer is already final here.
+   *
+   * The predicates themselves live in reference.ts (the count × weight pass at
+   * the end of referencePosition) — that is the spec, this is its compiled
+   * form, and reference-parity is what proves the two agree.
+   */
+  const countScaled = new Uint8Array(defCount);
+  for (let di = 0; di < defCount; di++) {
+    const def = componentDefs[di];
+    const exempt =
+      (def.kind === "STAT" && def.statKind === "HEADCOUNT") ||
+      def.spreadMethod === "DIRECT_ABS" ||
+      def.countExempt === true;
+    countScaled[di] = exempt ? 0 : 1;
+  }
+
+  const defAcctId = new Int32Array(defCount);
+  const defAcct: string[] = new Array(defCount);
+  const defFixedDeptId = new Int32Array(defCount);
+  const defFixedDept: string[] = new Array(defCount);
+  for (let di = 0; di < defCount; di++) {
+    const def = componentDefs[di];
+    defAcct[di] = def.accountCode;
+    defAcctId[di] = acctStrings.idOf(def.accountCode);
+    const fixed =
+      def.departmentMode === "FIXED" && def.fixedDepartment ? def.fixedDepartment : null;
+    defFixedDept[di] = fixed ?? "";
+    defFixedDeptId[di] = fixed === null ? -1 : deptStrings.idOf(fixed);
+  }
 
   const lineAggRow = new Uint32Array(positionCount * defCount);
   const positionStatRow = new Uint32Array(positionCount);
+
+  // ---- the interned dimensions ----
+  // One pass over (position, definition) resolving nothing but WHERE each line
+  // books. Insertion order is the row index, so this traversal order — positions
+  // by id, definitions in topological order, buyouts last — IS the contract that
+  // compile.test's "interns aggregate keys in traversal order" pins.
+  for (let p = 0; p < positionCount; p++) {
+    const position = positions[p];
+    positionStatRow[p] = statInterner.intern(
+      `${position.cluster}|${position.jobTypeCode}`,
+      { cluster: position.cluster, jobTypeCode: position.jobTypeCode }
+    );
+    // The position's own department, resolved once rather than once per
+    // definition — most lines book to it.
+    const posDept = position.departmentCode;
+    const posDeptId = deptStrings.idOf(posDept);
+    const lineBase = p * defCount;
+
+    for (let di = 0; di < defCount; di++) {
+      // Almost always undefined — see overrideByLine.
+      const value = overrideByLine.size === 0 ? undefined : overrideByLine.get(lineBase + di);
+
+      // Per-row department and account overrides (a MULTIPLIER block in
+      // PER_ROW mode, an "unlocked" block): the aggregation key is interned at
+      // compile time, so an override is purely a key change — the VM and every
+      // line value are untouched, and nothing is added to the hot loop.
+      // A stored departmentCode only reaches here for a block actually in
+      // PER_ROW mode (engineInput.resolveBlockValues drops it otherwise), so
+      // switching the block back makes every line book to the fallback again.
+      //
+      // The `!= null` tests are the old `??` chain, kept exactly: an override of
+      // "" is a value and WINS, where a truthiness test would let it fall
+      // through to the definition. In the common case (no override) this is two
+      // array reads and no string work at all.
+      let dept: string;
+      let deptId: number;
+      const deptOverride = value?.departmentCode;
+      if (deptOverride != null) {
+        dept = deptOverride;
+        deptId = deptStrings.idOf(deptOverride);
+      } else if (defFixedDeptId[di] >= 0) {
+        dept = defFixedDept[di];
+        deptId = defFixedDeptId[di];
+      } else {
+        dept = posDept;
+        deptId = posDeptId;
+      }
+
+      let account: string;
+      let acctId: number;
+      const acctOverride = value?.accountCode;
+      if (acctOverride != null) {
+        account = acctOverride;
+        acctId = acctStrings.idOf(acctOverride);
+      } else {
+        account = defAcct[di];
+        acctId = defAcctId[di];
+      }
+
+      lineAggRow[lineBase + di] = aggInterner.intern(deptId, acctId, dept, account);
+    }
+  }
+
+  // Buyouts intern LAST, so a buyout-only dept×account pair lands at the end of
+  // aggKeys exactly where it always did.
+  const buyoutAggRow = new Uint32Array(buyouts.length);
+  for (let b = 0; b < buyouts.length; b++) {
+    const row = buyouts[b];
+    buyoutAggRow[b] = aggInterner.intern(
+      deptStrings.idOf(row.departmentCode),
+      acctStrings.idOf(row.accountCode),
+      row.departmentCode,
+      row.accountCode
+    );
+  }
+
+  return {
+    structure: {
+      componentDefs,
+      defCount,
+      defIndexById,
+      baseDefIndex,
+      positionIds: positions.map((position) => position.id),
+      positionIndex,
+      positionCount,
+      schemeById,
+      aggKeys: aggInterner.keys,
+      statKeys: statInterner.keys,
+      lineAggRow,
+      positionStatRow,
+      countScaled,
+      buyoutAggRow,
+      buyoutCount: buyouts.length,
+      lastEmitSizes: { instructions: 0, params: 0 },
+    },
+  };
+}
+
+/**
+ * Phase B — everything that DOES depend on the edited numbers.
+ *
+ * The single writer of `paramPool` and of every packed per-position array. Both
+ * the full compile and the cached fast path call this and nothing else, so the
+ * two cannot compute a different number: there is one copy of the arithmetic.
+ *
+ * `structure` must have been built from an input with the same SHAPE — same
+ * definitions, same position ids in the same order, same departments, clusters,
+ * job types and per-row overrides. `structureKey` is what decides that, and in
+ * dev `assertRepackable` re-derives the whole structure and compares.
+ */
+export function packPlan(input: ScenarioInput, structure: PlanStructure): CompiledPlan {
+  const {
+    componentDefs,
+    defCount,
+    defIndexById,
+    baseDefIndex,
+    positionIndex,
+    positionCount,
+    schemeById,
+  } = structure;
+  const positions = planPositions(input);
+  const buyouts = input.buyouts.filter((row) => row.deletedAt === null);
+
+  // Values, dense by line — see the note in compileStructure. Rebuilt here
+  // rather than carried on the structure: these ARE the edited numbers.
+  const cellValue = new Array<ComponentValue | undefined>(positionCount * defCount).fill(
+    undefined
+  );
+  for (const value of input.componentValues) {
+    if (value.deletedAt !== null) continue;
+    const p = positionIndex.get(value.positionId as string);
+    if (p === undefined) continue;
+    const di = defIndexById.get(value.componentDefId as string);
+    if (di === undefined) continue;
+    cellValue[p * defCount + di] = value;
+  }
 
   // ---- packed inputs ----
   const seasonality = new Float64Array(positionCount * MONTHS);
@@ -475,22 +872,29 @@ export function compile(input: ScenarioInput): CompileResult {
   const posFte = new Float64Array(positionCount);
   const posWeight = new Float64Array(positionCount);
 
-  const emitter = new Emitter();
+  // Sized from the previous pack of this same structure — see lastEmitSizes.
+  const emitter = new Emitter(
+    structure.lastEmitSizes.instructions,
+    structure.lastEmitSizes.params
+  );
   const positionInstrStart = new Uint32Array(positionCount + 1);
 
-  /** Emits ACC_CLEAR + ACC_ADD_* ops realizing a base selector for position p. */
+  /** Emits ACC_CLEAR + ACC_ADD_* ops realizing a base selector for position p.
+   *  `position` is that position — SERVICE folds its per-position series into
+   *  params here, the way the STAT ops fold headcount/FTE/hours. */
   const emitSelector = (
     selector: BaseSelector | undefined,
-    lineBase: number
+    lineBase: number,
+    position: Position
   ): void => {
     if (selector?.kind === "COMBINE") {
       // Depth-1 (validated): build the LEFT operand in the accumulator, park it
       // in acc2, then build the right one the same way. Nothing new is needed
       // for the operands themselves — every ACC_ADD_* op is reused as-is, each
       // recursion emitting its own ACC_CLEAR.
-      emitSelector(selector.left, lineBase);
+      emitSelector(selector.left, lineBase, position);
       emitter.emit(Op.ACC_PUSH, LINE_NONE, 0, []);
-      emitSelector(selector.right, lineBase);
+      emitSelector(selector.right, lineBase, position);
       return;
     }
     emitter.emit(Op.ACC_CLEAR, LINE_NONE, 0, []);
@@ -504,6 +908,19 @@ export function compile(input: ScenarioInput): CompileResult {
         LINE_NONE,
         CALENDAR_SERIES_ARG[selector.series] ?? 0,
         []
+      );
+      return;
+    }
+    if (selector.kind === "SERVICE") {
+      // Length of service, in calendar days since the hiring date. The loaders
+      // already resolved the date into per-month counts, so the whole series is
+      // a per-position constant — resolve MONTH vs TOTAL here and hand the VM
+      // twelve numbers to add. arg0 carries the mode for the disassembler only.
+      emitter.emit(
+        Op.ACC_ADD_SERVICE,
+        LINE_NONE,
+        SERVICE_MODE_ARG[selector.mode] ?? 0,
+        serviceSeries(position, selector.mode)
       );
       return;
     }
@@ -539,12 +956,15 @@ export function compile(input: ScenarioInput): CompileResult {
     }
   };
 
-  const emitAccumulator = (def: CostComponentDefinition, lineBase: number): void =>
-    emitSelector(def.baseSelector, lineBase);
+  const emitAccumulator = (
+    def: CostComponentDefinition,
+    lineBase: number,
+    position: Position
+  ): void => emitSelector(def.baseSelector, lineBase, position);
 
   for (let p = 0; p < positionCount; p++) {
     const position = positions[p];
-    positionInstrStart[p] = emitter.op.length;
+    positionInstrStart[p] = emitter.length;
 
     const days = position.payType === "HOURLY" ? input.calendar.realDays : input.calendar.flatDays;
     for (let m = 0; m < MONTHS; m++) {
@@ -556,10 +976,6 @@ export function compile(input: ScenarioInput): CompileResult {
     // Verbatim — no clamping (validate() rejects junk; a silent clamp here
     // would desync from the reference implementation).
     posWeight[p] = position.hotelClusterWeight;
-    positionStatRow[p] = statInterner.intern(
-      `${position.cluster}|${position.jobTypeCode}`,
-      { cluster: position.cluster, jobTypeCode: position.jobTypeCode }
-    );
 
     const lineBase = p * defCount;
 
@@ -572,20 +988,12 @@ export function compile(input: ScenarioInput): CompileResult {
     for (let di = 0; di < defCount; di++) {
       const def = componentDefs[di];
       const line = lineBase + di;
-      const value = valueByKey.get(`${position.id}|${def.id}`);
+      const value = cellValue[line];
 
-      const dept =
-        def.departmentMode === "FIXED" && def.fixedDepartment
-          ? def.fixedDepartment
-          : position.departmentCode;
-      // Per-row account override ("unlocked" blocks): the aggregation key is
-      // interned at compile time, so an override is purely a key change — the
-      // VM and every line value are untouched.
-      const account = value?.accountCode ?? def.accountCode;
-      lineAggRow[line] = aggInterner.intern(`${dept}|${account}`, {
-        dept,
-        account,
-      });
+      // NOTE: where this line BOOKS (its aggregate row, including any per-row
+      // department or account override) was resolved in compileStructure — it
+      // does not depend on any edited number, which is exactly why this phase
+      // can be re-run on its own.
 
       const increaseFlag = def.increaseAware ? FLAG_INCREASE_AWARE : 0;
 
@@ -596,21 +1004,22 @@ export function compile(input: ScenarioInput): CompileResult {
           // pre-multiplied here so the VM mirrors the reference bit-for-bit.
           // Presence of hourlyRate is the discriminator — the two salary inputs
           // are mutually exclusive (enforced in the grid), so hourlyRate wins.
-          if (position.hourlyRate > 0) {
-            emitter.emit(Op.BASE_SALARY_HOURLY, line, 0, [
-              position.hourlyRate * position.dailyContractHours,
-              ...position.additionalMonthlyCosts,
-            ]);
-          } else {
-            emitter.emit(Op.BASE_SALARY, line, 0, [
-              position.monthlyBaseSalary,
-              ...position.additionalMonthlyCosts,
-            ]);
+          const baseOp = position.hourlyRate > 0 ? Op.BASE_SALARY_HOURLY : Op.BASE_SALARY;
+          const baseAt = emitter.emitInto(baseOp, line, 0, 1 + MONTHS);
+          emitter.paramPool[baseAt] =
+            position.hourlyRate > 0
+              ? position.hourlyRate * position.dailyContractHours
+              : position.monthlyBaseSalary;
+          for (let m = 0; m < MONTHS; m++) {
+            emitter.paramPool[baseAt + 1 + m] = position.additionalMonthlyCosts[m];
           }
-          emitter.emit(Op.VACATION, LINE_NONE, 0, [
-            position.vacationDays,
-            ...position.vacationMonthlyWeights,
-          ]);
+
+          const vacAt = emitter.emitInto(Op.VACATION, LINE_NONE, 0, 1 + MONTHS);
+          emitter.paramPool[vacAt] = position.vacationDays;
+          for (let m = 0; m < MONTHS; m++) {
+            emitter.paramPool[vacAt + 1 + m] = position.vacationMonthlyWeights[m];
+          }
+
           emitter.emit(Op.BASE_DEDUCT, line, 0, []);
           break;
         }
@@ -629,23 +1038,25 @@ export function compile(input: ScenarioInput): CompileResult {
         }
         case "SOCIAL_SECURITY": {
           const scheme = schemeById.get(def.ssSchemeId as string)!;
-          emitAccumulator(def, lineBase);
-          const params = [
-            scheme.monthlyCap ?? Infinity,
-            scheme.yearlyCap ?? Infinity,
-            scheme.brackets.length,
-            // 2c: accumulation mode + tax-year reset + prior-year opening base.
-            // Defaults (CUMULATIVE, month 1, opening 0) reproduce the pre-2c run.
-            scheme.accumulationMode === "PER_PERIOD" ? 1 : 0,
-            scheme.taxYearStartMonth ?? 1,
-            value?.ssOpeningBase ?? 0,
-          ];
+          emitAccumulator(def, lineBase, position);
+          // Always 6 scalars + SS_MAX_BRACKETS × (upTo, rate) — the bracket
+          // table is PADDED to a fixed width so every SOCIAL_SEC instruction has
+          // the same arity whatever the scheme.
+          const ssAt = emitter.emitInto(Op.SOCIAL_SEC, line, 0, 6 + 2 * SS_MAX_BRACKETS);
+          const pool = emitter.paramPool;
+          pool[ssAt] = scheme.monthlyCap ?? Infinity;
+          pool[ssAt + 1] = scheme.yearlyCap ?? Infinity;
+          pool[ssAt + 2] = scheme.brackets.length;
+          // 2c: accumulation mode + tax-year reset + prior-year opening base.
+          // Defaults (CUMULATIVE, month 1, opening 0) reproduce the pre-2c run.
+          pool[ssAt + 3] = scheme.accumulationMode === "PER_PERIOD" ? 1 : 0;
+          pool[ssAt + 4] = scheme.taxYearStartMonth ?? 1;
+          pool[ssAt + 5] = value?.ssOpeningBase ?? 0;
           for (let b = 0; b < SS_MAX_BRACKETS; b++) {
             const bracket = scheme.brackets[b];
-            params.push(bracket ? bracket.upTo ?? Infinity : Infinity);
-            params.push(bracket ? bracket.rate : 0);
+            pool[ssAt + 6 + 2 * b] = bracket ? bracket.upTo ?? Infinity : Infinity;
+            pool[ssAt + 7 + 2 * b] = bracket ? bracket.rate : 0;
           }
-          emitter.emit(Op.SOCIAL_SEC, line, 0, params);
           break;
         }
         case "STAT": {
@@ -662,18 +1073,19 @@ export function compile(input: ScenarioInput): CompileResult {
             ]);
           } else {
             const vacationHours = position.vacationDays * position.dailyContractHours;
-            emitter.emit(Op.STAT_HOURS, line, 0, [
-              position.yearlyHoursWorked + vacationHours,
-              vacationHours,
-              ...position.vacationMonthlyWeights,
-            ]);
+            const hoursAt = emitter.emitInto(Op.STAT_HOURS, line, 0, 2 + MONTHS);
+            emitter.paramPool[hoursAt] = position.yearlyHoursWorked + vacationHours;
+            emitter.paramPool[hoursAt + 1] = vacationHours;
+            for (let m = 0; m < MONTHS; m++) {
+              emitter.paramPool[hoursAt + 2 + m] = position.vacationMonthlyWeights[m];
+            }
           }
           break;
         }
         case "SPREAD": {
           switch (def.spreadMethod) {
             case "PERCENT_OF": {
-              emitAccumulator(def, lineBase);
+              emitAccumulator(def, lineBase, position);
               if (def.baseSelector?.kind === "COMBINE") {
                 // The accumulator pair now holds (left, right); COMBINE_ACC
                 // applies the operation and the rate in one go. A pinned
@@ -688,7 +1100,7 @@ export function compile(input: ScenarioInput): CompileResult {
               break;
             }
             case "WEIGHTED_BY_BASE": {
-              emitAccumulator(def, lineBase);
+              emitAccumulator(def, lineBase, position);
               emitter.emit(Op.WEIGHT_BY_ACC, line, 0, [value?.yearlyValue ?? 0]);
               break;
             }
@@ -708,21 +1120,16 @@ export function compile(input: ScenarioInput): CompileResult {
             }
             case "DIRECT_MONTHLY": {
               const monthly = value?.monthlyValues ?? [];
-              const params = new Array<number>(MONTHS);
-              for (let m = 0; m < MONTHS; m++) params[m] = monthly[m] ?? 0;
-              emitter.emit(Op.DIRECT, line, increaseFlag, params);
+              const at = emitter.emitInto(Op.DIRECT, line, increaseFlag, MONTHS);
+              for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = monthly[m] ?? 0;
               break;
             }
             case "FLAT_MONTHLY": {
               // Per-month amount (yearlyValue slot) lowered to DIRECT with a
               // constant vector — DIRECT's seas/inc handling matches the spec.
               const amount = value?.yearlyValue ?? 0;
-              emitter.emit(
-                Op.DIRECT,
-                line,
-                increaseFlag,
-                new Array<number>(MONTHS).fill(amount)
-              );
+              const at = emitter.emitInto(Op.DIRECT, line, increaseFlag, MONTHS);
+              for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = amount;
               break;
             }
             case "VACATION_WEIGHTED": {
@@ -732,13 +1139,13 @@ export function compile(input: ScenarioInput): CompileResult {
               const weights = position.vacationMonthlyWeights;
               let weightTotal = 0;
               for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
-              const params = new Array<number>(MONTHS).fill(0);
+              const at = emitter.emitInto(Op.DIRECT, line, increaseFlag, MONTHS);
+              // emitInto zero-fills, so the "no spread" case needs no else.
               if (yearly !== 0 && weightTotal !== 0) {
                 for (let m = 0; m < MONTHS; m++) {
-                  params[m] = yearly * weights[m] / weightTotal;
+                  emitter.paramPool[at + m] = yearly * weights[m] / weightTotal;
                 }
               }
-              emitter.emit(Op.DIRECT, line, increaseFlag, params);
               break;
             }
             case "DIRECT_ABS": {
@@ -746,9 +1153,8 @@ export function compile(input: ScenarioInput): CompileResult {
               // already folded the KPI series × per-position multiplier into
               // monthlyValues, so emit them verbatim (no seasonality/increase).
               const monthly = value?.monthlyValues ?? [];
-              const params = new Array<number>(MONTHS);
-              for (let m = 0; m < MONTHS; m++) params[m] = monthly[m] ?? 0;
-              emitter.emit(Op.DIRECT_ABS, line, 0, params);
+              const at = emitter.emitInto(Op.DIRECT_ABS, line, 0, MONTHS);
+              for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = monthly[m] ?? 0;
               break;
             }
           }
@@ -757,31 +1163,42 @@ export function compile(input: ScenarioInput): CompileResult {
       }
     }
   }
-  positionInstrStart[positionCount] = emitter.op.length;
+  positionInstrStart[positionCount] = emitter.length;
+  emitter.finish();
+  structure.lastEmitSizes.instructions = emitter.op.length;
+  structure.lastEmitSizes.params = emitter.paramPool.length;
 
   // ---- buyouts ----
-  const buyoutAggRow = new Uint32Array(buyouts.length);
+  // Their aggregate rows were interned by compileStructure; only the amounts
+  // are value-side.
   const buyoutValues = new Float64Array(buyouts.length * MONTHS);
   for (let b = 0; b < buyouts.length; b++) {
     const row = buyouts[b];
-    buyoutAggRow[b] = aggInterner.intern(`${row.departmentCode}|${row.accountCode}`, {
-      dept: row.departmentCode,
-      account: row.accountCode,
-    });
     for (let m = 0; m < MONTHS; m++) {
       buyoutValues[b * MONTHS + m] = row.monthlyValues[m] ?? 0;
     }
   }
 
+  // The dimension arrays are ALIASED from the structure, not copied — they are
+  // identical for every plan built on it, and copying 560 KB of lineAggRow per
+  // repack would give back much of what the cache saves. Nothing mutates them
+  // after compileStructure returns.
   const plan: CompiledPlan = {
     scenarioId: input.scenario.id,
-    aggKeys: aggInterner.keys,
-    statKeys: statInterner.keys,
-    positionIds: positions.map((position) => position.id),
-    positionIndex: new Map(positions.map((position, index) => [position.id as string, index])),
+    aggKeys: structure.aggKeys,
+    statKeys: structure.statKeys,
+    positionIds: structure.positionIds,
+    positionIndex,
     componentDefs,
+    countScaled: structure.countScaled,
     lineCount: positionCount * defCount,
-    lineAggRow,
+    lineAggRow: structure.lineAggRow,
+    // `TypedArray.from(number[])` looks like the slow path and is not: V8 has a
+    // fast path for it over a packed array, while `new Float64Array(arr)` takes
+    // the generic array-like constructor. Measured on V8 24.6, 1M doubles:
+    // .from 0.93 ms vs constructor 3.51 ms; 375k smis: .from 0.22 ms vs 1.18 ms.
+    // Switching these to `new` is a ~3 ms REGRESSION at 5k positions. Left here
+    // so the next reader doesn't "fix" it.
     op: Uint8Array.from(emitter.op),
     outLine: Uint32Array.from(emitter.outLine),
     arg0: Uint32Array.from(emitter.arg0),
@@ -795,9 +1212,24 @@ export function compile(input: ScenarioInput): CompileResult {
     posHeadcount,
     posFte,
     posWeight,
-    positionStatRow,
-    buyoutAggRow,
+    positionStatRow: structure.positionStatRow,
+    buyoutAggRow: structure.buyoutAggRow,
     buyoutValues,
   };
-  return { plan };
+  return plan;
+}
+
+/**
+ * Compile a scenario into an executable plan.
+ *
+ * The two phases back to back. Callers that hold a cached structure call
+ * `compileStructure` once and `packPlan` per edit instead — same functions,
+ * same order, so a cached plan and a freshly compiled one are bit-identical by
+ * construction rather than by agreement. `__tests__/repackParity.test.ts` holds
+ * that claim to fuzzed edits.
+ */
+export function compile(input: ScenarioInput): CompileResult {
+  const built = compileStructure(input);
+  if ("errors" in built) return { errors: built.errors };
+  return { plan: packPlan(input, built.structure) };
 }

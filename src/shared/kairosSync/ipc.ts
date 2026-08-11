@@ -227,6 +227,16 @@ export interface PlanSyncStatus {
   scopeKind: "FULL" | "PARTIAL" | null;
   departments: string[] | null;
   /**
+   * The server now lets us read more of this plan than we have downloaded.
+   *
+   * Not derivable from anything else on this shape: `scopeKind` describes what
+   * the server is offering NOW, and the counters describe a copy taken under a
+   * scope the card cannot see. A delegate made owner has `serverVersion ==
+   * watermark` over one department of thirty — level by every measure the page
+   * has, and missing most of the plan. See `readScopeWidened`.
+   */
+  scopeWidened: boolean;
+  /**
    * How much of the plan this user may WRITE, which the relation cannot answer.
    *
    * A `canEdit: false` delegation resolves as a plain `DELEGATE` server-side and
@@ -391,6 +401,24 @@ export const UNCLASSIFIED_DEPARTMENT = "(none)";
  * generic error toast, and the 409s on this surface are the ones carrying the
  * context the user is supposed to read.
  */
+/**
+ * Failures that never reached the server, and are still the user's to fix.
+ *
+ * Everything thrown locally used to flatten to the single code `local`, which
+ * the Sync page deliberately renders as no error at all — offline is the
+ * expected state of an app built to work without the network, and an alarming
+ * banner every time somebody opens a laptop lid would train them to ignore it.
+ *
+ * These two are not that. A signed-out session and a locked encrypted store
+ * both have an action attached ("sign in again"), and both were reaching the
+ * page as an empty plan list with nothing said — the exact shape of "I pressed
+ * sync and nothing happened".
+ */
+export const SYNC_LOCAL_ERROR_CODES = {
+  SESSION_EXPIRED: "local_session_expired",
+  SECURE_DB_LOCKED: "local_secure_db_locked",
+} as const;
+
 export const SYNC_ERROR_CODES = {
   HANDBACK_WITH_UNSYNCED_WORK: "kairos_handback_with_unsynced_work",
   DELEGATE_HAS_UNSYNCED_WORK: "kairos_delegate_has_unsynced_work",

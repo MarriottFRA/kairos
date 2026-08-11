@@ -138,10 +138,26 @@ export async function fetchHeads(
 
     // Cache the authorization answer so the UI can render before the first
     // round trip. Advisory only — a 403 always wins over anything stored here.
+    //
+    // Reaching this line at all retracts a recorded revocation. `revoked_json`
+    // is written by whichever call happened to catch the 403, and until now the
+    // ONLY thing that cleared it was a successful publish — so a delegate who
+    // was withdrawn and then re-granted, or handed the plan outright, kept a
+    // blocking "your access to this plan was withdrawn" banner over a plan they
+    // could read, with no action offered that would clear it.
+    //
+    // Safe because of the `canRead` gate above: a revoked delegation with no
+    // other route to the plan resolves to `OU_VISITOR` and has already been
+    // pushed onto `lockedPlans` and skipped. Getting here means the server is
+    // serving this plan to this caller by SOME route — re-grant, ownership,
+    // administrator — and the banner is therefore stating something the server
+    // has just contradicted. Local data is untouched either way; the banner was
+    // never what protected it.
     updateSyncState(db, plan.id, {
       relation: plan.relation,
       scopeKind: plan.scopeKind,
       scopeDepartments: plan.departments,
+      revokedJson: null,
     });
   }
 

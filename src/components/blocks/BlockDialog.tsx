@@ -65,6 +65,7 @@ import {
   BLOCK_SPREAD_META,
   BlockBaseRef,
   BlockCombineOp,
+  BlockDepartmentMode,
   BlockDto,
   BlockInput,
   BlockSpread,
@@ -95,6 +96,7 @@ import {
   DepartmentOption,
 } from "../../shared/mappingTables/types";
 import AccountAutocomplete from "../common/AccountAutocomplete";
+import DepartmentAutocomplete from "../common/DepartmentAutocomplete";
 
 export interface BlockDialogProps {
   open: boolean;
@@ -261,6 +263,14 @@ const CALENDAR_LABELS: Record<
   HOLIDAY_DAYS: "Public holidays",
 };
 
+const SERVICE_LABELS: Record<
+  Extract<BlockBaseRef, { kind: "SERVICE" }>["mode"],
+  string
+> = {
+  MONTH: "Service days",
+  TOTAL: "Total service days",
+};
+
 const STAT_LABELS: Record<
   Extract<BlockBaseRef, { kind: "STAT" }>["stat"],
   string
@@ -288,6 +298,10 @@ const DAY_HOUR_BASES: Array<{ base: BlockBaseRef; label: string }> = [
   { base: { kind: "STAT", stat: "HOURS" }, label: "Hours worked" },
   { base: { kind: "STAT", stat: "HOURS_PAID" }, label: "Hours paid" },
   { base: { kind: "STAT", stat: "FTE" }, label: "FTE" },
+  // Length of service, from the row's Hiring Date. Calendar days, not worked
+  // days — indemnity/end-of-service accruals are written against service.
+  { base: { kind: "SERVICE", mode: "MONTH" }, label: "Service days in month" },
+  { base: { kind: "SERVICE", mode: "TOTAL" }, label: "Total service days to date" },
 ];
 
 /** Encoded value -> the menu's own wording, for the closed field. */
@@ -316,6 +330,8 @@ function describeBase(base: BlockBaseRef | undefined, names: BaseNames): string 
       return "Vacation cost";
     case "CALENDAR":
       return CALENDAR_LABELS[base.series];
+    case "SERVICE":
+      return SERVICE_LABELS[base.mode];
     case "STAT":
       return STAT_LABELS[base.stat];
     case "BLOCK":
@@ -853,6 +869,12 @@ export default function BlockDialog({
   const [ratioNoHeadcount, setRatioNoHeadcount] = useState(false);
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
   const [increaseAware, setIncreaseAware] = useState(false);
+  // Where the cost books. The control is MULTIPLIER-only, but the STATE is
+  // seeded and submitted for every type: a FIXED block created by an importer
+  // or arriving from a sync peer must survive a trip through this dialog.
+  const [departmentMode, setDepartmentMode] =
+    useState<BlockDepartmentMode>("POSITION");
+  const [fixedDepartment, setFixedDepartment] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // Pooled-block config.
   const [poolSource, setPoolSource] = useState<PoolSource>("KPI");
@@ -888,6 +910,8 @@ export default function BlockDialog({
     );
     setSpread(block?.spread ?? "ACTIVE_MONTHS");
     setIncreaseAware(block?.increaseAware ?? false);
+    setDepartmentMode(block?.departmentMode ?? "POSITION");
+    setFixedDepartment(block?.fixedDepartment ?? "");
     setConfirmingDelete(false);
     setPoolSource(block?.poolSource ?? "KPI");
     setPoolKpiDriverId(block?.poolKpiDriverId ?? "");
@@ -991,13 +1015,17 @@ export default function BlockDialog({
     Object.values(poolWeightValues).some(
       (weight) => !Number.isFinite(weight) || weight <= 0 || weight > POOL_WEIGHT_MAX
     );
+  // "One department" needs one chosen; the other two modes need nothing.
+  const departmentError =
+    departmentMode === "FIXED" && fixedDepartment.trim() === "";
   const valid =
     !!type &&
     !labelError &&
     !baseError &&
     !poolAmountError &&
     !poolKpiError &&
-    !poolWeightError;
+    !poolWeightError &&
+    !departmentError;
 
   const handleSave = () => {
     if (!type || !valid) return;
@@ -1008,6 +1036,17 @@ export default function BlockDialog({
       accountCode,
       accountLocked,
       statsAccountCode: type === "COUNT_RATE" ? statsAccountCode : undefined,
+      // Echoed rather than edited — there is no switch for it, and omitting it
+      // silently re-locked every per-row stats account on save.
+      statsAccountLocked:
+        type === "COUNT_RATE" ? block?.statsAccountLocked ?? true : undefined,
+      // Sent for EVERY type, not just MULTIPLIER. The control below is
+      // Multiplier-only, but a FIXED block from an importer or a sync peer
+      // would otherwise be silently reset to the row's department on save —
+      // moving real money with no message.
+      departmentMode,
+      fixedDepartment:
+        departmentMode === "FIXED" ? fixedDepartment.trim() : undefined,
       base: type === "MULTIPLIER" ? base : undefined,
       ...(type === "MULTIPLIER" && base?.kind === "COMBINE"
         ? { useRowRate, ratioNoHeadcount }
@@ -1666,6 +1705,55 @@ export default function BlockDialog({
                 }
               />
             </Stack>
+
+            {/* Department and account are the two halves of one output key, so
+                this sits directly under the account section. Multiplier only —
+                the rare "this cost belongs elsewhere" case. */}
+            {type === "MULTIPLIER" && (
+              <Stack spacing={1}>
+                <Typography variant="subtitle2">Where it books</Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={departmentMode}
+                  onChange={(_event, next: BlockDepartmentMode | null) =>
+                    next && setDepartmentMode(next)
+                  }
+                >
+                  <ToggleButton value="POSITION">The row's department</ToggleButton>
+                  <ToggleButton value="FIXED">One department</ToggleButton>
+                  <ToggleButton value="PER_ROW">Each row picks</ToggleButton>
+                </ToggleButtonGroup>
+
+                {departmentMode === "POSITION" && (
+                  <Typography variant="caption" color="text.secondary">
+                    Each row's cost books to that row's own department. The
+                    normal choice.
+                  </Typography>
+                )}
+                {departmentMode === "FIXED" && (
+                  <>
+                    <DepartmentAutocomplete
+                      options={departments}
+                      value={fixedDepartment}
+                      onChange={setFixedDepartment}
+                      size="small"
+                      error={departmentError}
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      Every row using this block books here, whatever department
+                      the row itself is in.
+                    </Typography>
+                  </>
+                )}
+                {departmentMode === "PER_ROW" && (
+                  <Typography variant="caption" color="text.secondary">
+                    The grid gets a "Department" column for this block. Leave a
+                    row blank and it books to that row's own department.
+                  </Typography>
+                )}
+              </Stack>
+            )}
 
             {type === "COUNT_RATE" && (
               <Stack spacing={1}>

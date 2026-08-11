@@ -26,7 +26,8 @@
 import { app } from "electron";
 import { IpcHandler, IpcResult } from "../types";
 import { localDbHandle } from "../../local_db";
-import { secureDb } from "../../secure_db";
+import { isSecureDatabaseUnlocked, secureDb } from "../../secure_db";
+import { SessionExpiredError } from "../../main/auth/sessionManager";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import { softDeleteScenario } from "../../main/positions/structureRepo";
 import { prepared } from "../../main/positions/stmtCache";
@@ -69,6 +70,7 @@ import {
   SyncError,
   SyncOutcome,
   SyncStatusResponse,
+  SYNC_LOCAL_ERROR_CODES,
   UNCLASSIFIED_DEPARTMENT,
 } from "../../shared/kairosSync/ipc";
 import { delegationSummary } from "../../shared/kairosSync/delegationSummary";
@@ -90,6 +92,7 @@ import {
   RELATION_PLAIN,
   WriteScopeKind,
 } from "../../shared/kairosSync/relations";
+import { readScopeWidened } from "../../shared/kairosSync/scopeWidening";
 import {
   NO_DEPARTMENT_WRITE,
   UNRESTRICTED_WRITE,
@@ -103,7 +106,17 @@ function envelope<T>(data: T): IpcResult<T> {
   return { success: true, data, timestamp: Date.now() };
 }
 
-/** Flatten anything thrown into the shape the renderer branches on. */
+/**
+ * Flatten anything thrown into the shape the renderer branches on.
+ *
+ * `local` is a promise, not a shrug: the Sync page renders it as no error at
+ * all, because a laptop on a train is the normal state of an app whose whole
+ * premise is that it works without the server. That is right for a failed
+ * socket and wrong for everything else that used to land here — a signed-out
+ * session and a locked secure store are both conditions the user can act on,
+ * and both were being shown as an empty page with no message of any kind. They
+ * get their own codes so the page can say what happened.
+ */
 function toSyncError(error: unknown): SyncError {
   if (error instanceof KairosApiError) {
     return {
@@ -111,6 +124,25 @@ function toSyncError(error: unknown): SyncError {
       status: error.status,
       message: error.message,
       context: error.context,
+    };
+  }
+  if (error instanceof SessionExpiredError) {
+    return {
+      code: SYNC_LOCAL_ERROR_CODES.SESSION_EXPIRED,
+      status: 0,
+      message: "You have been signed out. Sign in again to sync.",
+    };
+  }
+  // Identified by the accessor that raises it rather than by a bespoke error
+  // class, because `secureDb()` is called from every handler in this file and
+  // a new class would have to be threaded through all of them.
+  if (!isSecureDatabaseUnlocked()) {
+    return {
+      code: SYNC_LOCAL_ERROR_CODES.SECURE_DB_LOCKED,
+      status: 0,
+      message:
+        "This computer's encrypted store is locked, so there is nothing to sync " +
+        "against. Sign in again to unlock it.",
     };
   }
   return {
@@ -395,9 +427,16 @@ function scenarioLabel(ou: string, planId: string): string | null {
  * Year and label only, because that is all a human has to go on. The ids are
  * different — that is the whole problem — so this is a heuristic for a warning
  * and never a key anything is merged on.
+ *
+ * The separator is NUL because a label cannot contain one, so no pair of
+ * (year, label) values can collide by straddling it. It must stay written as
+ * the ESCAPE and never as the character itself: a raw 0x00 in the source makes
+ * ripgrep and `git grep` classify this file as binary and skip it in silence,
+ * which is how the largest file in this feature became unsearchable without
+ * anything appearing to be wrong.
  */
 function nameKey(year: number, label: string): string {
-  return `${year} ${label.trim().toLowerCase()}`;
+  return `${year}\u0000${label.trim().toLowerCase()}`;
 }
 
 /**
@@ -652,6 +691,11 @@ export function createKairosSyncHandlers(
                 | "PARTIAL"
                 | null,
               departments: head?.departments ?? state?.scopeDepartments ?? null,
+              // The head, never the cached state: the question is whether what
+              // the server is offering now is wider than what we last pulled
+              // under, and answering it from the same cached row on both sides
+              // can only ever say no.
+              scopeWidened: readScopeWidened(state, head),
               writeScope: writeScopeKindFor(relation, ownership),
               structureEditable: state?.structureEditable ?? false,
               handbacksPending: head?.handbacksPending ?? 0,
@@ -705,6 +749,10 @@ export function createKairosSyncHandlers(
               readable,
               scopeKind: head.scopeKind,
               departments: head.departments,
+              // No local copy, so there is no narrower scope for this to be
+              // wider than — and `runPull` full-pulls a plan we do not hold
+              // regardless. `CLOUD_ONLY` already says "download it".
+              scopeWidened: false,
               // Nothing local to write, whatever the relation says.
               writeScope: readable ? "UNKNOWN" : "NONE",
               structureEditable: false,
@@ -848,8 +896,16 @@ export function createKairosSyncHandlers(
     ) => {
       return envelope(
         await attempt(async () => {
-          resolveOuScope(request.ou);
-          const result = await reconcilePlan(secureDb(), client, request.planId);
+          const scope = resolveOuScope(request.ou);
+          const db = secureDb();
+          // Whether an absent row means "deleted here" or "never shared with
+          // me". Costs the probe, which is cached and usually a 304.
+          const probe = await fetchHeads(db, client, scope.ou);
+          const widened = readScopeWidened(
+            getSyncState(db, request.planId),
+            headFor(probe.heads, request.planId)
+          );
+          const result = await reconcilePlan(db, client, request.planId, widened);
           return {
             planId: result.planId,
             matched: result.matched,
@@ -1365,12 +1421,20 @@ export function createKairosSyncHandlers(
           // short of re-reading can discover that, and `relation` has to go with
           // the ownership body or the next read is answered from a cache that
           // still thinks this machine owns the plan.
+          //
+          // `revokedJson` goes with them, for the same reason: it is an
+          // authorization answer, and after a handover it can only be a claim
+          // about a grant that no longer describes this machine's relationship
+          // to the plan. The probe retracts it too — doing it here as well means
+          // the page is right on the render straight after the transfer rather
+          // than one probe later.
           updateSyncState(secureDb(), request.planId, {
             relation: null,
             scopeKind: null,
             scopeDepartments: null,
             ownershipEtag: null,
             ownershipJson: null,
+            revokedJson: null,
           });
           return result;
         }, request.planId)
@@ -1772,7 +1836,25 @@ export function createKairosSyncHandlers(
      * pull, whatever we think we saw last time.
      */
     const onThisComputer = hasLocalScenario(scope.ou, request.planId);
-    const since = onThisComputer ? state?.watermark ?? 0 : 0;
+
+    /**
+     * ...and it is only meaningful against a copy of the same SHAPE.
+     *
+     * A delta answers "what changed since N", which is a complete answer only
+     * while "what I may read" has not moved. When it widens — a delegation
+     * amended to cover more departments, or the delegate made this plan's owner
+     * — the newly-visible rows were written long before N and no future delta
+     * will ever mention them again. See `readScopeWidened` for why the scope
+     * itself has to be the signal: `version` and `syncEpoch` are both untouched
+     * by a grant change, and `authzVersion` cannot name the plan.
+     *
+     * Deliberately not a `clearShadow`. The epoch path in `pull.ts` discards the
+     * local view because there the server wins outright; here the copy we hold
+     * is correct, only incomplete, and the shadow is what stops `purgesFor`
+     * reading the rows we never had as rows we deleted.
+     */
+    const widened = readScopeWidened(state, headFor(probe.heads, request.planId));
+    const since = onThisComputer && !widened ? state?.watermark ?? 0 : 0;
 
     const result = await pullPlan(stores(), db, client, {
       planId: request.planId,
@@ -1814,8 +1896,10 @@ export function createKairosSyncHandlers(
           client,
           request.planId,
           // A full pull of entities is a full pull of details too, or the two
-          // halves of the plan end up describing different moments.
-          onThisComputer ? state?.piiWatermark ?? 0 : 0,
+          // halves of the plan end up describing different moments. That covers
+          // a widened scope as much as a first download: the details of a
+          // department we could not read are exactly as absent as its rows.
+          onThisComputer && !widened ? state?.piiWatermark ?? 0 : 0,
           { apply: true }
         );
       } catch {

@@ -89,6 +89,9 @@ export interface ComponentValueRecord {
   accountCode: string | null;
   /** The dual-block count line's per-row override (unlocked stats account). */
   statsAccountCode: string | null;
+  /** Per-row department override for a MULTIPLIER block in PER_ROW mode;
+   *  null = the block's own answer (the row's department, or its fixed one). */
+  departmentCode: string | null;
   updatedAt: string;
 }
 
@@ -219,6 +222,7 @@ export interface ComponentValuePatch {
       | "ssOpeningBase"
       | "accountCode"
       | "statsAccountCode"
+      | "departmentCode"
     >
   >;
 }

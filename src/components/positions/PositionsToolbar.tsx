@@ -13,6 +13,7 @@ import DashboardCustomizeOutlinedIcon from "@mui/icons-material/DashboardCustomi
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import FilterAltOutlinedIcon from "@mui/icons-material/FilterAltOutlined";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
@@ -28,6 +29,7 @@ import {
   DialogContentText,
   DialogTitle,
   Divider,
+  IconButton,
   InputAdornment,
   ListItemIcon,
   ListItemText,
@@ -87,6 +89,17 @@ export interface PositionsToolbarProps {
    *  menu opens, which MUI anchors to the grid rather than to this button. */
   onOpenFilters: () => void;
   onClearFilters: () => void;
+  /**
+   * Recompute every block Total from scratch.
+   *
+   * The grid keeps a compiled plan between edits and only re-runs the numbers
+   * while the plan's shape is unchanged (see shared/engine/structureKey). That
+   * is guarded by a fuzz test and, in dev, by an assertion — but the guards
+   * protect against a bug, and this protects against the guards being wrong.
+   * Without it the only way out of a stale total would be to leave the hotel and
+   * come back.
+   */
+  onRefreshTotals: () => void;
 }
 
 /**
@@ -169,6 +182,7 @@ export default function PositionsToolbar({
   onQuickFilter,
   onOpenFilters,
   onClearFilters,
+  onRefreshTotals,
 }: PositionsToolbarProps) {
   // Both menus and the custom-count prompt are the toolbar's own business —
   // the page above it only ever hears the resulting intent.
@@ -484,6 +498,22 @@ export default function PositionsToolbar({
           </Tooltip>
         )}
       </ButtonGroup>
+
+      {/* Deliberately an icon, not a button with a label: on almost every day
+          it does nothing visible, because the totals are already right. It is
+          here for the day they are not. */}
+      <Tooltip title="Recalculate every block total from scratch">
+        <span>
+          <IconButton
+            onClick={onRefreshTotals}
+            disabled={disabled}
+            size="small"
+            sx={{ height: CONTROL_HEIGHT, width: CONTROL_HEIGHT }}
+          >
+            <RefreshIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
 
       <TextField
         size="small"

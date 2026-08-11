@@ -48,6 +48,10 @@ import {
   toRow,
   vacationCostById,
 } from "../../shared/positions/rowModel";
+import {
+  DerivedRowValues,
+  rowIdsWithChangedTotals,
+} from "../../shared/positions/derivedRowValues";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { departmentPickList } from "../../shared/positions/departmentPickList";
@@ -63,7 +67,11 @@ import {
   changedBlockKeys,
   sanitizeBlockInputs,
 } from "../../shared/positions/blockRows";
-import { runLiveSim } from "../../shared/positions/liveSim";
+import {
+  BlockResultsById,
+  createLiveSimCache,
+  runLiveSim,
+} from "../../shared/positions/liveSim";
 import {
   applyBlockPreset as applyBlockPresetService,
   deleteBlock as deleteBlockService,
@@ -238,6 +246,11 @@ const IDLE_SNAPSHOT: QueueSnapshot = {
 /** Shared empty list, so "no blocks yet" is one identity rather than a new one
  *  per render (see the `blocks` memo below). */
 const EMPTY_BLOCKS: BlockDto[] = [];
+
+/** "The simulation has not produced anything yet" as one identity — the block
+ *  Total column reads an empty map and a missing one identically (blank cell),
+ *  so the non-nullable field saves a branch in a per-cell callback. */
+const EMPTY_BLOCK_RESULTS: BlockResultsById = new Map();
 
 /** "No column filters" as one identity — the grid diffs the filter model by
  *  reference, so clearing back to a fresh object would cost a filter pass. */
@@ -808,6 +821,35 @@ export default function Positions() {
     enabled: !planScope.unpublished && !planScope.notShared,
   });
 
+  /**
+   * The live sim's compiled-structure cache, and the way to throw it away.
+   *
+   * A value-only edit reuses the plan's shape and only repacks the numbers (see
+   * shared/engine/structureKey for what "value-only" means and what guards it).
+   * `simEpoch` is the escape hatch: bumping it drops the cache and forces a full
+   * compile. Wired to the toolbar's Refresh action AND to every wholesale
+   * invalidation — hotel, scenario, reload, column epoch — so the cache can
+   * never outlive the data it was built from. runLiveSim additionally refuses a
+   * cache entry whose hotel/scenario/year scope does not match.
+   */
+  const simCache = useRef(createLiveSimCache());
+  const [simEpoch, setSimEpoch] = useState(0);
+  const refreshTotals = useCallback(() => {
+    // Synchronously, not in an effect: effects run AFTER the render that the
+    // state bump triggers, so an effect would clear the cache one render too
+    // late and the button would appear to do nothing until the next edit.
+    simCache.current = createLiveSimCache();
+    setSimEpoch((epoch) => epoch + 1);
+  }, []);
+  // Defence in depth for the wholesale invalidations. runLiveSim already
+  // refuses an entry whose hotel/scenario/year scope does not match — which is
+  // what actually makes a mid-render switch safe, since this effect runs after
+  // that render — but a cache that outlives its data should not depend on one
+  // guard alone.
+  useEffect(() => {
+    simCache.current = createLiveSimCache();
+  }, [selectedHotelOu, scenario?.id, reloadToken, gridEpoch]);
+
   const liveSim = useMemo(() => {
     if (!blocksModel || !scenario || !selectedHotelOu) {
       return { results: null, errors: null } as const;
@@ -825,9 +867,90 @@ export default function Positions() {
       // FTE is derived, so the sim has to derive it too — an FTE-based pooled
       // block would otherwise spread over a grid of zeros.
       fullTime: fullTime ?? undefined,
+      cache: simCache.current,
     });
+    // Where the frame went, in dev only (statically eliminated from the
+    // production bundle — see src/global.d.ts). StrictMode double-invokes this
+    // memo, so TWO lines per committed edit is correct and is itself the
+    // measurement of the StrictMode tax; don't "fix" the duplicate.
+    if (import.meta.env.DEV && run.timings) {
+      const t = run.timings;
+      console.debug(
+        `[liveSim] ${t.positions}/${t.rows} rows × ${t.blocks} blocks — ` +
+          `input ${t.inputMs.toFixed(1)} + ` +
+          `${t.structureReused ? "repack" : "COMPILE"} ${t.compileMs.toFixed(1)} + ` +
+          `exec ${t.execMs.toFixed(1)} + agg ${t.aggMs.toFixed(1)} = ${t.totalMs.toFixed(1)} ms`
+      );
+    }
     return { results: run.results, errors: run.errors } as const;
-  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu, hotelClusters, fullTime]);
+    // simEpoch is the Refresh action: it carries no data, it exists so this
+    // memo re-runs after the structure cache has been dropped.
+  }, [rows, blocksModel, calendarYear, kpiSeriesByDriver, scenario, selectedHotelOu, hotelClusters, fullTime, simEpoch]);
+
+  /**
+   * The four displayed-but-not-stored per-row maps, behind ONE stable ref.
+   *
+   * All four change on every committed edit. Passed to the grid as four props
+   * they were column-memo dependencies, so a single cell commit rebuilt ~100
+   * colDefs, re-ran MUI's column pipeline and re-rendered every mounted row —
+   * a whole-grid repaint to move one number. The ref's identity never changes,
+   * so the columns are built once and the cell callbacks read through it.
+   *
+   * Assigned during render, not in an effect (the same idiom as hotelNamesRef
+   * and writeScopeRef above): the values must be current for the SAME render
+   * that produced them, or the edited cell paints one frame stale. A whole
+   * fresh object every time, never an incremental mutation, so StrictMode's
+   * double-invoke is a no-op.
+   */
+  const derived = useMemo<DerivedRowValues>(
+    () => ({
+      vacationCostById: vacationCosts,
+      manhoursWorkedById: manhoursWorked,
+      fteById: ftes,
+      blockResults: liveSim.results ?? EMPTY_BLOCK_RESULTS,
+    }),
+    [vacationCosts, manhoursWorked, ftes, liveSim]
+  );
+  const derivedRef = useRef<DerivedRowValues>(derived);
+  derivedRef.current = derived;
+
+  /**
+   * Refresh the rows whose block totals moved without their row object moving.
+   *
+   * Three of the four maps above are per-row pure: their values change only for
+   * a row that was itself edited, and that row's object identity has already
+   * changed, so MUI re-renders it and re-applies sorting and filtering with the
+   * fresh value. `blockResults` is the exception — a POOL_SPREAD block re-slices
+   * its pot across every eligible member whenever any one of them is edited, so
+   * row Y's displayed total can move while row Y's object did not.
+   *
+   * `updateRows` with an id-only partial merges as `{...oldRow, ...partial}`,
+   * producing a content-identical clone: enough to defeat GridRow's memo for
+   * exactly those rows, with none of the column pipeline. It then publishes
+   * `rowsSet`, which is what re-applies sorting, filtering and aggregation — so
+   * a sort on a block Total cannot go stale. THE INVARIANT: an empty diff means
+   * no displayed value moved, so no cached order can be wrong.
+   *
+   * Must stay a passive effect. MUI syncs its `rows` prop into its row cache in
+   * a passive effect too, and passive effects flush child-first — a layout
+   * effect here would run BEFORE that sync and have its clones discarded.
+   */
+  const prevBlockResults = useRef<BlockResultsById | null>(null);
+  useEffect(() => {
+    const next = derived.blockResults;
+    const previous = prevBlockResults.current;
+    prevBlockResults.current = next;
+    if (!previous) return; // first run — the initial render is already fresh
+    const changed = rowIdsWithChangedTotals(previous, next);
+    if (changed.length === 0) return;
+    const api = apiRef.current;
+    if (!api) return;
+    // A row can be in the diff because it LEFT the results (deactivated,
+    // deleted); those are gone from the grid too, and updateRows would
+    // resurrect them as empty rows.
+    const live = changed.filter((id) => api.getRowNode(id));
+    if (live.length > 0) api.updateRows(live.map((id) => ({ id })));
+  }, [derived, apiRef]);
 
   /**
    * Report what a write did to the OTHER member hotels.
@@ -1826,6 +1949,7 @@ export default function Positions() {
           onQuickFilter={setQuickFilter}
           onOpenFilters={handleOpenFilters}
           onClearFilters={handleClearFilters}
+          onRefreshTotals={refreshTotals}
         />
       </Box>
 
@@ -1854,14 +1978,11 @@ export default function Positions() {
             catalog={catalog}
             departments={departments}
             accounts={accounts}
-            vacationCostById={vacationCosts}
-            manhoursWorkedById={manhoursWorked}
-            fteById={ftes}
+            derived={derivedRef}
             hotelClusters={hotelClusters}
             currentOu={selectedHotelOu}
             hotelNames={hotelNames}
             blocks={blocks}
-            blockResults={liveSim.results}
             masked={masked}
             writePolicy={planScope.writePolicy}
             departmentPicks={departmentPicks}
@@ -2001,12 +2122,9 @@ export default function Positions() {
           row={editRow}
           catalog={catalog}
           blocks={blocksModel?.blocks ?? []}
-          blockResults={liveSim.results}
           departments={departments}
           accounts={accounts}
-          vacationCostById={vacationCosts}
-          manhoursWorkedById={manhoursWorked}
-          fteById={ftes}
+          derived={derivedRef}
           hotelClusters={hotelClusters}
           currentOu={selectedHotelOu}
           hotelNames={hotelNames}

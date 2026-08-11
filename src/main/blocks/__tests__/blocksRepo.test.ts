@@ -552,6 +552,95 @@ describe("saveBlock — compound (COMBINE) bases", () => {
   });
 });
 
+describe("saveBlock — where it books", () => {
+  const multiplier = (overrides: Partial<BlockInput> = {}): BlockInput => ({
+    blockType: "MULTIPLIER",
+    label: "Shared Services Levy",
+    accountCode: "519000",
+    accountLocked: true,
+    base: { kind: "BASE_SALARY" },
+    ...overrides,
+  });
+
+  it("round-trips PER_ROW while projecting the def as POSITION", () => {
+    const id = saveBlock(db, OU_A, multiplier({ departmentMode: "PER_ROW" }), NOW);
+
+    expect(listBlocks(db, OU_A)[0].departmentMode).toBe("PER_ROW");
+
+    // The compiled definition keeps to the two values its CHECK allows. That
+    // is not a lossy projection: POSITION is exactly what a blank per-row cell
+    // falls back to, and it is all the engine asks the definition for.
+    const row = db
+      .prepare(
+        `SELECT department_mode, fixed_department FROM cost_component_definitions WHERE id = ?`
+      )
+      .get(blockCostDefId(id)) as Record<string, unknown>;
+    expect(row.department_mode).toBe("POSITION");
+    expect(row.fixed_department).toBeNull();
+  });
+
+  it("round-trips FIXED and keeps it across a re-save", () => {
+    // Regression: the dialog used to omit departmentMode entirely, so opening
+    // a FIXED block's cog and saving silently moved its money back to each
+    // row's own department with no message.
+    const id = saveBlock(
+      db,
+      OU_A,
+      multiplier({ departmentMode: "FIXED", fixedDepartment: "1910" }),
+      NOW
+    );
+    expect(listBlocks(db, OU_A)[0].fixedDepartment).toBe("1910");
+
+    saveBlock(
+      db,
+      OU_A,
+      multiplier({ id, departmentMode: "FIXED", fixedDepartment: "1910" }),
+      { now: "2026-02-01T00:00:00.000Z" }
+    );
+
+    const after = listBlocks(db, OU_A)[0];
+    expect(after.departmentMode).toBe("FIXED");
+    expect(after.fixedDepartment).toBe("1910");
+    const row = db
+      .prepare(
+        `SELECT department_mode, fixed_department FROM cost_component_definitions WHERE id = ?`
+      )
+      .get(blockCostDefId(id)) as Record<string, unknown>;
+    expect(row.department_mode).toBe("FIXED");
+    expect(row.fixed_department).toBe("1910");
+  });
+
+  it("drops a stale fixed department when the mode moves off FIXED", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      multiplier({ departmentMode: "FIXED", fixedDepartment: "1910" }),
+      NOW
+    );
+    saveBlock(
+      db,
+      OU_A,
+      multiplier({ id, departmentMode: "PER_ROW", fixedDepartment: "1910" }),
+      NOW
+    );
+    expect(listBlocks(db, OU_A)[0].fixedDepartment).toBeUndefined();
+  });
+
+  it("rejects FIXED with no department, and PER_ROW on a non-multiplier", () => {
+    expect(() =>
+      saveBlock(db, OU_A, multiplier({ departmentMode: "FIXED" }), NOW)
+    ).toThrow(/Choose the department/);
+    expect(() =>
+      saveBlock(db, OU_A, flatMonthly({ departmentMode: "PER_ROW" }), NOW)
+    ).toThrow(/Only a Multiplier block/);
+  });
+
+  it("defaults to POSITION", () => {
+    saveBlock(db, OU_A, multiplier(), NOW);
+    expect(listBlocks(db, OU_A)[0].departmentMode).toBe("POSITION");
+  });
+});
+
 describe("saveBlock — update semantics", () => {
   it("recompiles the projection on edit and preserves sort order", () => {
     const id = saveBlock(db, OU_A, flatMonthly(), NOW);

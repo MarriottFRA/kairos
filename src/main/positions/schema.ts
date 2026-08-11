@@ -231,6 +231,10 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       -- default account). stats_account_code is the dual-block count line's.
       account_code       TEXT,
       stats_account_code TEXT,
+      -- Per-row DEPARTMENT override, MULTIPLIER blocks in PER_ROW mode. NULL =
+      -- the block's own answer (the position's department, or the block's fixed
+      -- one). A department CODE, matching the engine's dept x account key.
+      department_code    TEXT,
       updated_at       TEXT NOT NULL,
       deleted_at       TEXT,
       PRIMARY KEY (position_id, component_def_id)
@@ -407,6 +411,28 @@ export function applyValueStoreV9(
   }
   if (!present.has("stats_account_code")) {
     handle.exec(`ALTER TABLE component_values ADD COLUMN stats_account_code TEXT`);
+  }
+}
+
+/**
+ * Per-row department overrides on component_values (secure v4).
+ *
+ * A MULTIPLIER block can be set to "each row picks", giving the grid a
+ * department dropdown for that block; NULL = the block's own answer. Same
+ * shape as applyValueStoreV9 above — fresh installs get the column from the
+ * DDL, this backfills upgraded stores. Idempotent.
+ */
+export function applyComponentValueDepartment(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(component_values)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("department_code")) {
+    handle.exec(`ALTER TABLE component_values ADD COLUMN department_code TEXT`);
   }
 }
 

@@ -79,6 +79,16 @@
  *                (productive-days calendar); arg0 = 2: acc[m] +=
  *                holidayDays[m]·seas[m] (public-holiday count). The CALENDAR
  *                base selector — "multiplier of days in month" blocks.
+ *  ACC_ADD_SERVICE  params: series[12]; acc[m] += series[m]
+ *                The SERVICE base selector — length of service in pure calendar
+ *                days since the hiring date. arg0 = 0: the month's own days;
+ *                arg0 = 1: the running total to date (prior years included).
+ *                Both forms are per-position constants resolved by the loaders
+ *                (shared/positions/serviceDays.ts) and folded into params at
+ *                compile time, so the VM just adds them. Whole calendar days,
+ *                never × seasonality — but an inactive month is gated to zero
+ *                upstream, so a position out of the plan still costs nothing.
+ *                arg0 is carried for the disassembler's benefit only.
  *  ACC_ADD_VAC   acc[m] += vac[m] (the vacation-cost scratch set by VACATION).
  *                The VACATION base selector; topo-depends on BASE_SALARY.
  *  PCT_OF_ACC    params: rate; line[m] = rate·acc[m]
@@ -144,6 +154,7 @@ export const Op = {
   STAT_HOURS_PAID: 22,
   ACC_PUSH: 23,
   COMBINE_ACC: 24,
+  ACC_ADD_SERVICE: 25,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];

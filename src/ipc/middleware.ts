@@ -94,14 +94,17 @@ export const validationMiddleware = (schema: any): IpcMiddleware => {
 export const performanceMiddleware = (slowThreshold: number = 1000): IpcMiddleware => {
   return async (event, channel, args, next) => {
     const startTime = Date.now();
-    
+
     const result = await next();
-    
+
     const duration = Date.now() - startTime;
     if (duration > slowThreshold) {
-      // console.warn(`Slow IPC operation detected: ${channel} took ${duration}ms`);
+      // The threshold is what makes this quiet enough to leave on: a recalc or a
+      // publish legitimately takes seconds, so only channels that block the UI
+      // for longer than a frame budget's worth of work say anything.
+      console.warn(`Slow IPC: ${channel} took ${duration}ms`);
     }
-    
+
     return result;
   };
 };

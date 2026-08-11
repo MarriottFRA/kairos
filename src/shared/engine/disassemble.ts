@@ -14,6 +14,9 @@ import { COMBINE_OPS, MONTHS, PositionId, SS_MAX_BRACKETS } from "./types";
 /** ACC_ADD_DAYS' arg0, indexed — mirrors CALENDAR_SERIES_ARG in types.ts. */
 const ACC_ADD_DAYS_SERIES = ["payBasisDays", "realDays", "holidayDays"] as const;
 
+/** ACC_ADD_SERVICE's arg0, indexed — mirrors SERVICE_MODE_ARG in types.ts. */
+const ACC_ADD_SERVICE_MODES = ["month", "total"] as const;
+
 function fmt(value: number): string {
   if (value === Infinity) return "∞";
   return Number.isInteger(value) ? String(value) : value.toPrecision(6);
@@ -77,6 +80,13 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         break;
       case Op.ACC_ADD_DAYS:
         detail = `series=${ACC_ADD_DAYS_SERIES[plan.arg0[i]] ?? "payBasisDays"}`;
+        break;
+      case Op.ACC_ADD_SERVICE:
+        detail = `mode=${ACC_ADD_SERVICE_MODES[plan.arg0[i]] ?? "month"} days=${fmtVector(
+          pool,
+          pp,
+          MONTHS
+        )}`;
         break;
       case Op.PCT_OF_ACC:
         detail = `rate=${fmt(pool[pp])}`;

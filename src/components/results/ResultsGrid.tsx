@@ -27,7 +27,8 @@
  * answers a different question for a month cell than for the Year.
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Chip from "@mui/material/Chip";
 import {
@@ -37,10 +38,14 @@ import {
   GridEventListener,
   GridFilterModel,
   GridRowId,
+  useGridApiRef,
 } from "@mui/x-data-grid-premium";
 import { OutputAggRowDto, OutputValueKind } from "../../shared/positions/ipc";
 import { formatResultValue, yearValueOf } from "./format";
 import { BlockChips, SourceSummaryCell } from "./sourceMeta";
+import CellSelectionStats, {
+  CELL_SELECTION_PERF_SX,
+} from "../common/CellSelectionStats";
 
 export const MONTH_SHORT = Array.from({ length: 12 }, (_, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "short" })
@@ -79,6 +84,25 @@ export function rowIdOf(row: OutputAggRowDto): string {
 /** A stable empty array — a fresh [] every render would refilter on every keystroke. */
 const NO_QUICK_FILTER: string[] = Object.freeze([]) as string[];
 
+/** "m1".."m12" → 0-based month. Replaces a `/^m(\d{1,2})$/` exec that ran per
+ *  visible cell per render in getCellClassName, and again on every cell click. */
+const MONTH_INDEX_BY_FIELD = new Map(
+  MONTH_SHORT.map((_name, index) => [`m${index + 1}`, index])
+);
+
+/** Read once, at mount — MUI never reacts to later changes — so it belongs at
+ *  module scope rather than being rebuilt in the render body. Not a perf fix:
+ *  a fresh literal per render cost one allocation and no grid work. */
+const INITIAL_STATE = {
+  aggregation: {
+    model: Object.fromEntries([
+      ...MONTH_SHORT.map((_name, index) => [`m${index + 1}`, "sum"] as const),
+      ["total", "sum"] as const,
+    ]),
+  },
+  pinnedColumns: { right: ["total"] },
+};
+
 export default function ResultsGrid({
   rows,
   loading,
@@ -87,6 +111,12 @@ export default function ResultsGrid({
   quickFilter,
   showDescriptions,
 }: ResultsGridProps) {
+  const apiRef = useGridApiRef();
+
+  // Quick-filter text per row, cached on the row object itself so a recalc
+  // (which produces new rows) invalidates it and nothing else has to.
+  const searchTextByRow = useMemo(() => new WeakMap<ResultRow, string>(), []);
+
   const columns = useMemo<GridColDef<ResultRow>[]>(() => {
     const numberColumn = (
       field: string,
@@ -160,8 +190,17 @@ export default function ResultsGrid({
         // The chips are drawn by renderCell; this is what the search box reads.
         // Both halves of the cell answer it: a block name finds every row that
         // block feeds, and "manual" / "alloc" finds every row of that origin.
-        valueGetter: (_value, row) =>
-          [...(row?.sources ?? []), ...(row?.blockLabels ?? [])].join(" "),
+        // Cached per row object (the same WeakMap idiom PositionsGrid uses for
+        // its action items): two array spreads and a join per visible cell per
+        // render is real work for a string that only changes when the row does.
+        valueGetter: (_value, row) => {
+          if (!row) return "";
+          const cached = searchTextByRow.get(row);
+          if (cached !== undefined) return cached;
+          const text = [...(row.sources ?? []), ...(row.blockLabels ?? [])].join(" ");
+          searchTextByRow.set(row, text);
+          return text;
+        },
         // Grouping rows have no sources of their own; leaving them blank is
         // honest — the group is a sum, not a thing with an origin.
         renderCell: (params) =>
@@ -181,7 +220,9 @@ export default function ResultsGrid({
       ),
       numberColumn("total", "Year"),
     ];
-  }, []);
+    // searchTextByRow is a stable WeakMap — listed so the closure is honest,
+    // never a reason to rebuild.
+  }, [searchTextByRow]);
 
   /**
    * Department code → description, taken off the rows themselves rather than
@@ -248,26 +289,27 @@ export default function ResultsGrid({
     [hiddenColumns, showDescriptions]
   );
 
-  const handleCellClick: GridEventListener<"cellClick"> = (params) => {
-    const field = String(params.field);
-    // The grouping column and the group rows themselves: explain the whole
-    // department rather than one account.
-    if (!params.row?.months) {
-      const dept = String(
-        (params.row as { dept?: unknown })?.dept ?? params.id ?? ""
-      ).replace(/^dept\//, "");
-      onSelect({ dept, account: "", month: null, isDeptGroup: true });
-      return;
-    }
+  const handleCellClick: GridEventListener<"cellClick"> = useCallback(
+    (params) => {
+      // The grouping column and the group rows themselves: explain the whole
+      // department rather than one account.
+      if (!params.row?.months) {
+        const dept = String(
+          (params.row as { dept?: unknown })?.dept ?? params.id ?? ""
+        ).replace(/^dept\//, "");
+        onSelect({ dept, account: "", month: null, isDeptGroup: true });
+        return;
+      }
 
-    const monthMatch = /^m(\d{1,2})$/.exec(field);
-    onSelect({
-      dept: params.row.dept,
-      account: params.row.account,
-      month: monthMatch ? Number(monthMatch[1]) - 1 : null,
-      isDeptGroup: false,
-    });
-  };
+      onSelect({
+        dept: params.row.dept,
+        account: params.row.account,
+        month: MONTH_INDEX_BY_FIELD.get(String(params.field)) ?? null,
+        isDeptGroup: false,
+      });
+    },
+    [onSelect]
+  );
 
   const selectedRowId: GridRowId | null = selection
     ? selection.isDeptGroup
@@ -275,56 +317,74 @@ export default function ResultsGrid({
       : `${selection.dept}|${selection.account}`
     : null;
 
+  // Runs per visible cell per render — seventeen columns × the viewport — so it
+  // gets a stable identity and a map lookup rather than an inline arrow that
+  // recompiles a regex on every cell.
+  const getCellClassName = useCallback(
+    (params: { id: GridRowId; field: string }) => {
+      if (!selection || params.id !== selectedRowId) return "";
+      const month = MONTH_INDEX_BY_FIELD.get(String(params.field)) ?? null;
+      const isYear = params.field === "total";
+      const wholeRow = selection.month === null;
+      return wholeRow
+        ? isYear || month !== null
+          ? "res-cell--selected"
+          : ""
+        : month === selection.month
+          ? "res-cell--selected"
+          : "";
+    },
+    [selection, selectedRowId]
+  );
+
+  // The wrapper anchors the selection readout; the grid itself gains no prop
+  // for it and never re-renders on account of it.
   return (
-    <DataGridPremium
-      rows={rows}
-      columns={columns}
-      loading={loading}
-      rowGroupingModel={["dept"]}
-      groupingColDef={groupingColDef}
-      defaultGroupingExpansionDepth={-1}
-      filterModel={filterModel}
-      // Non-negotiable while filterModel is passed: without it MUI treats the
-      // prop as the only truth and the filter panel stops working entirely.
-      onFilterModelChange={setPanelFilters}
-      columnVisibilityModel={columnVisibilityModel}
-      onColumnVisibilityModelChange={setHiddenColumns}
-      onCellClick={handleCellClick}
-      getCellClassName={(params) => {
-        if (!selection || params.id !== selectedRowId) return "";
-        const monthMatch = /^m(\d{1,2})$/.exec(String(params.field));
-        const month = monthMatch ? Number(monthMatch[1]) - 1 : null;
-        const isYear = params.field === "total";
-        const wholeRow = selection.month === null;
-        if (wholeRow ? isYear || month !== null : month === selection.month) {
-          return "res-cell--selected";
-        }
-        return "";
-      }}
-      initialState={{
-        aggregation: {
-          model: Object.fromEntries([
-            ...MONTH_SHORT.map((_name, index) => [`m${index + 1}`, "sum"]),
-            ["total", "sum"],
-          ]),
-        },
-        pinnedColumns: { right: ["total"] },
-      }}
-      rowHeight={32}
-      columnHeaderHeight={40}
-      hideFooter
-      sx={{
-        borderRadius: 2,
-        "& .res-cell--num": {
-          fontFamily: "'IBM Plex Mono', monospace",
-          fontSize: "0.8125rem",
-        },
-        "& .res-cell--selected": {
-          backgroundColor: "action.selected",
-          fontWeight: 700,
-        },
-        "& .MuiDataGrid-cell": { cursor: "pointer" },
-      }}
-    />
+    <Box sx={{ position: "relative", height: "100%", width: "100%" }}>
+      <DataGridPremium
+        apiRef={apiRef}
+        rows={rows}
+        columns={columns}
+        loading={loading}
+        // Ranges, so a quarter of one account — or one month across several — can
+        // be totalled in place. The single-cell click that drives the inspector is
+        // untouched: onCellClick still fires, cell selection is layered over it.
+        cellSelection
+        // Without this the same click that selects a cell also selects its whole
+        // row, so two highlights compete with the inspector's own.
+        disableRowSelectionOnClick
+        rowGroupingModel={["dept"]}
+        groupingColDef={groupingColDef}
+        defaultGroupingExpansionDepth={-1}
+        filterModel={filterModel}
+        // Non-negotiable while filterModel is passed: without it MUI treats the
+        // prop as the only truth and the filter panel stops working entirely.
+        onFilterModelChange={setPanelFilters}
+        columnVisibilityModel={columnVisibilityModel}
+        onColumnVisibilityModelChange={setHiddenColumns}
+        onCellClick={handleCellClick}
+        getCellClassName={getCellClassName}
+        initialState={INITIAL_STATE}
+        rowHeight={32}
+        columnHeaderHeight={40}
+        hideFooter
+        sx={{
+          borderRadius: 2,
+          // Required by cellSelection — see where it is defined.
+          ...(CELL_SELECTION_PERF_SX as object),
+          "& .res-cell--num": {
+            fontFamily: "'IBM Plex Mono', monospace",
+            fontSize: "0.8125rem",
+          },
+          "& .res-cell--selected": {
+            backgroundColor: "action.selected",
+            fontWeight: 700,
+          },
+          "& .MuiDataGrid-cell": { cursor: "pointer" },
+        }}
+      />
+      {/* No footer on this grid — just clear of the horizontal scrollbar. */}
+      <CellSelectionStats apiRef={apiRef} bottom={20} />
+    </Box>
   );
 }

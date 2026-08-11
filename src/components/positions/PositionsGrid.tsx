@@ -8,7 +8,7 @@
  * closes typing AND paste in one place.
  */
 
-import { useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useMemo, useRef } from "react";
 import CircularProgress from "@mui/material/CircularProgress";
 import Tooltip from "@mui/material/Tooltip";
 import Box from "@mui/material/Box";
@@ -52,7 +52,7 @@ import { AccountOption, DepartmentOption } from "../../shared/mappingTables/type
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
 import { clusterMapById } from "../../shared/hotelClusters/resolve";
 import { BlockDto } from "../../shared/blocks/ipc";
-import { BlockResultsById } from "../../shared/positions/liveSim";
+import type { DerivedRowValuesRef } from "../../shared/positions/derivedRowValues";
 import { PositionRow } from "../../shared/positions/rowModel";
 import {
   departmentCodeOf,
@@ -62,6 +62,10 @@ import {
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { RowSaveStatus } from "../../services/positionsWriteQueue";
+import CellSelectionStats, {
+  CELL_SELECTION_PERF_SX,
+} from "../common/CellSelectionStats";
+import { makeCellRangePasteSplitter } from "../common/cellRangePaste";
 import {
   buildColumnGroupingModel,
   buildColumns,
@@ -124,27 +128,9 @@ function rowClassNameFor(
 
 const GRID_SX: SxProps<Theme> = {
   borderRadius: 2,
-  // Why the grid is permanently unselectable — this is a performance fix, not
-  // a styling choice.
-  //
-  // With `cellSelection` on, MUI adds `root--disableUserSelection` to the grid
-  // ROOT on cellMouseDown and removes it on mouseup (useGridCellSelection), to
-  // stop a range drag from also dragging a text selection. That class sets
-  // `user-select: none`, which is an INHERITED property — so flipping it on the
-  // root makes the browser re-propagate computed style to every descendant.
-  // At a full viewport that is ~1000 cells, twice per click and four times per
-  // double click, and it is the whole reason clicking a cell lags while arrow
-  // keys (which never touch the class) stay instant.
-  //
-  // Declaring it here means the root's computed value is already `none`, so
-  // MUI's toggle no longer changes anything and the recalculation stops at the
-  // root. Nothing is lost: a cellSelection grid never allowed drag-to-select
-  // text anyway — that is precisely what MUI was toggling the class to prevent
-  // — and Ctrl+C still copies through the grid's own clipboard handling.
-  userSelect: "none",
-  // Editors are the exception: text inside an open cell editor must still be
-  // selectable, and `user-select` would otherwise inherit straight into them.
-  "& input, & textarea": { userSelect: "text" },
+  // Why the grid is permanently unselectable: a performance fix every
+  // cellSelection grid needs, explained where it is defined.
+  ...(CELL_SELECTION_PERF_SX as object),
   // renderHeader owns the column title's typography (see columnFactory);
   // this only styles the titles the grid draws itself — the group bands.
   "& .MuiDataGrid-columnHeader": { padding: "0 8px" },
@@ -273,13 +259,17 @@ export interface PositionsGridProps {
   /** Whole account_maps cache for the account type-aheads; empty = free-text
    *  fallback. Each account field narrows it to its own subset (A9…, A5…). */
   accounts: AccountOption[];
-  /** Engine-simulated vacation cost per row id — feeds the Vacation Cost column. */
-  vacationCostById: ReadonlyMap<string, number>;
-  /** Calendar-derived Manhours Worked per row id — shown when the cell has no
-   *  manual override. */
-  manhoursWorkedById: ReadonlyMap<string, number>;
-  /** Derived FTE per row id — feeds the read-only FTE column. */
-  fteById: ReadonlyMap<string, number>;
+  /**
+   * Vacation cost, derived manhours, derived FTE and live block totals per row
+   * — everything the grid shows but does not store.
+   *
+   * One ref rather than four maps because all four change on every committed
+   * edit: as props they were column-memo dependencies, so a single cell commit
+   * rebuilt ~100 colDefs and re-rendered every mounted row. The ref's identity
+   * never changes, so the columns survive; the cell callbacks read through it
+   * when they run. See shared/positions/derivedRowValues.
+   */
+  derived: DerivedRowValuesRef;
   /** Hotel-cluster definitions for the Cluster picker + Multiplier column;
    *  empty until loaded (the Cluster field then degrades to plain text). */
   hotelClusters: HotelClusterDto[];
@@ -289,8 +279,6 @@ export interface PositionsGridProps {
   hotelNames?: ReadonlyMap<string, string>;
   /** The hotel's blocks — each renders as a column band after the sections. */
   blocks: BlockDto[];
-  /** Live-sim results feeding every block's Total column; null while loading. */
-  blockResults: BlockResultsById | null;
   masked: boolean;
   /**
    * What this user may write, from the published plan's
@@ -490,19 +478,16 @@ function StatusCell({ status }: { status: RowSaveStatus | undefined }) {
   }
 }
 
-export default function PositionsGrid({
+function PositionsGrid({
   rows,
   catalog,
   departments,
   accounts,
-  vacationCostById,
-  manhoursWorkedById,
-  fteById,
+  derived,
   hotelClusters,
   currentOu,
   hotelNames,
   blocks,
-  blockResults,
   masked,
   writePolicy,
   departmentPicks,
@@ -532,6 +517,19 @@ export default function PositionsGrid({
   onManageColumns,
   onEditBlock,
 }: PositionsGridProps) {
+  // How many times this component rendered, in dev only (statically eliminated
+  // from production). Pairs with the [liveSim] line on the Positions page: a
+  // committed edit should move this by one (two under StrictMode), and an
+  // unrelated toast or dialog should not move it at all. Deliberately per
+  // COMPONENT, never per row or per cell — electron-log writes to disk, and a
+  // per-cell log turns a slow frame into thousands of writes and makes the app
+  // look hung, which misattributes the very problem you are measuring.
+  const renderCount = useRef(0);
+  if (import.meta.env.DEV) {
+    renderCount.current += 1;
+    console.debug(`[grid] render #${renderCount.current} — ${rows.length} rows`);
+  }
+
   const numberFormat = useMemo(() => new Intl.NumberFormat(), []);
 
   const controlKeys = useMemo(
@@ -802,16 +800,21 @@ export default function PositionsGrid({
     // The gutter's members lead the array, which is the only thing keeping them
     // together now that nothing is pinned.
     const [controlColumns, dataColumns] = partition(
-      buildColumns(catalog, { masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames }),
+      buildColumns(catalog, { masked, numberFormat, departments, departmentPicks, accounts, derived, hotelClusters, currentOu, hotelNames }),
       (column) => controlKeys.has(column.field)
     );
 
     // Block bands trail the catalog sections — user-defined calculations after
     // the built-in data, in the user's own order.
-    const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, blockResults });
+    const blockColumns = buildBlockColumns(blocks, { numberFormat, accounts, departments, derived });
 
     return [statusColumn, ...controlColumns, actionsColumn, ...dataColumns, ...blockColumns];
-  }, [catalog, controlKeys, masked, numberFormat, departments, departmentPicks, accounts, vacationCostById, manhoursWorkedById, fteById, hotelClusters, currentOu, hotelNames, blocks, blockResults, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable, lockReasonByDepartment, onRecheckAccess]);
+    // `derived` is a ref whose identity never changes — it is listed for
+    // honesty, not because it can fire. Nothing left in this array moves on a
+    // committed cell edit, which is the point: rebuilding these ~100 colDefs
+    // re-runs MUI's whole column pipeline and re-renders every mounted row.
+    // Before adding a dependency here, check it cannot change per edit.
+  }, [catalog, controlKeys, masked, numberFormat, departments, departmentPicks, accounts, derived, hotelClusters, currentOu, hotelNames, blocks, statusByRow, onDuplicate, onDelete, onEditRow, rowWritable, lockReasonByDepartment, onRecheckAccess]);
 
   const columnGroupingModel = useMemo(
     () => [
@@ -1025,37 +1028,10 @@ export default function PositionsGrid({
     ]
   );
 
-  // One copied row fills every row of the pasted-into range.
-  //
-  // MUI already does exactly this — but only in defaultPasteResolver's
-  // row-selection branch ("If only one row is pasted - paste it to all selected
-  // rows"). `cellSelection` sends a dragged range down the earlier cell branch
-  // instead, which indexes pastedData[rowIndex], so copying one row of a
-  // twelve-month family into a four-row range fills the first row and silently
-  // skips the rest. Repeating the row to the height of the range makes the two
-  // branches agree.
-  //
-  // Hooked here rather than on keydown because splitClipboardPastedText is the
-  // one supported seam ahead of the resolver, and it only runs on Ctrl+V —
-  // nothing is added to the render, scroll or typing paths.
-  const splitClipboardPastedText = useCallback(
-    (text: string, delimiter = "\t") => {
-      const rows = text
-        // Excel on Windows appends a trailing newline (MUI's own default does
-        // this too — this callback replaces that default wholesale).
-        .replace(/\r?\n$/, "")
-        .split(/\r\n|\n|\r/)
-        .map((row) => row.split(delimiter));
-      // A single cell already fills a whole range (isSingleValuePasted), and a
-      // genuine multi-row clipboard must keep mapping 1:1 — leave both alone.
-      if (rows.length !== 1 || rows[0].length < 2) return rows;
-      const selected = apiRef.current?.getSelectedCellsAsArray() ?? [];
-      const rowCount = new Set(selected.map((cell) => cell.id)).size;
-      if (rowCount < 2) return rows;
-      // Copies, not the same array n times: the resolver's other branch
-      // consumes rows with pastedData.shift().
-      return Array.from({ length: rowCount }, () => rows[0].slice());
-    },
+  // One copied row fills every row of the pasted-into range — see the shared
+  // helper for why `cellSelection` needs this at all.
+  const splitClipboardPastedText = useMemo(
+    () => makeCellRangePasteSplitter(apiRef),
     [apiRef]
   );
 
@@ -1148,43 +1124,64 @@ export default function PositionsGrid({
     return healNewColumn(healed, "standardJobTitle", "payType");
   }, []);
 
+  // The wrapper exists only to anchor the selection readout, which is absolutely
+  // positioned. It adds a DOM node and nothing else: no state, no prop on the
+  // grid, and the pill re-renders on its own without involving either.
   return (
-    <DataGridPremium
-      apiRef={apiRef}
-      rows={gridRows}
-      columns={columns}
-      loading={loading}
-      columnGroupingModel={columnGroupingModel}
-      slots={slots}
-      rowGroupingModel={rowGroupingModel}
-      cellSelection
-      checkboxSelection
-      // No frozen columns: a pinned band renders as its own grid section on
-      // every scroll and buys little at this width. Off wholesale rather than
-      // merely unpinned, so the column menu stops offering it and no saved
-      // layout can quietly bring the split back.
-      disableColumnPinning
-      // Clicking a cell must not clear a selection the user built to act on.
-      disableRowSelectionOnClick
-      onRowSelectionModelChange={handleSelectionChange}
-      rowHeight={ROW_HEIGHT}
-      columnHeaderHeight={HEADER_HEIGHT}
-      columnGroupHeaderHeight={GROUP_HEADER_HEIGHT}
-      isCellEditable={isCellEditable}
-      onCellDoubleClick={handleCellDoubleClick}
-      onCellKeyDown={handleCellKeyDown}
-      processRowUpdate={onRowUpdate}
-      onProcessRowUpdateError={onRowUpdateError}
-      onClipboardPasteStart={onPasteStart}
-      onClipboardPasteEnd={onPasteEnd}
-      splitClipboardPastedText={splitClipboardPastedText}
-      initialState={initialState}
-      getRowClassName={getRowClassName}
-      filterModel={gridFilterModel}
-      // Non-negotiable while filterModel is passed: without it MUI treats the
-      // model as controlled-with-no-owner and drops every write the panel makes.
-      onFilterModelChange={onFilterModelChange}
-      sx={GRID_SX}
-    />
+    <Box sx={{ position: "relative", height: "100%", width: "100%" }}>
+      <DataGridPremium
+        apiRef={apiRef}
+        rows={gridRows}
+        columns={columns}
+        loading={loading}
+        columnGroupingModel={columnGroupingModel}
+        slots={slots}
+        rowGroupingModel={rowGroupingModel}
+        cellSelection
+        checkboxSelection
+        // No frozen columns: a pinned band renders as its own grid section on
+        // every scroll and buys little at this width. Off wholesale rather than
+        // merely unpinned, so the column menu stops offering it and no saved
+        // layout can quietly bring the split back.
+        disableColumnPinning
+        // Clicking a cell must not clear a selection the user built to act on.
+        disableRowSelectionOnClick
+        onRowSelectionModelChange={handleSelectionChange}
+        rowHeight={ROW_HEIGHT}
+        columnHeaderHeight={HEADER_HEIGHT}
+        columnGroupHeaderHeight={GROUP_HEADER_HEIGHT}
+        isCellEditable={isCellEditable}
+        onCellDoubleClick={handleCellDoubleClick}
+        onCellKeyDown={handleCellKeyDown}
+        processRowUpdate={onRowUpdate}
+        onProcessRowUpdateError={onRowUpdateError}
+        onClipboardPasteStart={onPasteStart}
+        onClipboardPasteEnd={onPasteEnd}
+        splitClipboardPastedText={splitClipboardPastedText}
+        initialState={initialState}
+        getRowClassName={getRowClassName}
+        filterModel={gridFilterModel}
+        // Non-negotiable while filterModel is passed: without it MUI treats the
+        // model as controlled-with-no-owner and drops every write the panel makes.
+        onFilterModelChange={onFilterModelChange}
+        sx={GRID_SX}
+      />
+      {/* Cleared of the footer, which prints the row and selected-row counts. */}
+      <CellSelectionStats apiRef={apiRef} bottom={56} />
+    </Box>
   );
 }
+
+/**
+ * Memoized because the page that owns it holds ~45 pieces of unrelated state —
+ * toasts, dialogs, snackbars, the pending-delete confirm — and every one of them
+ * re-rendered this grid for nothing. Worth doing only now that the four derived
+ * maps are behind one stable ref: while they were props, every prop-identity
+ * check here failed on every edit anyway.
+ *
+ * The remaining props that legitimately move (`rows`, `quickFilter`,
+ * `filterModel`, `loading`, `restoredState`) are exactly the ones that SHOULD
+ * re-render it. Verify with the dev render counter above: a toast must not move
+ * it, a committed edit must move it by one.
+ */
+export default memo(PositionsGrid);

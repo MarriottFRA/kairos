@@ -109,6 +109,65 @@ describe("serverOnly tri-state", () => {
     expect(result.serverOnly[0].action).toBe("purge");
   });
 
+  /**
+   * The premise behind the bottom row of that table is that a row is missing
+   * from our manifest because we DELETED it. There is a second reason: we were
+   * never allowed to download it. A delegate made the plan's owner holds a
+   * manifest covering one department, and every row in the other twenty-nine is
+   * `serverOnly` far below their watermark.
+   */
+  describe("when the read scope has just widened", () => {
+    it("downloads rows below the watermark instead of purging them", async () => {
+      const db = makeDb(50);
+      const client = stubClient({
+        serverOnly: [["position", "never-mine", "h5", 30, 0]],
+      });
+
+      const result = await reconcilePlan(db, client, PLAN, true);
+
+      expect(result.serverOnly[0].action).toBe("pull");
+      expect(result.purges).toHaveLength(0);
+    });
+
+    it("still records a tombstone as a tombstone", async () => {
+      // A deletion the server reports is a deletion whatever our scope did.
+      const db = makeDb(50);
+      const client = stubClient({
+        serverOnly: [["position", "dead", "h1", 20, 1]],
+      });
+
+      const result = await reconcilePlan(db, client, PLAN, true);
+
+      expect(result.serverOnly[0].action).toBe("record-tombstone");
+    });
+
+    it("recommends the full pull that the ratio alone cannot reach", async () => {
+      // Every newly-visible row is OLDER than the watermark, so `toPull` is
+      // zero and the ratio concludes there is nothing to do — the one case
+      // where the remedy is exactly the thing it would not offer.
+      const db = makeDb(50);
+      const client = stubClient({
+        serverOnly: [["position", "never-mine", "h5", 30, 0]],
+      });
+
+      const result = await reconcilePlan(db, client, PLAN, true);
+
+      expect(result.suggestFullPull).toBe(true);
+    });
+
+    it("changes nothing when the scope did not move", async () => {
+      const db = makeDb(50);
+      const client = stubClient({
+        serverOnly: [["position", "purged", "h3", 30, 0]],
+      });
+
+      const result = await reconcilePlan(db, client, PLAN, false);
+
+      expect(result.serverOnly[0].action).toBe("purge");
+      expect(result.suggestFullPull).toBe(false);
+    });
+  });
+
   it("reports rows the server does not have at our hash", async () => {
     const db = makeDb(50);
     const client = stubClient({

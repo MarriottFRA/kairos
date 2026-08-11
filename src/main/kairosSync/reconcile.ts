@@ -28,6 +28,22 @@
  * Without `deleted`, every reconcile re-downloads every tombstone forever.
  * Without `serverSeq`, "I already deleted this" is indistinguishable from "I
  * have never seen this", and a purge would resurrect-then-kill rows on a loop.
+ *
+ * ## The third reading of an absent row
+ *
+ * That table has one unstated premise: that our manifest is missing a row
+ * because we DELETED it. There is a second reason it can be missing — we were
+ * never allowed to download it. A delegate holds a slice of the plan, so every
+ * row in every other department is `serverOnly` with a `serverSeq` far below
+ * their watermark, and the bottom row of the table reads all of them as
+ * deletions.
+ *
+ * That never mattered while scope only narrowed. It does now: a delegate can
+ * become the plan's OWNER, and their next reconcile would report every row in
+ * the twenty-nine departments they never held as a pending purge — while
+ * `suggestFullPull` stayed false, because `toPull` is zero, so the one remedy
+ * that fixes it was the one thing not offered. `scopeWidened` is how the caller
+ * says the premise does not hold, and the whole bottom row flips to `pull`.
  */
 
 import type Database from "better-sqlite3-multiple-ciphers";
@@ -75,10 +91,16 @@ export interface ReconcileResult {
  */
 const FULL_PULL_RATIO = 0.5;
 
+/**
+ * @param scopeWidened The caller may now read more of this plan than the
+ * manifest was built from, so an absent row is not evidence of a deletion. See
+ * the module docstring, and `readScopeWidened` for how it is decided.
+ */
 export async function reconcilePlan(
   db: Db,
   client: KairosClient,
-  planId: string
+  planId: string,
+  scopeWidened = false
 ): Promise<ReconcileResult> {
   const manifest = buildManifest(db, planId);
   const watermark = getSyncState(db, planId)?.watermark ?? 0;
@@ -88,7 +110,9 @@ export async function reconcilePlan(
     { entities: manifest }
   );
 
-  const serverOnly = response.serverOnly.map((row) => classify(row, watermark));
+  const serverOnly = response.serverOnly.map((row) =>
+    classify(row, watermark, scopeWidened)
+  );
   const purges = serverOnly
     .filter((row) => row.action === "purge")
     .map<CommitEntity>((row) => ({
@@ -137,22 +161,34 @@ export async function reconcilePlan(
     serverOnly,
     truncated: response.truncated,
     purges,
-    suggestFullPull: toPull / denominator > FULL_PULL_RATIO,
+    // A widened scope is a full pull by definition — the rows we have just been
+    // given sight of are older than our watermark to a row, so the ratio below
+    // can only ever measure them at zero and conclude there is nothing to do.
+    suggestFullPull: scopeWidened || toPull / denominator > FULL_PULL_RATIO,
   };
 }
 
 /** The tri-state from §3.4, as one function so the table has exactly one home. */
-function classify(row: ServerOnlyRow, watermark: number): ServerOnlyAction {
+function classify(
+  row: ServerOnlyRow,
+  watermark: number,
+  scopeWidened: boolean
+): ServerOnlyAction {
   const [entityType, entityId, hash, serverSeq, deleted] = row;
+  const seq = Number(serverSeq ?? 0);
   return {
     entityType: String(entityType),
     entityId: String(entityId),
     hash: String(hash ?? ""),
-    serverSeq: Number(serverSeq ?? 0),
+    serverSeq: seq,
     action:
       deleted === 1
         ? "record-tombstone"
-        : Number(serverSeq ?? 0) > watermark
+        : // Below the watermark normally means "we saw it and deleted it". Under
+          // a widened scope it means "we were not allowed to see it", and the
+          // difference between those two readings is a purge of somebody else's
+          // department against a download of it.
+          seq > watermark || scopeWidened
           ? "pull"
           : "purge",
   };

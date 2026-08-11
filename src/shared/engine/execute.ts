@@ -5,6 +5,12 @@
  * straight into the persistent line matrix. A single scratch Float64Array is
  * reused across positions, so the hot loop allocates nothing.
  *
+ * This file reads ONLY typed arrays off the plan — no CostComponentDefinition,
+ * no string, no Map. Everything that needed a definition (which lines the count
+ * multiplier scales) is resolved at compile time into a typed array. Keep it
+ * that way: it is what lets the whole state be handed to a Worker, and what
+ * keeps V8 from deoptimizing this function on a polymorphic object access.
+ *
  * IMPORTANT: every arithmetic expression here mirrors reference.ts term for
  * term and in the same association order — the parity tests assert
  * bit-identical output. If you change a formula, change reference.ts first
@@ -65,6 +71,7 @@ const OP_ACC_CLEAR = Op.ACC_CLEAR;
 const OP_ACC_ADD_GROSS = Op.ACC_ADD_GROSS;
 const OP_ACC_ADD_LINE = Op.ACC_ADD_LINE;
 const OP_ACC_ADD_DAYS = Op.ACC_ADD_DAYS;
+const OP_ACC_ADD_SERVICE = Op.ACC_ADD_SERVICE;
 const OP_ACC_ADD_VAC = Op.ACC_ADD_VAC;
 const OP_PCT_OF_ACC = Op.PCT_OF_ACC;
 const OP_WEIGHT_BY_ACC = Op.WEIGHT_BY_ACC;
@@ -282,6 +289,17 @@ export function executePosition(
         break;
       }
 
+      case OP_ACC_ADD_SERVICE: {
+        // Length of service in calendar days, already resolved to the right
+        // series (month increment or running total) at compile time — see the
+        // SERVICE branch in compile.emitSelector, which also applies the
+        // inactive-month gate — nothing left to scale here.
+        for (let m = 0; m < MONTHS; m++) {
+          scratch[SCRATCH_ACC + m] += paramPool[pp + m];
+        }
+        break;
+      }
+
       case OP_ACC_ADD_VAC: {
         for (let m = 0; m < MONTHS; m++) {
           scratch[SCRATCH_ACC + m] += scratch[SCRATCH_VAC + m];
@@ -490,17 +508,19 @@ export function executePosition(
   // HEADCOUNT stat is exempt from BOTH (it already emits the count itself,
   // and a shared person still counts as one head wherever they sit); KPI
   // lines are absolute (whole-line amount), not per-head, so they stay exempt
-  // too. Mirrors referencePosition; keep the two in lockstep.
+  // too, as do ratios (countExempt).
+  //
+  // Which defs are exempt is resolved at compile time into `countScaled` — the
+  // three predicates are definition-derived, and reading them off objects here
+  // was the only place this function touched anything but a typed array.
+  // Mirrors referencePosition, which keeps the predicates in full; keep the two
+  // in lockstep.
   const coeff = plan.posHeadcount[p] * plan.posWeight[p];
   if (coeff !== 1) {
-    const defs = plan.componentDefs;
-    const defCount = defs.length;
+    const countScaled = plan.countScaled;
+    const defCount = countScaled.length;
     for (let di = 0; di < defCount; di++) {
-      const def = defs[di];
-      if (def.kind === "STAT" && def.statKind === "HEADCOUNT") continue;
-      if (def.spreadMethod === "DIRECT_ABS") continue;
-      // Ratios opt out — see CostComponentDefinition.countExempt.
-      if (def.countExempt) continue;
+      if (countScaled[di] === 0) continue;
       const lineOfs = (p * defCount + di) * MONTHS;
       for (let m = 0; m < MONTHS; m++) values[lineOfs + m] *= coeff;
     }

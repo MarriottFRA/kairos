@@ -228,4 +228,46 @@ describe("fetchHeads", () => {
       expect(second.lockedPlans.map((plan) => plan.id)).toEqual([LOCKED_PLAN]);
     });
   });
+
+  /**
+   * The revoked-delegation banner is a claim the server is allowed to retract.
+   *
+   * It is written by whichever call happened to catch the 403, and until the
+   * probe learned to clear it the ONLY thing that did was a successful publish
+   * — so a delegate who was withdrawn and then re-granted, or handed the plan
+   * outright, kept a blocking "your access was withdrawn" banner over a plan
+   * they could read, with no action offered that would clear it.
+   */
+  describe("a recorded revocation", () => {
+    function withRevocation(db: Db, planId: string): void {
+      db.prepare(
+        `INSERT INTO kairos_sync_state (plan_id, ou, revoked_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(plan_id) DO UPDATE SET revoked_json = excluded.revoked_json`
+      ).run(planId, OU, JSON.stringify({ revokedAt: "2026-08-07T09:00:00Z" }));
+    }
+
+    it("is retracted once the plan comes back readable", async () => {
+      const db = makeDb();
+      withRevocation(db, PLAN);
+      const { client } = stubClient([{ status: 200 }]);
+
+      await fetchHeads(db, client, OU);
+
+      expect(getSyncState(db, PLAN)?.revokedJson).toBeNull();
+    });
+
+    it("survives while the plan is still not shared", async () => {
+      // The `canRead` gate skips these before the clear, which is what makes
+      // the retraction safe: reaching it means the server is serving the plan
+      // to this caller by SOME route, so the banner is contradicted.
+      const db = makeDb();
+      withRevocation(db, LOCKED_PLAN);
+      const { client } = stubClient([{ status: 200 }], WITH_LOCKED);
+
+      await fetchHeads(db, client, OU);
+
+      expect(getSyncState(db, LOCKED_PLAN)?.revokedJson).not.toBeNull();
+    });
+  });
 });

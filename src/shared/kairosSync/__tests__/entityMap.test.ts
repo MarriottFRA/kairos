@@ -92,6 +92,7 @@ const SAMPLES: Record<PublishedEntityType, Row> = {
     ss_opening_base: 1000,
     account_code: "A6100",
     stats_account_code: null,
+    department_code: "D0910",
     updated_at: "2026-07-01T10:00:00.000Z",
     deleted_at: null,
   },
@@ -162,6 +163,35 @@ describe("payload round trip", () => {
       expect(canonicalJson(payload)).toBe(original);
     });
   }
+});
+
+describe("per-row department override", () => {
+  it("travels as departmentOverride, never as the reserved departmentCode", () => {
+    // `departmentCode` is the ONE key the server reads out of a payload: it is
+    // authorisation metadata and must agree with the envelope's department. A
+    // component_value inherits its department from the parent position and
+    // sends department: null, while THIS value is deliberately allowed to
+    // differ from the row's department — so it must not claim that name.
+    const payload = ENTITY_SPECS.component_value.toPayload(SAMPLES.component_value);
+    expect(payload.departmentOverride).toBe("D0910");
+    expect(payload).not.toHaveProperty("departmentCode");
+  });
+
+  it("survives the round trip back onto the column", () => {
+    const spec = ENTITY_SPECS.component_value;
+    const row = spec.fromPayload(spec.toPayload(SAMPLES.component_value));
+    expect(row.department_code).toBe("D0910");
+  });
+
+  it("keeps null as null rather than inventing a department", () => {
+    const spec = ENTITY_SPECS.component_value;
+    const payload = spec.toPayload({
+      ...SAMPLES.component_value,
+      department_code: null,
+    });
+    expect(payload.departmentOverride).toBeNull();
+    expect(spec.fromPayload(payload).department_code).toBeNull();
+  });
 });
 
 describe("id conventions", () => {

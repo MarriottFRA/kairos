@@ -128,6 +128,16 @@ export const CALENDAR_SERIES_ARG: Record<CalendarSeries, number> = {
   HOLIDAY_DAYS: 2,
 };
 
+/** Which length-of-service series a SERVICE base reads. MONTH is the month's
+ *  own increment, TOTAL the running service to date. See BaseSelector. */
+export type ServiceMode = "MONTH" | "TOTAL";
+
+/** ACC_ADD_SERVICE's arg0 encoding — the wire form of ServiceMode. */
+export const SERVICE_MODE_ARG: Record<ServiceMode, number> = {
+  MONTH: 0,
+  TOTAL: 1,
+};
+
 /**
  * Which monthly series feeds a PERCENT_OF / WEIGHTED_BY_BASE spread or a
  * social-security contribution base.
@@ -152,6 +162,18 @@ export type BaseSelector =
   | { kind: "BASE_SALARY" }
   | { kind: "COMPONENTS"; componentIds: ComponentDefId[] }
   | { kind: "CALENDAR"; series: CalendarSeries }
+  /**
+   * Length of service, in pure calendar days from the position's hiring date —
+   * the base for end-of-service / indemnity accruals, which are written against
+   * service, not attendance. MONTH is the days falling in that month (zero
+   * before the hiring month, partial in it); TOTAL is the running service to
+   * the end of that month, prior years included.
+   *
+   * Unlike CALENDAR this is per-position, counts non-working days, and is
+   * gated by seasonality rather than scaled by it — see serviceSeries. A
+   * position with no hiring date resolves to zero in every month.
+   */
+  | { kind: "SERVICE"; mode: ServiceMode }
   | { kind: "VACATION" }
   /**
    * The Social-Security contributory base, decomposed. `includeBaseSalary` adds
@@ -308,6 +330,51 @@ export function bankHolidayCoefficient(
     : coverage * payRate;
 }
 
+/**
+ * The SERVICE base resolved to twelve numbers for one position.
+ *
+ * MONTH is the position's per-month service days; TOTAL runs them up from the
+ * prior-years carry-in, so month m holds the service accrued to the END of
+ * month m. A position with no hiring date carries no series and resolves to
+ * zeros — see serviceDaysPerMonth on Position.
+ *
+ * WHOLE calendar days, never scaled by seasonality — a day of service is a day
+ * whether or not it was worked, and 0.6 of a statutory day means nothing. But
+ * an INACTIVE month (seasonality 0) is gated to zero and does not accrue: the
+ * engine's standing invariant is that a position not in the plan for a month
+ * costs nothing that month, and an indemnity line is no exception. For the
+ * ordinary all-active row the two rules coincide exactly.
+ *
+ * Shared by the compiler and the reference implementation for the same reason
+ * bankHolidayCoefficient is: the parity test between them only means something
+ * if they compute this the same way, once. The date → per-month step lives one
+ * layer out in shared/positions/serviceDays.ts, so the engine stays PII-free.
+ */
+export function serviceSeries(
+  position: Pick<Position, "serviceDaysPerMonth" | "serviceDaysOpening" | "seasonality">,
+  mode: ServiceMode
+): number[] {
+  const perMonth = position.serviceDaysPerMonth;
+  const out = new Array<number>(MONTHS).fill(0);
+  if (!perMonth) return out;
+  if (mode === "MONTH") {
+    for (let m = 0; m < MONTHS; m++) {
+      out[m] = position.seasonality[m] > 0 ? perMonth[m] ?? 0 : 0;
+    }
+    return out;
+  }
+  let running = position.serviceDaysOpening ?? 0;
+  for (let m = 0; m < MONTHS; m++) {
+    if (position.seasonality[m] <= 0) {
+      out[m] = 0; // not in the plan this month — no accrual, no liability booked
+      continue;
+    }
+    running += perMonth[m] ?? 0;
+    out[m] = running;
+  }
+  return out;
+}
+
 export interface SsBracket {
   /** Upper cumulative-base bound of the bracket; null = unbounded (∞). */
   upTo: number | null;
@@ -406,6 +473,21 @@ export interface Position extends SyncMeta {
   /** Vacation accrual: days accrued per month, valued at the same derived
    *  per-working-day base pay as vacation. */
   accrualDaysPerMonth: number;
+  /**
+   * Length of service in pure calendar days, resolved from the hiring date by
+   * the loaders (see shared/positions/serviceDays.ts) — the engine never sees
+   * the date itself, so ScenarioInput stays PII-free. Days per month of the
+   * plan year: zero before the hiring month, partial in it, the whole month
+   * after. Absent (or an unfilled hiring date) means zero service everywhere,
+   * which is what the SERVICE base then resolves to.
+   *
+   * Optional because it is derived, not stored: every construction site that
+   * predates the SERVICE base keeps working and simply has no service series.
+   */
+  serviceDaysPerMonth?: number[];
+  /** Service days accrued before 1 January of the plan year — the prior-years
+   *  carry-in that makes SERVICE/TOTAL a true length of service. Absent = 0. */
+  serviceDaysOpening?: number;
 }
 
 /** The user-entered amount wiring one SPREAD component to one position.
@@ -434,6 +516,11 @@ export interface ComponentValue extends SyncMeta {
    *  uses it instead of the definition's account. Loaders populate it only
    *  for "unlocked" blocks; values never change, only the aggregation key. */
   accountCode?: string;
+  /** Per-line department override: when defined, this line's dept×account key
+   *  uses it instead of the department the definition resolves. Loaders
+   *  populate it only for MULTIPLIER blocks in PER_ROW mode; like the account
+   *  override it moves the key and nothing else. */
+  departmentCode?: string;
   /** Resolution-only (never read by the compiler): the dual-block stat line's
    *  per-row account, consumed by resolveDualBlockValues before compile. */
   statsAccountCode?: string;

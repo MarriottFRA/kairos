@@ -25,6 +25,7 @@ function plan(overrides: Partial<PlanSyncStatus> = {}): PlanSyncStatus {
     readable: true,
     scopeKind: "FULL",
     departments: null,
+    scopeWidened: false,
     writeScope: "FULL",
     structureEditable: true,
     handbacksPending: 0,

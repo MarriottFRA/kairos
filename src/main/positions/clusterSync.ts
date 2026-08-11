@@ -767,6 +767,9 @@ function writeComponentValue(
     unitRate: "unit_rate",
     ssOpeningBase: "ss_opening_base",
     accountCode: "account_code",
+    // Department codes are global reference data (no ou column), so a per-row
+    // booking override means the same thing in every member hotel.
+    departmentCode: "department_code",
     statsAccountCode: "stats_account_code",
   };
   const entries = Object.entries(fields ?? {}).filter(

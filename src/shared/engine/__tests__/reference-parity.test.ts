@@ -61,7 +61,14 @@ describe("VM ↔ reference parity", () => {
     if (!("plan" in compiled)) throw new Error("compile failed");
     const result = simulate(compiled.plan);
 
-    // Rebuild the aggregation naively from reference outputs.
+    // Rebuild the aggregation naively from reference outputs. The dept/account
+    // rule below is the twin of compile.ts's — keep the two in lockstep.
+    const valueByKey = new Map(
+      input.componentValues.map((value) => [
+        `${value.positionId}|${value.componentDefId}`,
+        value,
+      ])
+    );
     const expected = new Map<string, number[]>();
     for (const position of input.positions) {
       const reference = referencePosition(
@@ -72,11 +79,14 @@ describe("VM ↔ reference parity", () => {
         input.componentValues
       );
       for (const def of input.definitions) {
+        const value = valueByKey.get(`${position.id}|${def.id}`);
         const dept =
-          def.departmentMode === "FIXED" && def.fixedDepartment
+          value?.departmentCode ??
+          (def.departmentMode === "FIXED" && def.fixedDepartment
             ? def.fixedDepartment
-            : position.departmentCode;
-        const key = `${dept}|${def.accountCode}`;
+            : position.departmentCode);
+        const account = value?.accountCode ?? def.accountCode;
+        const key = `${dept}|${account}`;
         const bucket = expected.get(key) ?? new Array(MONTHS).fill(0);
         const months = reference.lines.get(def.id)!;
         for (let m = 0; m < MONTHS; m++) bucket[m] += months[m];

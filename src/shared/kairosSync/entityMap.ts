@@ -354,6 +354,12 @@ export function componentValueToPayload(row: Row): EntityPayload {
     ssOpeningBase: nullableNum(row.ss_opening_base),
     accountCode: nullableStr(row.account_code),
     statsAccountCode: nullableStr(row.stats_account_code),
+    // Deliberately NOT named `departmentCode`: that key is authorisation
+    // metadata the server reads out of a payload and checks against the
+    // envelope's department (see the conventions above). This is a per-row
+    // booking override that is meant to differ from the row's department, so
+    // it travels under its own name and the server keeps ignoring the payload.
+    departmentOverride: nullableStr(row.department_code),
     updatedAt: nullableStr(row.updated_at),
     deletedAt: nullableStr(row.deleted_at),
   };
@@ -374,6 +380,7 @@ export function componentValueFromPayload(payload: EntityPayload): Row {
     ss_opening_base: nullableNum(payload.ssOpeningBase),
     account_code: nullableStr(payload.accountCode),
     stats_account_code: nullableStr(payload.statsAccountCode),
+    department_code: nullableStr(payload.departmentOverride),
     updated_at: nullableStr(payload.updatedAt) ?? new Date().toISOString(),
     deleted_at: nullableStr(payload.deletedAt),
   };
