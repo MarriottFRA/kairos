@@ -2,7 +2,7 @@
  * How each result source is presented — one record, used by both the grid's
  * chip column and the inspector.
  *
- * Results is a union of four origins now, and the whole point of showing them
+ * Results is a union of five origins now, and the whole point of showing them
  * is that a user can tell at a glance whether a number was calculated or typed.
  * Keeping the label/colour/hint in one place is what stops the grid and the
  * inspector describing the same line two different ways.
@@ -40,6 +40,11 @@ export const SOURCE_META: Record<
     label: "buyout",
     color: "secondary",
     hint: "A manual department x account override that bypasses the engine.",
+  },
+  SETUP: {
+    label: "setup",
+    color: "success",
+    hint: "A hotel setup value from the Home page, reported as a statistic in January.",
   },
 };
 

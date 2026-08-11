@@ -1,8 +1,9 @@
 /**
- * Results as a union of four sources.
+ * Results as a union of five sources.
  * -----------------------------------------------------------
  * The Results page stopped being "whatever the engine produced": manual input,
- * allocations and buyouts post into the same dept × account table. Because the
+ * allocations, buyouts and the hotel's own setup post into the same dept ×
+ * account table. Because the
  * BST push sends exactly these rows, a mistake here reaches a real workbook —
  * so each projector is pinned on the rule that makes it different from the
  * others, plus the read path that merges them and the drill-down that takes
@@ -25,11 +26,16 @@ import {
   projectAllocationLines,
   projectBuyoutLines,
   projectManualLines,
+  projectSetupLines,
   readOutputLines,
   readOutputs,
   toMonthlyDeltas,
   writeRun,
 } from "../outputsRepo";
+import {
+  WEEKLY_HOURS_STAT_ACCOUNT,
+  WEEKLY_HOURS_STAT_DEPARTMENT,
+} from "../../../shared/positions/systemAccounts";
 import { resolveOuScope } from "../ouScope";
 import {
   ENGINE_OUTPUTS_SQL,
@@ -290,6 +296,37 @@ describe("projectAllocationLines", () => {
     );
     const keys = lines.map((line) => `${line.positionId}|${line.componentDefId}`);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hotel setup
+// ---------------------------------------------------------------------------
+
+describe("projectSetupLines", () => {
+  it("posts Weekly Hours to its pinned combo, in January only", () => {
+    const [line] = projectSetupLines({ weeklyHours: 40 });
+
+    // 40 hours a week is one fact about the year. The BST reads a level as the
+    // running sum of its months, so repeating it would report 480.
+    expect(line.months).toEqual(janOnly(40));
+    expect(line.total).toBe(40);
+    expect(line.dept).toBe(WEEKLY_HOURS_STAT_DEPARTMENT);
+    expect(line.account).toBe(WEEKLY_HOURS_STAT_ACCOUNT);
+    expect(line.source).toBe("SETUP");
+    expect(line.detail).toMatchObject({ weeklyHours: 40 });
+  });
+
+  it("keeps a fractional contract exact", () => {
+    expect(projectSetupLines({ weeklyHours: 37.5 })[0].months).toEqual(janOnly(37.5));
+  });
+
+  it("posts nothing when the setting is zero or missing", () => {
+    // Not a hotel that works no hours — a hotel that has not finished its
+    // setup. A zero row would claim the first.
+    expect(projectSetupLines({ weeklyHours: 0 })).toEqual([]);
+    expect(projectSetupLines({ weeklyHours: NaN })).toEqual([]);
+    expect(projectSetupLines({ weeklyHours: -5 })).toEqual([]);
   });
 });
 
@@ -727,5 +764,44 @@ describe("computeFingerprint covers the new sources", () => {
       .prepare(`UPDATE allocations SET inject_account = 'A975010', updated_at = ? WHERE id = 'a1'`)
       .run("2026-07-29T00:00:00.000Z");
     expect(fingerprint()).not.toBe(added);
+  });
+
+  it("changes when the hotel's Weekly Hours setting is edited", () => {
+    // Two things this probe needs that the other cases do not: the defaults
+    // table (it lives in the settings DB, not the positions schema) and a real
+    // scenario row, because the probe is keyed on the scenario's YEAR.
+    structureDb.exec(`
+      CREATE TABLE IF NOT EXISTS position_defaults (
+          ou           TEXT NOT NULL,
+          year         INTEGER NOT NULL,
+          weekly_hours REAL NOT NULL DEFAULT 40,
+          fields_json  TEXT NOT NULL DEFAULT '{}',
+          updated_at   TEXT,
+          PRIMARY KEY (ou, year)
+      );
+    `);
+    structureDb
+      .prepare(
+        `INSERT INTO scenarios (id, ou, year, label, updated_at)
+         VALUES (?, ?, 2026, 'Budget', ?)`
+      )
+      .run(SCENARIO, OU, NOW);
+
+    const before = fingerprint();
+    structureDb
+      .prepare(
+        `INSERT INTO position_defaults (ou, year, weekly_hours, updated_at)
+         VALUES (?, 2026, 40, ?)`
+      )
+      .run(OU, NOW);
+    const saved = fingerprint();
+    expect(saved).not.toBe(before);
+
+    // The VALUE is stamped, not only the timestamp: Weekly Hours IS the posted
+    // statistic, so a run that predates the edit is reporting the old contract.
+    structureDb
+      .prepare(`UPDATE position_defaults SET weekly_hours = 37.5 WHERE ou = ?`)
+      .run(OU);
+    expect(fingerprint()).not.toBe(saved);
   });
 });

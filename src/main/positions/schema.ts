@@ -278,6 +278,7 @@ export const ENGINE_OUTPUTS_SQL = `
   --   MANUAL      manual:<rowId>     / manual:cost | manual:stats
   --   ALLOCATION  alloc:<allocId>    / alloc:<deptCode>
   --   BUYOUT      buyout:<rowId>     / buyout
+  --   SETUP       setup:defaults     / setup:<settingKey>
   -- detail is the small JSON blob the Results inspector renders (rate, spread
   -- base, description...) so a drill-down needs no second lookup.
   CREATE TABLE IF NOT EXISTS engine_output_lines (

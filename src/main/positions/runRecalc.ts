@@ -35,9 +35,11 @@ import {
   projectBuyoutLines,
   projectManualLines,
   projectOutputLines,
+  projectSetupLines,
   readOutputs,
   writeRun,
 } from "./outputsRepo";
+import { DEFAULT_WEEKLY_HOURS } from "../../shared/positionDefaults";
 import { listAllocations } from "../allocations/repo";
 import { aggregateDepartmentMetrics } from "../../shared/allocations/compute";
 import { listRows as listManualRows } from "../manualInput/repo";
@@ -105,11 +107,23 @@ export async function runRecalc(
     cumulativeStatDefIds(input.definitions)
   );
 
-  // ---- the three non-engine sources ----------------------------------------
+  // ---- the four non-engine sources -----------------------------------------
   // Read here rather than inside loadScenarioInput: none of them is engine
   // INPUT — the engine never sees them and does not need to. They are output
   // contributions that land in the same dept × account table, so they belong
   // beside the projection, not beside the compile.
+
+  // Weekly Hours reports itself as a statistic. loadScenarioInput reads the same
+  // defaults to size the FTE yardstick, but it hands the engine only the derived
+  // reference — and widening ScenarioInput to carry a setting the engine never
+  // reads would be the wrong trade for saving one indexed single-row lookup.
+  // Unsaved defaults post the built-in 40, which is both what the Home page
+  // shows and what the yardstick above just used: the page and the budget must
+  // report the same contract.
+  const setupDefaults = await getDefaults(scope.ou, input.scenario.year);
+  const setupLines = projectSetupLines({
+    weeklyHours: setupDefaults?.weeklyHours ?? DEFAULT_WEEKLY_HOURS,
+  });
 
   // Buyouts came in with the scenario input already (the compiler interns them
   // for its in-memory aggregate); this is the projection step that was missing.
@@ -137,6 +151,7 @@ export async function runRecalc(
     ...buyoutLines,
     ...manualLines,
     ...allocationLines,
+    ...setupLines,
   ];
 
   // Fingerprint AFTER the load (same data the run saw).

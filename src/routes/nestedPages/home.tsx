@@ -84,6 +84,10 @@ import {
   resolvePositionDefaults,
 } from "../../shared/positionDefaults";
 import {
+  WEEKLY_HOURS_STAT_ACCOUNT,
+  WEEKLY_HOURS_STAT_DEPARTMENT,
+} from "../../shared/positions/systemAccounts";
+import {
   useBudgetYear,
   useSelectedHotel,
   useSettingsStore,
@@ -1321,6 +1325,16 @@ export default function Home() {
                 slotProps={{ htmlInput: { min: 0 } }}
                 sx={{ width: 132, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
               />
+              {/* This box is the only place the figure is entered, and it now
+                  posts to the budget — so the field says where, rather than
+                  leaving a user to find an unexplained row on Results. */}
+              <Typography
+                variant="caption"
+                sx={{ display: "block", mt: 0.5, color: "text.secondary" }}
+              >
+                Reports to {WEEKLY_HOURS_STAT_DEPARTMENT} / {WEEKLY_HOURS_STAT_ACCOUNT} in
+                January.
+              </Typography>
             </Field>
           </Stack>
 

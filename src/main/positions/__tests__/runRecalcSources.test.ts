@@ -2,7 +2,7 @@
  * runRecalc, end to end, over real databases.
  * -----------------------------------------------------------
  * The projectors are unit-tested next door; this pins the WIRING, which is the
- * part that can silently do nothing. runRecalc is where the four sources are
+ * part that can silently do nothing. runRecalc is where the five sources are
  * assembled, and a manual row or an allocation that never gets read produces no
  * error at all — just a budget quietly missing a chunk of itself, and a BST
  * push that agrees with it.
@@ -33,6 +33,14 @@ import {
 } from "../schema";
 import { getFieldCatalog, saveScenario } from "../structureRepo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
+import {
+  PositionDefaults,
+  buildDefaultPositionDefaults,
+} from "../../../shared/positionDefaults";
+import {
+  WEEKLY_HOURS_STAT_ACCOUNT,
+  WEEKLY_HOURS_STAT_DEPARTMENT,
+} from "../../../shared/positions/systemAccounts";
 
 type Db = InstanceType<typeof Database>;
 
@@ -210,6 +218,48 @@ describe("runRecalc assembles every source", () => {
     expect(heads.sources).toEqual(["ENGINE"]);
   });
 
+  it("reports the hotel's Weekly Hours as a January statistic", async () => {
+    const outputs = await recalc();
+    const weekly = rowFor(
+      outputs,
+      WEEKLY_HOURS_STAT_DEPARTMENT,
+      WEEKLY_HOURS_STAT_ACCOUNT
+    )!;
+    // getDefaults returns null here — an untouched hotel — so this is the
+    // built-in 40 the Home page would be showing. The page and the budget must
+    // report the same contract, so "never saved" is not "nothing to report".
+    expect(weekly.months).toEqual([40, ...new Array(11).fill(0)]);
+    expect(weekly.total).toBe(40);
+    expect(weekly.sources).toEqual(["SETUP"]);
+    // A988… is inside the stats range, so it belongs under the Statistics
+    // toggle and pushes to the BST in hours, not thousands of hours.
+    expect(weekly.isStats).toBe(true);
+    expect(weekly.valueKind).toBe("count");
+  });
+
+  it("reports a saved Weekly Hours over the built-in default", async () => {
+    const outputs = await runRecalc(
+      {
+        localDb: structureDb,
+        secureDb: valuesDb,
+        getCalendar: async () => CALENDAR,
+        getDefaults: async () =>
+          ({
+            ...buildDefaultPositionDefaults(SCOPE.ou, YEAR),
+            weeklyHours: 37.5,
+          }) as PositionDefaults,
+        now: () => NOW,
+      },
+      SCOPE,
+      scenarioId
+    );
+
+    expect(
+      rowFor(outputs, WEEKLY_HOURS_STAT_DEPARTMENT, WEEKLY_HOURS_STAT_ACCOUNT)!
+        .months
+    ).toEqual([37.5, ...new Array(11).fill(0)]);
+  });
+
   it("counts a buyout exactly once, despite the compiler also aggregating it", async () => {
     addBuyout();
     const outputs = await recalc();
@@ -246,6 +296,7 @@ describe("runRecalc assembles every source", () => {
       "BUYOUT",
       "ENGINE",
       "MANUAL",
+      "SETUP",
     ]);
     expect(outputs.run?.lineCount).toBe(
       persisted.reduce((sum, row) => sum + row.n, 0)

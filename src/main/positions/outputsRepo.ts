@@ -35,7 +35,11 @@ import {
   OutputValueKind,
   OutputsResponse,
 } from "../../shared/positions/ipc";
-import { STATS_ACCOUNT_FILTER } from "../../shared/positions/systemAccounts";
+import {
+  STATS_ACCOUNT_FILTER,
+  WEEKLY_HOURS_STAT_ACCOUNT,
+  WEEKLY_HOURS_STAT_DEPARTMENT,
+} from "../../shared/positions/systemAccounts";
 import { AllocationDto } from "../../shared/allocations/ipc";
 import {
   DepartmentAgg,
@@ -406,6 +410,53 @@ export function projectAllocationLines(
   return lines;
 }
 
+/**
+ * Hotel setup values that are themselves reportable statistics.
+ *
+ * Weekly Hours is the only one today. It is entered once per hotel-year on the
+ * Home page, where it has always sized the FTE yardstick; the budget also has to
+ * REPORT the standard contract, and it reports to a fixed department and account
+ * (see WEEKLY_HOURS_STAT_DEPARTMENT / _ACCOUNT).
+ *
+ * Posted January-only, through the same rule the headcount stats and allocation
+ * splits go through: 40 hours a week is one fact about the year, not forty hours
+ * earned twelve times, and the BST reads such a row as the running sum of its
+ * months. toMonthlyDeltas over a flat series is that encoding — it is spelled out
+ * rather than hard-coded as [weekly, 0, 0, …] so that this row can never drift
+ * from how every other level-valued statistic is written.
+ *
+ * Not a per-scenario number: every scenario in a year posts the same figure,
+ * because every scenario in that year is measured against the same full-timer.
+ *
+ * A non-positive setting posts nothing. Zero weekly hours is not a fact worth
+ * reporting — it is a hotel that has not finished its setup, and a 0 row would
+ * claim otherwise.
+ */
+export function projectSetupLines(defaults: {
+  weeklyHours: number;
+}): OutputLineWrite[] {
+  const weekly = Number(defaults?.weeklyHours) || 0;
+  if (weekly <= 0) return [];
+
+  const months = toMonthlyDeltas(new Array<number>(MONTHS).fill(weekly));
+  return [
+    {
+      // Synthetic ids in the namespace schema.ts documents: they match no
+      // position, which is what the inspector's LEFT JOINs already expect.
+      positionId: "setup:defaults",
+      componentDefId: "setup:weeklyHours",
+      label: "Weekly Hours",
+      dept: WEEKLY_HOURS_STAT_DEPARTMENT,
+      account: WEEKLY_HOURS_STAT_ACCOUNT,
+      months,
+      total: sumMonths(months),
+      source: "SETUP",
+      sourceRef: "weeklyHours",
+      detail: { setting: "Weekly Hours", weeklyHours: weekly },
+    },
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Fingerprint
 // ---------------------------------------------------------------------------
@@ -545,6 +596,21 @@ export function computeFingerprint(
         WHERE ou = ? AND deleted_at IS NULL`,
       scope.ou
     ),
+    // Weekly Hours posts to Results now (see projectSetupLines), so the
+    // hotel-year defaults are an output source and an edit to them has to age
+    // the run. weekly_hours is probed by VALUE, not just by timestamp: it is one
+    // number and it is the whole contribution, so its value IS the state worth
+    // stamping. Matched on both OU spellings for the same reason the calendar
+    // probe is — the row is saved under whichever form the page held.
+    // Appended, never slotted in: the join order IS the stamp.
+    probe(
+      structureDb,
+      `SELECT updated_at, weekly_hours FROM position_defaults
+        WHERE ou IN (?, ?) AND year = ?`,
+      scope.ou,
+      bareOu,
+      year
+    ),
   ];
   return parts.join("§");
 }
@@ -621,6 +687,7 @@ const SOURCE_ORDER: readonly OutputSource[] = [
   "MANUAL",
   "ALLOCATION",
   "BUYOUT",
+  "SETUP",
 ];
 
 const SOURCE_SET: ReadonlySet<string> = new Set(SOURCE_ORDER);

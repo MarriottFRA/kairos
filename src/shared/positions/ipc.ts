@@ -258,12 +258,23 @@ export interface OutputRunDto {
 }
 
 /**
- * Where a result line came from. Results is a union of four origins, and the
+ * Where a result line came from. Results is a union of five origins, and the
  * BST push sends exactly what Results shows — so a number that reaches the
  * workbook can always be traced back to the page, and from the page back to the
  * row that produced it.
+ *
+ * SETUP is the hotel's own configuration reporting itself — currently just
+ * Weekly Hours from the Home page. It is neither calculated from positions
+ * (ENGINE) nor typed into a budget row (MANUAL): it is a setting that happens to
+ * also be a reportable statistic, and saying so is what stops a user hunting the
+ * Positions grid for the row that produced it.
  */
-export type OutputSource = "ENGINE" | "MANUAL" | "ALLOCATION" | "BUYOUT";
+export type OutputSource =
+  | "ENGINE"
+  | "MANUAL"
+  | "ALLOCATION"
+  | "BUYOUT"
+  | "SETUP";
 
 /**
  * How a row's numbers should be read.

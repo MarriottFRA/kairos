@@ -21,6 +21,24 @@ import { AccountFilter } from "./fields";
 export const POSITION_COUNT_ACCOUNT = "A972540";
 
 /**
+ * Where the hotel's Weekly Hours setting reports — the standard full-time
+ * contract, posted as a statistic rather than kept as a private yardstick.
+ *
+ * Weekly Hours is entered once per hotel-year on the Home page and until now
+ * only ever fed the FTE denominator (see positionDefaults.fullTimeReference).
+ * It is also a number the budget has to REPORT, and it reports to one fixed
+ * place, so both codes are pinned here rather than made selectable: there is no
+ * per-hotel judgement to make, and a picker would only create a way to get it
+ * wrong.
+ *
+ * A988112 is inside STATS_ACCOUNT_FILTER (and STAFFING_ACCOUNT_FILTER), which
+ * is what makes the row land under the Results page's Statistics toggle and
+ * push to the BST in actual units rather than thousands.
+ */
+export const WEEKLY_HOURS_STAT_DEPARTMENT = "D0410";
+export const WEEKLY_HOURS_STAT_ACCOUNT = "A988112";
+
+/**
  * Statistics accounts: counts, hours, FTE — non-currency lines. Everything else
  * is a cost. Carried over from the workbook, where the leading 9 marked a stats
  * account; codes are stored with the "A" prefix this app normalizes to (see

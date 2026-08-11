@@ -79,6 +79,10 @@ function detailHint(line: OutputLineDto): string | null {
     return detail.excluded ? `Excluded from this split${parts ? ` · ${parts}` : ""}` : parts || null;
   }
   if (line.source === "BUYOUT") return "Bypasses the engine";
+  if (line.source === "SETUP") {
+    const setting = typeof detail.setting === "string" ? detail.setting : "Setup value";
+    return `${setting} · from the Home page`;
+  }
   return null;
 }
 
