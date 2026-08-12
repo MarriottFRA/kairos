@@ -397,7 +397,7 @@ describe("buildPushPlan", () => {
     expect(result.warnings.join(" ")).not.toMatch(/Dept Settings/);
   });
 
-  it("leaves an unused combo entirely alone when skipUnusedCombos is on", () => {
+  it("writes no values to an unused combo when skipUnusedCombos is on", () => {
     const options: BstPushOptions = { ...every("replace"), skipUnusedCombos: true };
     const result = plan(
       [
@@ -416,16 +416,31 @@ describe("buildPushPlan", () => {
     // Skipped is deliberate, not a failure to land.
     expect(result.problemCount).toBe(0);
     expect(result.warnings.join(" ")).toMatch(/skip unused combos/);
+    // The rules are active, so the warning must say they still bite.
+    expect(result.warnings.join(" ")).toMatch(/clear rules \(5, 988, 97254\) still apply/);
 
-    // The whole point: the skipped row (560320, row 33) gets no write at all —
-    // not even from the clear pass its "5" prefix would otherwise pull it into.
+    // The clear pass is independent of the toggle: the skipped row (560320,
+    // row 33) matches the "5" rule, so it is still zeroed — but ONLY zeroed;
+    // the 12 value writes it would otherwise get are gone.
     const writes = toCellWrites(result, target);
-    expect(writes.some((write) => write.sheet === "0010" && write.row === 33)).toBe(false);
-    // Rows Kairos never produces still clear — the rules' clean-up job is not
-    // narrowed, only the combos the user chose to leave alone are spared.
-    expect(writes.some((write) => write.sheet === "0010" && write.row === 226)).toBe(true);
-    // The tile arithmetic follows: nothing counted for the skipped row.
-    expect(result.zeroCellCount).toBe(toZeroWrites(target, options, RULES).length - 12);
+    const row33 = writes.filter((write) => write.sheet === "0010" && write.row === 33);
+    expect(row33).toHaveLength(12);
+    expect(row33.every((write) => write.value === 0)).toBe(true);
+    // The clear counts are therefore exactly what the rules alone dictate.
+    expect(result.zeroCellCount).toBe(toZeroWrites(target, options, RULES).length);
+  });
+
+  it("truly leaves a skipped combo alone when no clear rule matches it", () => {
+    const options: BstPushOptions = { ...every("replace"), skipUnusedCombos: true };
+    // 414001 is in the BST (row 13) but outside every default rule.
+    const result = plan([outRow("D0010", "A414001", 0)], options);
+    expect(result.rows[0].status).toBe("skipped");
+    const writes = toCellWrites(result, target);
+    expect(writes.some((write) => write.sheet === "0010" && write.row === 13)).toBe(false);
+    // No rules in force at all → the warning must not claim they still apply.
+    const noRules = plan([outRow("D0010", "A414001", 0)], options, []);
+    expect(noRules.warnings.join(" ")).toMatch(/skip unused combos/);
+    expect(noRules.warnings.join(" ")).not.toMatch(/still apply/);
   });
 
   it("still overwrites an all-zero row when the toggle is off", () => {

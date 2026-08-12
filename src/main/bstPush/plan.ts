@@ -261,8 +261,9 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     // is informational — it must not count as a problem or trigger the
     // missing-sheet warning. (A zero row that DOES exist stays a write: a
     // genuine zero is still a value the BST should hold — unless the user
-    // switched `skipUnusedCombos` on, in which case the row is left exactly as
-    // the BST holds it, excluded from the clear pass included.)
+    // switched `skipUnusedCombos` on, in which case no values are written to
+    // it. The clear pass is deliberately NOT narrowed for skipped rows; the
+    // warning below points out the overlap instead.)
     const hasData = row.months.some((value) => (Number(value) || 0) !== 0);
 
     let status: ComboStatus;
@@ -325,7 +326,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
 
   // Tallied from the writer's own list rather than recomputed, so the number on
   // every month tile is by construction the number of cells that will change.
-  const zeroWrites = toZeroWrites(target, options, clearPrefixes, skippedCombos);
+  const zeroWrites = toZeroWrites(target, options, clearPrefixes);
   const clearCellsByMonth = new Array<number>(PUSH_MONTHS).fill(0);
   for (const write of zeroWrites) {
     clearCellsByMonth[write.col - BUDGET_COL_START]++;
@@ -381,8 +382,13 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
   if (skippedCombos.size > 0) {
     warnings.push(
       `${skippedCombos.size} combo(s) exist in the BST but hold no data in ` +
-        `Kairos, and "skip unused combos" is on — those rows keep whatever ` +
-        `the BST already has, and the clear rules leave them alone too.`
+        `Kairos, and "skip unused combos" is on — no values are written to ` +
+        `those rows.` +
+        (clearPrefixes.length > 0
+          ? ` The clear rules (${clearPrefixes.join(", ")}) still apply, ` +
+            `though, so any of those rows they match are still zeroed in ` +
+            `replaced or cleared months.`
+          : "")
     );
   }
   const skipped = monthsWhere((action) => action === "skip");
@@ -479,10 +485,9 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
 export function countZeroableCells(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[],
-  excludeCombos?: ReadonlySet<string>
+  prefixes: string[]
 ): number {
-  return toZeroWrites(target, options, prefixes, excludeCombos).length;
+  return toZeroWrites(target, options, prefixes).length;
 }
 
 /** One cell the writer must change: sheet, row, 0-based column, value. */
@@ -509,10 +514,7 @@ export interface CellWrite {
 export function toZeroWrites(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[],
-  /** Combos the push is leaving untouched (`skipUnusedCombos`) — a skipped row
-   *  that the clear pass then zeroed anyway would make the option a no-op. */
-  excludeCombos?: ReadonlySet<string>
+  prefixes: string[]
 ): CellWrite[] {
   const columns: number[] = [];
   for (let m = 0; m < PUSH_MONTHS; m++) {
@@ -523,7 +525,6 @@ export function toZeroWrites(
   const writes: CellWrite[] = [];
   for (const locations of target.bySheet.values()) {
     for (const location of locations) {
-      if (excludeCombos?.has(location.combo)) continue;
       if (!matchesClearRules(location.combo.slice(5), prefixes)) continue;
       for (const col of columns) {
         writes.push({
@@ -552,21 +553,18 @@ export function toZeroWrites(
  * bug is not ported.
  */
 export function toCellWrites(plan: BstPushPlan, target: BstTarget): CellWrite[] {
-  // Rebuilt from the plan's own rows for the same reason the prefixes are: the
-  // skips the user approved are the skips the writer honours.
-  const skippedCombos = new Set(
-    plan.rows
-      .filter((row) => row.status === "skipped")
-      .map((row) => row.combo)
-  );
   const writes: CellWrite[] = toZeroWrites(
     target,
     plan.options,
-    plan.clearScope.prefixes,
-    skippedCombos
+    plan.clearScope.prefixes
   );
 
   for (const row of plan.rows) {
+    // A skipped row gets no VALUE writes — but the clear pass above is not
+    // narrowed for it. The two features are independent on purpose: the toggle
+    // says "don't write zeroes over unused combos", the clear rules say "these
+    // accounts are mine to reset", and where they overlap the rules win. The
+    // plan warns about that overlap rather than resolving it silently.
     if (row.targetRow == null || row.status === "skipped") continue;
     for (let m = 0; m < PUSH_MONTHS; m++) {
       const action = plan.options.months[m];

@@ -86,12 +86,15 @@ export interface BstPushOptions {
   /** Copy the workbook next to itself before touching it. */
   backup: boolean;
   /**
-   * Leave BST rows alone when Kairos holds only zeroes for the combo — the
-   * combos that exist purely because departments × accounts matrixes them out.
-   * Off by default: a genuine zero is a value the BST should hold, and
-   * overwriting is what the tool always did. When on, a skipped row is not
-   * written AND not cleared — otherwise the clear pass would zero it anyway and
-   * the option would change nothing.
+   * Write no values to a BST row when Kairos holds only zeroes for the combo —
+   * the combos that exist purely because departments × accounts matrixes them
+   * out. Off by default: a genuine zero is a value the BST should hold, and
+   * overwriting is what the tool always did.
+   *
+   * Independent of the clear rules ON PURPOSE. This option governs value
+   * writes only; the clear pass still zeroes every rule-matched row, skipped
+   * or not. Where they overlap the plan warns rather than silently deciding —
+   * a user who wants skipped rows preserved from clearing too edits the rules.
    */
   skipUnusedCombos: boolean;
 }
@@ -292,8 +295,9 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
  * It is informational, not a problem — it never counts toward `problemCount`.
  *
  * `skipped` is `no_data`'s counterpart for a combo that IS in the BST: Kairos
- * holds only zeroes and the user switched `skipUnusedCombos` on, so the row is
- * deliberately left exactly as the BST has it — neither written nor cleared.
+ * holds only zeroes and the user switched `skipUnusedCombos` on, so no values
+ * are written to the row. The clear rules operate independently — a skipped
+ * row they match is still zeroed in replaced/cleared months.
  */
 export type ComboStatus =
   | "write"

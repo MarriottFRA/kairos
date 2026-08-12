@@ -286,8 +286,8 @@ function consequence(plan: BstPushPlan): string {
   }
   if (plan.skippedCount > 0) {
     parts.push(
-      `Leaves ${count(plan.skippedCount)} unused combo row${plan.skippedCount === 1 ? "" : "s"}` +
-        ` untouched.`
+      `Writes no values to ${count(plan.skippedCount)} unused combo ` +
+        `row${plan.skippedCount === 1 ? "" : "s"}.`
     );
   }
   parts.push(
@@ -309,7 +309,7 @@ function reportText(report: BstPushReport): string {
     `Rows written: ${report.writeCount}`,
     `Cells written: ${report.cellCount}`,
     `Cells cleared: ${report.zeroCellCount}`,
-    `Unused combos left untouched: ${report.skippedCount}`,
+    `Unused combos not written: ${report.skippedCount}`,
     `Sheets touched: ${report.sheetsTouched}`,
     `Rows not written: ${report.problemCount}`,
     `Backup: ${report.backupPath ?? "none"}`,
@@ -359,6 +359,9 @@ export default function BstPush() {
 
   const [busy, setBusy] = useState<null | "preview" | "refresh" | "commit">(null);
   const [filter, setFilter] = useState<RowFilter>("all");
+  // The "Worth knowing" list is tall; once read it may be put away for the rest
+  // of this review. A new file brings it back — its warnings are new facts.
+  const [warningsDismissed, setWarningsDismissed] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [error, setError] = useState<string | null>(null);
@@ -512,6 +515,7 @@ export default function BstPush() {
       setPlan(result.plan);
       setOptions(result.plan.options);
       setRefusal(null);
+      setWarningsDismissed(false);
       setStage("review");
       return;
     }
@@ -677,6 +681,7 @@ export default function BstPush() {
     setReport(null);
     setRefusal(null);
     setFilter("all");
+    setWarningsDismissed(false);
   }, []);
 
   const shownRows = useMemo(() => {
@@ -866,12 +871,23 @@ export default function BstPush() {
                   }
                   label={
                     <Typography variant="body2">
-                      Skip unused combos — a row Kairos holds no data for keeps
-                      whatever the BST already has, instead of being overwritten
-                      with zeroes
+                      Skip unused combos — write no values to rows Kairos holds
+                      no data for, instead of overwriting them with zeroes
                     </Typography>
                   }
                 />
+                {options.skipUnusedCombos &&
+                  pushConfig.clearPrefixes.length > 0 && (
+                    <Typography
+                      variant="caption"
+                      sx={{ display: "block", pl: 4.75, color: "warning.main" }}
+                    >
+                      Heads up: the clear rules (
+                      {pushConfig.clearPrefixes.join(", ")}) still run — a
+                      skipped row whose account they match is still zeroed in
+                      replaced or cleared months.
+                    </Typography>
+                  )}
               </Box>
             </Stack>
           )}
@@ -882,20 +898,25 @@ export default function BstPush() {
             </Box>
           )}
 
-          {(stage === "done" ? report! : plan!).warnings.length > 0 && (
-            <Alert severity="info" sx={{ mb: 1.5 }}>
-              <AlertTitle sx={{ mb: 0.5 }}>
-                Worth knowing ({(stage === "done" ? report! : plan!).warnings.length})
-              </AlertTitle>
-              <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
-                {(stage === "done" ? report! : plan!).warnings.map((warning) => (
-                  <li key={warning}>
-                    <Typography variant="body2">{warning}</Typography>
-                  </li>
-                ))}
-              </Box>
-            </Alert>
-          )}
+          {!warningsDismissed &&
+            (stage === "done" ? report! : plan!).warnings.length > 0 && (
+              <Alert
+                severity="info"
+                sx={{ mb: 1.5 }}
+                onClose={() => setWarningsDismissed(true)}
+              >
+                <AlertTitle sx={{ mb: 0.5 }}>
+                  Worth knowing ({(stage === "done" ? report! : plan!).warnings.length})
+                </AlertTitle>
+                <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+                  {(stage === "done" ? report! : plan!).warnings.map((warning) => (
+                    <li key={warning}>
+                      <Typography variant="body2">{warning}</Typography>
+                    </li>
+                  ))}
+                </Box>
+              </Alert>
+            )}
 
           <Box sx={{ flex: 1, minHeight: 320, position: "relative" }}>
             {busy === "refresh" && (
@@ -1210,8 +1231,8 @@ function SummaryTiles({
       {source.skippedCount > 0 && (
         <StatTile
           value={count(source.skippedCount)}
-          label={past ? "Rows left untouched" : "Rows to leave untouched"}
-          hint="Unused combos — Kairos holds no data for them, so they keep whatever the BST already has"
+          label={past ? "Unused combos skipped" : "Unused combos to skip"}
+          hint="Kairos holds no data for these rows, so no values are written to them. A clear rule that matches them still zeroes them."
         />
       )}
       <StatTile

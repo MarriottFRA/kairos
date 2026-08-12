@@ -79,12 +79,12 @@ export const STATUS_META: Record<
     icon: HorizontalRuleIcon,
   },
   skipped: {
-    label: "Left untouched",
+    label: "Not written",
     color: "default",
     hint:
       "Kairos has no data for this combo and unused combos are being " +
-      "skipped, so the BST row keeps exactly what it holds — the clear " +
-      "rules pass over it too.",
+      "skipped, so no values are written to the row. If a clear rule matches " +
+      "its account, the clear pass still zeroes it.",
     icon: HorizontalRuleIcon,
   },
   zeroed: {
