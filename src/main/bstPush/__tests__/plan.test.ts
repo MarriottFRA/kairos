@@ -368,6 +368,25 @@ describe("buildPushPlan", () => {
     expect(result.warnings.join(" ")).toMatch(/more than one row/);
   });
 
+  it("demotes missing combos with nothing to push to no_data, not problems", () => {
+    const result = plan([
+      outRow("D0010", "A999999", 0), // sheet exists, no row, all zeroes
+      outRow("D0500", "A510000", 0), // no sheet at all, all zeroes
+      outRow("D0010", "A560320", 0), // matched — a genuine zero is still a write
+    ]);
+    const status = Object.fromEntries(
+      result.rows.map((row) => [row.combo, row.status])
+    );
+    expect(status["0010-999999"]).toBe("no_data");
+    expect(status["0500-510000"]).toBe("no_data");
+    expect(status["0010-560320"]).toBe("write");
+
+    // Neither the problem count nor the missing-sheet warning should fire for
+    // rows the user has no reason to act on.
+    expect(result.problemCount).toBe(0);
+    expect(result.warnings.join(" ")).not.toMatch(/Dept Settings/);
+  });
+
   it("writes only the chosen months, without shifting the data", () => {
     const result = plan(
       [outRow("D0010", "A560320", 12_000)],

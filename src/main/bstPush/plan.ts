@@ -255,8 +255,16 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     const location: ComboLocation | undefined = target.combos.get(combo);
     const sheetExists = target.bySheet.has(sheet);
 
+    // A missing combo only matters when there is something to put in it. All
+    // zeroes means adding the row to the BST would change nothing, so the row
+    // is informational — it must not count as a problem or trigger the
+    // missing-sheet warning. (A zero row that DOES exist stays a write: a
+    // genuine zero is still a value the BST should hold.)
+    const hasData = row.months.some((value) => (Number(value) || 0) !== 0);
+
     let status: ComboStatus;
     if (location) status = location.duplicate ? "duplicate_row" : "write";
+    else if (!hasData) status = "no_data";
     else if (sheetExists) status = "no_row";
     else status = "no_sheet";
 
@@ -274,7 +282,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         writeCellsByMonth[m]++;
         writeTotalByMonth[m] += scaled.months[m];
       }
-    } else {
+    } else if (status !== "no_data") {
       problemCount++;
       if (status === "no_sheet") missingSheets.add(sheet);
     }

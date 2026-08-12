@@ -262,11 +262,16 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
  * cannot invoke, and the workbook's structure is password-protected anyway. The
  * report names the department and account so the user can add them in the BST
  * and push again.
+ *
+ * `no_data` is the quiet cousin of those two: the combo is missing from the BST
+ * *and* Kairos holds only zeroes for it, so adding the row would change nothing.
+ * It is informational, not a problem — it never counts toward `problemCount`.
  */
 export type ComboStatus =
   | "write"
   | "no_sheet"
   | "no_row"
+  | "no_data"
   | "duplicate_row"
   | "zeroed";
 

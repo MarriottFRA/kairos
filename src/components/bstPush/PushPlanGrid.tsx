@@ -16,7 +16,9 @@ import { useMemo } from "react";
 import { Box, Chip, Stack, Tooltip, Typography } from "@mui/material";
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
 import ErrorOutlinedIcon from "@mui/icons-material/ErrorOutlined";
+import HorizontalRuleIcon from "@mui/icons-material/HorizontalRule";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import type { SvgIconComponent } from "@mui/icons-material";
 import { DataGridPremium, GridColDef } from "@mui/x-data-grid-premium";
 
 import {
@@ -31,12 +33,18 @@ import { MONTH_ACTION_META } from "./MonthPlanBar";
 /** Label, colour and explanation for each status — the grid's legend, in one place. */
 export const STATUS_META: Record<
   ComboStatus,
-  { label: string; color: "success" | "warning" | "error" | "default"; hint: string }
+  {
+    label: string;
+    color: "success" | "warning" | "error" | "default";
+    hint: string;
+    icon: SvgIconComponent;
+  }
 > = {
   write: {
     label: "Will write",
     color: "success",
     hint: "Matched a row on the department sheet.",
+    icon: CheckCircleOutlinedIcon,
   },
   duplicate_row: {
     label: "Duplicate row",
@@ -44,6 +52,7 @@ export const STATUS_META: Record<
     hint:
       "This combo appears on more than one row of the sheet. The first row " +
       "gets the value, matching the old macro.",
+    icon: WarningAmberIcon,
   },
   no_row: {
     label: "No account row",
@@ -51,6 +60,7 @@ export const STATUS_META: Record<
     hint:
       "The department sheet exists but has no row for this account. Add the " +
       "account in the BST, then push again.",
+    icon: ErrorOutlinedIcon,
   },
   no_sheet: {
     label: "No department sheet",
@@ -58,11 +68,21 @@ export const STATUS_META: Record<
     hint:
       "This BST has no sheet for the department. Enable it in the BST's " +
       '"Dept Settings", then push again.',
+    icon: ErrorOutlinedIcon,
+  },
+  no_data: {
+    label: "No data",
+    color: "default",
+    hint:
+      "Not in this BST, but Kairos has nothing to push here either — " +
+      "no need to add it.",
+    icon: HorizontalRuleIcon,
   },
   zeroed: {
     label: "Cleared only",
     color: "default",
     hint: "Cleared by the zero pass, with nothing from Kairos to put back.",
+    icon: WarningAmberIcon,
   },
 };
 
@@ -73,17 +93,14 @@ function StatusCell({ status }: { status: ComboStatus | undefined }) {
   // combo and no status, and must render an empty cell rather than a chip.
   if (!meta) return null;
 
-  const Icon =
-    meta.color === "success"
-      ? CheckCircleOutlinedIcon
-      : meta.color === "error"
-        ? ErrorOutlinedIcon
-        : WarningAmberIcon;
+  const Icon = meta.icon;
   return (
     <Tooltip title={meta.hint}>
       <Chip
         size="small"
-        variant={meta.color === "success" ? "outlined" : "filled"}
+        // Only the states that need action get a filled chip; everything else
+        // stays an outline so the red ones carry the visual weight.
+        variant={meta.color === "error" || meta.color === "warning" ? "filled" : "outlined"}
         color={meta.color}
         icon={<Icon sx={{ fontSize: 15 }} />}
         label={meta.label}
@@ -245,7 +262,9 @@ export default function PushPlanGrid({
       getRowClassName={(params) =>
         params.row?.status === "no_row" || params.row?.status === "no_sheet"
           ? "bst-row--problem"
-          : ""
+          : params.row?.status === "no_data"
+            ? "bst-row--muted"
+            : ""
       }
       rowHeight={32}
       columnHeaderHeight={40}
@@ -265,6 +284,9 @@ export default function PushPlanGrid({
         "& .bst-row--problem": {
           backgroundColor: (theme) => theme.palette.error.main + "0f",
         },
+        // A row that is not in the BST and has nothing to push should not
+        // call attention to itself — every cell fades, chip included.
+        "& .bst-row--muted": { color: "text.disabled", opacity: 0.75 },
       }}
     />
   );
