@@ -189,10 +189,13 @@ export function runLiveSim(args: {
       );
       position.cluster = resolved.clusterName;
       position.hotelClusterWeight = resolved.weight;
-      // Auto-derive worked hours (override-aware) — mirror of loadScenarioInput.
+      // Auto-derive worked hours from the row's Contract columns (override-aware)
+      // — mirror of loadScenarioInput, which reads the same keys out of
+      // extraValues. The live row IS the flat bag, so it passes straight in.
       position.yearlyHoursWorked = resolveYearlyHoursWorked(
         position.yearlyHoursWorked,
         position,
+        row,
         calendar
       );
       // Length of service from the row's hiring date, for the SERVICE bases.

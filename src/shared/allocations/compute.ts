@@ -57,7 +57,7 @@ function num(value: unknown): number {
  * Aggregate active positions into per-department metrics. Inactive positions are
  * dropped (not budgeted), matching loadScenarioInput. Contract Days / Manhours
  * Paid read from the POSITION_EXTRA blob (contractYearlyDays, contractDaysOff);
- * Manhours Worked resolves the calendar-derived value the same way the engine
+ * Manhours Worked resolves the contract-derived value the same way the engine
  * input does. Departments preserve first-seen order.
  */
 export function aggregateDepartmentMetrics(
@@ -82,6 +82,10 @@ export function aggregateDepartmentMetrics(
     const manhoursWorked = resolveYearlyHoursWorked(
       num(p.yearlyHoursWorked),
       { vacationDays: num(p.vacationDays), dailyContractHours: dailyHours },
+      // The same POSITION_EXTRA bag the two contract reads above pull from —
+      // the derivation now takes its day count off the row's contract, so an
+      // allocation spread over Manhours Worked follows Days Off like the grid.
+      p.extraValues ?? {},
       calendar
     );
 

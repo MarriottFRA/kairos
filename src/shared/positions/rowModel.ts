@@ -18,7 +18,7 @@
 
 import { uuidv7 } from "../engine/ids";
 import { referenceVacation } from "../engine/reference";
-import { deriveYearlyHoursWorked, resolveFte } from "./engineInput";
+import { deriveYearlyHoursWorked, readContractDays, resolveFte } from "./engineInput";
 import {
   EMPTY_FULL_TIME_REFERENCE,
   FullTimeReference,
@@ -339,6 +339,18 @@ export function sanitizeRow(
     if (value === undefined) continue;
 
     if (NUMERIC_TYPES.has(def.dataType)) {
+      // An explicit null is a VALUE — "no number here" — not junk, and has to
+      // survive as one. The fallback below exists to protect a paste carrying a
+      // stray word from blanking a salary; conflating the two meant a cleared
+      // cell could never be stored once the row held a number. Undo was where
+      // that showed: replaying a pre-edit row whose field was blank put the
+      // edited number straight back, so changedFieldKeys saw no diff, nothing
+      // was queued, and the row silently kept the value the user had just
+      // undone. Unparseable TEXT still reverts — that is the paste guard.
+      if (value === null) {
+        out[def.key] = null;
+        continue;
+      }
       let num = toNumber(value, Number.NaN);
       if (Number.isNaN(num)) {
         out[def.key] = oldRow[def.key];
@@ -546,11 +558,13 @@ export function vacationCostById(
 }
 
 /**
- * Auto-derived Manhours Worked per row id — (Σ net productive days − vacation)
- * × daily hours — for the grid to display when the field carries no manual
- * override. Uses the same helper the engine-input paths use, so the shown
- * number equals what the simulation spreads. Empty map while the calendar
- * loads (the column then falls back to any stored override, else blank).
+ * Auto-derived Manhours Worked per row id — (yearly days − days off − public
+ * holidays − vacation) × daily hours — for the grid to display when the field
+ * carries no manual override. Uses the same helper the engine-input paths use,
+ * so the shown number equals what the simulation spreads. Because the day counts
+ * come off the row, editing any of the Contract columns moves this map on the
+ * next render, exactly as it moves fteById. Empty map while the calendar loads
+ * (the column then falls back to any stored override, else blank).
  */
 export function manhoursWorkedById(
   rows: PositionRow[],
@@ -562,7 +576,11 @@ export function manhoursWorkedById(
   for (const row of rows) {
     out.set(
       row.id,
-      deriveYearlyHoursWorked(rowToEnginePosition(row, scenarioId), calendar)
+      deriveYearlyHoursWorked(
+        rowToEnginePosition(row, scenarioId),
+        readContractDays(row),
+        calendar
+      )
     );
   }
   return out;

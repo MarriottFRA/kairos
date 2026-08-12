@@ -166,6 +166,17 @@ export function countWeekendDays(year: number, month: number, mask: number): num
   return count;
 }
 
+/**
+ * Clamp a day count that is allowed to be fractional into 0…calendarDays,
+ * rounded to two decimals so a typed 0.25 stays 0.25 and float noise from
+ * arithmetic never reaches the store. Junk parses to 0, as elsewhere.
+ */
+export function clampFractionalDays(value: unknown, calendarDays: number): number {
+  const parsed = Number(value);
+  const safe = Number.isFinite(parsed) ? parsed : 0;
+  return Math.round(Math.min(calendarDays, Math.max(0, safe)) * 100) / 100;
+}
+
 /** Net productive days for one month, floored at zero. */
 export function netProductiveDays(row: CalendarMonth): number {
   return Math.max(0, row.calendarDays - row.publicHolidays - row.weekendDays);
@@ -306,7 +317,10 @@ export function normalizeCalendar(
       return {
         month,
         calendarDays,
-        publicHolidays: clamp(stored?.publicHolidays),
+        // Public holidays accept fractions — a half-day closure, or a holiday
+        // that only part of the hotel observes, is a real thing to budget for.
+        // Weekends stay whole days: they are counted off the weekday pattern.
+        publicHolidays: clampFractionalDays(stored?.publicHolidays, calendarDays),
         weekendDays: stored
           ? clamp(stored.weekendDays)
           : countWeekendDays(year, month, mask),

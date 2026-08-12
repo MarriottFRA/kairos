@@ -84,52 +84,12 @@ export function buildBankHolidayDefinition(
 }
 
 // ---------------------------------------------------------------------------
-// Manhours Worked — auto-derived from the calendar, override-aware
+// Contract day counts — the shared reader behind every derived Contract column
 // ---------------------------------------------------------------------------
 
-/**
- * Calendar-derived yearly worked hours (net of vacation):
- *   (Σ realDays − vacationDays) × dailyContractHours, floored at 0.
- *
- * `realDays` is the calendar's net productive days per month (calendar days −
- * public holidays − weekends). The engine's HOURS stat adds the vacation hours
- * back and removes them again by the vacation weights (VBA Section 22), so a
- * net-of-vacation yearly total lands the hours in the right months.
- */
-export function deriveYearlyHoursWorked(
-  position: Pick<Position, "vacationDays" | "dailyContractHours">,
-  calendar: Pick<CalendarContext, "realDays">
-): number {
-  let productiveDays = 0;
-  for (let m = 0; m < MONTHS; m++) productiveDays += calendar.realDays[m];
-  const workedDays = productiveDays - position.vacationDays;
-  return workedDays > 0 ? workedDays * position.dailyContractHours : 0;
-}
-
-/**
- * The worked-hours figure to feed the engine. A positive stored value is a
- * manual override entered on the grid; unset (≤ 0) falls back to the
- * calendar-derived value so a freshly added row still spreads hours. Both
- * engine-input paths call this with the same calendar → identical results
- * (pinned by liveSimParity).
- */
-export function resolveYearlyHoursWorked(
-  storedYearlyHoursWorked: number,
-  position: Pick<Position, "vacationDays" | "dailyContractHours">,
-  calendar: Pick<CalendarContext, "realDays">
-): number {
-  return storedYearlyHoursWorked > 0
-    ? storedYearlyHoursWorked
-    : deriveYearlyHoursWorked(position, calendar);
-}
-
-// ---------------------------------------------------------------------------
-// FTE — derived from the contract, measured against the hotel's full-timer
-// ---------------------------------------------------------------------------
-
-/** The three Contract day-count columns FTE reads. POSITION_EXTRA fields, so
- *  they arrive in a stored position's `extraValues` or on a live grid row —
- *  the same two shapes readPositionAccounts serves. */
+/** The three Contract day-count columns the derived hours + FTE read. They are
+ *  POSITION_EXTRA fields, so they arrive in a stored position's `extraValues` or
+ *  on a live grid row — the same two shapes readPositionAccounts serves. */
 export const FTE_CONTRACT_KEYS = {
   yearlyDays: "contractYearlyDays",
   daysOff: "contractDaysOff",
@@ -156,6 +116,80 @@ export function readContractDays(source: Record<string, unknown>): ContractDays 
     pubHolidays: dayValue(source, FTE_CONTRACT_KEYS.pubHolidays),
   };
 }
+
+/**
+ * Productive days a position's own contract gives it: Yearly Days − Days Off −
+ * Public Holidays. Shared by the derived hours and FTE so the Contract band can
+ * never disagree with itself about how many days this post works.
+ *
+ * A row that states NO Yearly Days falls back to the caller's yardstick rather
+ * than reading 0 — those three columns arrived with the hotel-year defaults, so
+ * rows written before them are simply blank, and "this post has no contract" is
+ * not what a blank means there. See deriveFte for the longer version of why.
+ */
+function contractProductiveDays(contract: ContractDays, fallback: number): number {
+  return contract.yearlyDays > 0
+    ? contract.yearlyDays - contract.daysOff - contract.pubHolidays
+    : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Manhours Worked — auto-derived from the contract, override-aware
+// ---------------------------------------------------------------------------
+
+/**
+ * Yearly worked hours, net of vacation:
+ *   (Yearly Days − Days Off − Public Holidays − Vacation) × Daily Hours,
+ * floored at 0.
+ *
+ * The day count is the row's OWN contract — the same numerator deriveFte uses —
+ * so editing Days Off or Public Holidays on a position moves its hours, its
+ * Manhours Paid and its FTE together. It used to be the hotel calendar's Σ
+ * net productive days instead, which meant a row whose contract diverged from
+ * the calendar (a part-timer, a different holiday entitlement) silently got the
+ * hotel's hours and only a manual override could correct it.
+ *
+ * A row with no stated Yearly Days still falls back to the calendar's Σ
+ * productive days (calendar days − public holidays − weekends), so rows written
+ * before the Contract defaults keep exactly the number they had.
+ *
+ * The engine's HOURS stat adds the vacation hours back and removes them again by
+ * the vacation weights (VBA Section 22), so a net-of-vacation yearly total lands
+ * the hours in the right months.
+ */
+export function deriveYearlyHoursWorked(
+  position: Pick<Position, "vacationDays" | "dailyContractHours">,
+  contract: ContractDays,
+  calendar: Pick<CalendarContext, "realDays">
+): number {
+  let calendarDays = 0;
+  for (let m = 0; m < MONTHS; m++) calendarDays += calendar.realDays[m];
+  const productiveDays = contractProductiveDays(contract, calendarDays);
+  const workedDays = productiveDays - position.vacationDays;
+  return workedDays > 0 ? workedDays * position.dailyContractHours : 0;
+}
+
+/**
+ * The worked-hours figure to feed the engine, straight off the flat bag of
+ * contract values both engine paths hold. A positive stored value is a manual
+ * override entered on the grid; unset (≤ 0) derives, so a freshly added row
+ * still spreads hours. Both engine-input paths call this with the same calendar
+ * → identical results (pinned by liveSimParity).
+ */
+export function resolveYearlyHoursWorked(
+  storedYearlyHoursWorked: number,
+  position: Pick<Position, "vacationDays" | "dailyContractHours">,
+  source: Record<string, unknown>,
+  calendar: Pick<CalendarContext, "realDays">
+): number {
+  return storedYearlyHoursWorked > 0
+    ? storedYearlyHoursWorked
+    : deriveYearlyHoursWorked(position, readContractDays(source), calendar);
+}
+
+// ---------------------------------------------------------------------------
+// FTE — derived from the contract, measured against the hotel's full-timer
+// ---------------------------------------------------------------------------
 
 /**
  * A position's FTE — how much of one full-time contract it is worth. Derived,
@@ -194,11 +228,7 @@ export function deriveFte(
   contract: ContractDays,
   reference: FullTimeReference
 ): number {
-  const stated = contract.yearlyDays > 0;
-  const productiveDays = stated
-    ? contract.yearlyDays - contract.daysOff - contract.pubHolidays
-    : reference.productiveDays;
-
+  const productiveDays = contractProductiveDays(contract, reference.productiveDays);
   const workedDays = productiveDays - position.vacationDays;
   if (workedDays <= 0 || position.dailyContractHours <= 0) return 0;
 

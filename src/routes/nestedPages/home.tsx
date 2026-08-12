@@ -59,6 +59,7 @@ import {
   WEEKDAY_ORDER,
   buildDefaultCalendar,
   calendarTotals,
+  clampFractionalDays,
   isWeekendDay,
   netProductiveDays,
   reseedWeekends,
@@ -134,6 +135,16 @@ interface CalendarGridRow extends Record<string, unknown> {
 
 /** Column field for a 1-based month. */
 const monthField = (month: number) => `m${month}`;
+
+// Public holidays can be fractional, so the day cells and the totals they roll
+// into are formatted rather than printed raw — a whole day stays "31", a half
+// day reads "0.5", and summing decimals never leaks 10.700000000000001.
+// Module scope so the Intl instance is built once, not per visible cell.
+const DAYS_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+const formatDays = (value: number | null | undefined) =>
+  value === null || value === undefined || !Number.isFinite(Number(value))
+    ? ""
+    : DAYS_FORMAT.format(Number(value));
 
 /** Years offered in the picker: a window around today plus anything saved. */
 function yearOptions(savedYears: number[]): number[] {
@@ -506,6 +517,7 @@ export default function Home() {
         disableColumnMenu: true,
         headerAlign: "center",
         align: "center",
+        valueFormatter: formatDays,
       })),
       {
         field: "total",
@@ -516,6 +528,7 @@ export default function Home() {
         disableColumnMenu: true,
         headerAlign: "center",
         align: "center",
+        valueFormatter: formatDays,
         cellClassName: "calendar-cell--total",
         headerClassName: "calendar-cell--total",
       },
@@ -550,11 +563,16 @@ export default function Home() {
         ...calendar,
         months: calendar.months.map((row) => {
           if (row.month !== month) return row;
-          const value = Math.trunc(Number(newRow[changed]) || 0);
-          return {
-            ...row,
-            [metric]: Math.min(row.calendarDays, Math.max(0, value)),
-          };
+          // Public holidays may be fractional (half-day closures); weekends are
+          // whole days off the weekday pattern, so those still truncate.
+          const value =
+            metric === "publicHolidays"
+              ? clampFractionalDays(newRow[changed], row.calendarDays)
+              : Math.min(
+                  row.calendarDays,
+                  Math.max(0, Math.trunc(Number(newRow[changed]) || 0))
+                );
+          return { ...row, [metric]: value };
         }),
       };
 
@@ -989,7 +1007,8 @@ export default function Home() {
 
           <Typography variant="caption" sx={{ color: "text.secondary", mt: 2, display: "block" }}>
             Net Productive Days = Calendar Days − Public Holidays − Weekends. Double-click
-            a Public Holidays or Weekends cell to edit it.
+            a Public Holidays or Weekends cell to edit it. Public Holidays accept part
+            days (e.g. 0.5 for a half-day closure).
           </Typography>
 
           {/* ── Bank holiday premium ── */}

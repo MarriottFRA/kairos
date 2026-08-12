@@ -27,7 +27,7 @@
 import { describe, expect, it } from "vitest";
 import { makeCalendarContext } from "../../engine/calendarContext";
 import { referenceVacation } from "../../engine/reference";
-import { deriveYearlyHoursWorked } from "../engineInput";
+import { deriveYearlyHoursWorked, readContractDays } from "../engineInput";
 import { Position } from "../../engine/types";
 import { vectorKey } from "../fields";
 import { PositionRow, rowToEnginePosition } from "../rowModel";
@@ -93,12 +93,19 @@ describe("live-sim overlays do not move the derived columns", () => {
 
   it("derived manhours are identical before and after the overlay", () => {
     // The strongest case: the overlay sets yearlyHoursWorked to 1234, and the
-    // derivation must keep computing from the calendar rather than reading it.
+    // derivation must keep computing from the contract rather than reading it.
     // deriveYearlyHoursWorked's Pick<> signature is what guarantees this — the
     // test is here so widening that signature cannot pass unnoticed.
-    expect(deriveYearlyHoursWorked(overlaid(perUnit), CALENDAR)).toBe(
-      deriveYearlyHoursWorked(perUnit, CALENDAR)
+    const contract = readContractDays(trickyRow());
+    expect(deriveYearlyHoursWorked(overlaid(perUnit), contract, CALENDAR)).toBe(
+      deriveYearlyHoursWorked(perUnit, contract, CALENDAR)
     );
+  });
+
+  it("derived manhours are a real number, so the test above is not vacuous", () => {
+    expect(
+      deriveYearlyHoursWorked(perUnit, readContractDays(trickyRow()), CALENDAR)
+    ).toBeGreaterThan(0);
   });
 
   it("keeps the per-unit valuation: headcount and cluster share are not applied", () => {

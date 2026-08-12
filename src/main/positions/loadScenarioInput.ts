@@ -193,12 +193,15 @@ export async function loadScenarioInput(
       manualYearlyIncrease: record.manualYearlyIncrease,
       increaseMonth: record.increaseMonth,
       dailyContractHours: record.dailyContractHours,
-      // Auto-derived from the calendar (net productive days − vacation) × daily
-      // hours; a positive stored value is a manual override. Shared with
-      // runLiveSim via resolveYearlyHoursWorked — liveSimParity pins the two.
+      // Auto-derived from the row's own Contract columns (yearly days − days off
+      // − public holidays − vacation) × daily hours; a positive stored value is a
+      // manual override. Those day counts are POSITION_EXTRA, hence extraValues —
+      // the same bag resolveFte reads just above. Shared with runLiveSim via
+      // resolveYearlyHoursWorked — liveSimParity pins the two.
       yearlyHoursWorked: resolveYearlyHoursWorked(
         record.yearlyHoursWorked,
         record,
+        record.extraValues,
         calendar
       ),
       vacationDays: record.vacationDays,

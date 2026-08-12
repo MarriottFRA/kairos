@@ -117,11 +117,19 @@ export default function PositionFormField({
 }: PositionFormFieldProps) {
   // null = not being edited, so the box shows the formatted cell value.
   const [draft, setDraft] = useState<string | null>(null);
-  // A row swap under a focused input (Alt+Down to the next position) must not
-  // carry the previous row's half-typed text across.
+  // What the store says this cell holds right now. Watched, not just read: a
+  // draft is only a pending overwrite of the value it was seeded from, so once
+  // that value moves underneath it the draft is stale and must go.
+  const committed = rawEditText(column, def, row);
+  // Two ways it moves. A row swap under a focused input (Alt+Down to the next
+  // position) must not carry the previous row's half-typed text across. And an
+  // edit to THIS cell from outside the input — Ctrl+Z is the one that bites —
+  // must not leave the pre-undo text armed behind the reverted value: blur
+  // commits a draft, so the next click anywhere wrote the undone number
+  // straight back and the undo looked like it had never persisted.
   useEffect(() => {
     setDraft(null);
-  }, [row.id]);
+  }, [row.id, committed]);
 
   // The column's setter returns the row untouched when it decides the edit is a
   // no-op (an echoed cluster weight or derived manhours), and the dialog skips

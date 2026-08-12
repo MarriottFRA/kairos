@@ -1035,6 +1035,43 @@ function PositionsGrid({
     [apiRef]
   );
 
+  // ── Undo/redo (Ctrl+Z / Ctrl+Y) ──
+  // The grid's built-in history (MUI v9, on by default) answers the shortcut,
+  // but its handlers restore rows with apiRef.updateRows — the DISPLAY cache —
+  // and never call processRowUpdate. Left alone, an undo looks applied while
+  // the write queue, the live sim and the store all keep the typed value, and
+  // a reload resurrects it. This listener runs after the grid has repainted
+  // the restored row; it replays that row through the same onRowUpdate
+  // pipeline as a typed edit, so an undo sanitizes, cascades (department-code
+  // autofill, the salary pair), persists and cluster-syncs exactly as if the
+  // user had typed the old value back. Redo is the same event shape.
+  const replayHistory = useCallback(
+    (params: { eventName: string; data: unknown }) => {
+      const data = params.data as
+        | { id?: GridRowId; newRows?: ReadonlyMap<GridRowId, unknown> }
+        | null
+        | undefined;
+      // Cell and row edits carry one id; a paste-undo carries a map of rows.
+      const ids: GridRowId[] =
+        data?.id !== undefined
+          ? [data.id]
+          : data?.newRows
+            ? [...data.newRows.keys()]
+            : [];
+      if (ids.length === 0) return;
+      const before = new Map(rows.map((row) => [row.id, row]));
+      for (const id of ids) {
+        // The grid already applied the restore, so ITS row is the target state
+        // and the page's row (still pre-undo) is the baseline to diff against.
+        const restored = apiRef.current?.getRow(id) as PositionRow | undefined;
+        const previous = before.get(String(id));
+        if (!restored || !previous || restored === previous) continue;
+        onRowUpdate(restored, previous);
+      }
+    },
+    [rows, apiRef, onRowUpdate]
+  );
+
   // Inactive positions are hidden rather than removed — they stay in the store,
   // roll forward to next year, and come back with the toggle.
   //
@@ -1155,6 +1192,8 @@ function PositionsGrid({
         onCellKeyDown={handleCellKeyDown}
         processRowUpdate={onRowUpdate}
         onProcessRowUpdateError={onRowUpdateError}
+        onUndo={replayHistory}
+        onRedo={replayHistory}
         onClipboardPasteStart={onPasteStart}
         onClipboardPasteEnd={onPasteEnd}
         splitClipboardPastedText={splitClipboardPastedText}

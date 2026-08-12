@@ -37,6 +37,9 @@ export const CALENDAR_TABLES_SQL = `
       year INTEGER NOT NULL,
       month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
       calendar_days INTEGER NOT NULL,
+      -- Fractional: a half-day closure is 0.5. The declared INTEGER affinity is
+      -- NUMERIC, which only narrows a value when that is lossless, so 0.5 round
+      -- trips as REAL — no table rebuild needed to widen the type.
       public_holidays INTEGER NOT NULL DEFAULT 0,
       weekend_days INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (ou, year, month),

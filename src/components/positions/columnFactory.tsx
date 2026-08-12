@@ -1088,8 +1088,10 @@ function buildColumn(
   }
 
   // Manhours Worked: shows the row's EFFECTIVE worked hours — a positive manual
-  // override, else the calendar-derived value (Σ net productive days − vacation
-  // × daily hours), which is what the engine spreads. Editable so the auto value
+  // override, else the value derived from this row's own Contract columns (yearly
+  // days − days off − public holidays − vacation, × daily hours), which is what
+  // the engine spreads. Sits on the same inputs as Manhours Paid and FTE, so all
+  // three move together when a Contract cell is edited. Editable so the auto value
   // can be overridden; an untouched commit echoes the derived value back, which
   // the valueSetter drops so the cell stays auto (mirrors the Cluster Multiplier
   // override). An empty cell persists as 0 → the loaders re-derive it.
@@ -1136,8 +1138,8 @@ function buildColumn(
           ? num.toLocaleString(undefined, { maximumFractionDigits: 0 })
           : "";
       const title = overridden
-        ? "Manual override — clear the cell to fall back to the calendar-derived hours (productive days − vacation × daily hours)."
-        : "Auto-calculated: (calendar productive days − vacation days) × daily hours. Type a value to override.";
+        ? "Manual override — clear the cell to fall back to the derived hours (yearly days − days off − public holidays − vacation, × daily hours)."
+        : "Auto-calculated from this row's contract: (yearly days − days off − public holidays − vacation days) × daily hours. Type a value to override.";
       return (
         <Tooltip title={title}>
           <span>{label}</span>
