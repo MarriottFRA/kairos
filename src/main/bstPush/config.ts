@@ -31,6 +31,7 @@ import {
 const PREFIX_KEY = "bstPushClearPrefixes";
 const MONTHS_KEY = "bstPushMonthPlan";
 const BACKUP_KEY = "bstPushBackup";
+const SKIP_UNUSED_KEY = "bstPushSkipUnusedCombos";
 
 export async function readBstPushConfig(): Promise<BstPushConfig> {
   try {
@@ -39,6 +40,7 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
       unknown
     >;
     const backup = settings[BACKUP_KEY];
+    const skipUnusedCombos = settings[SKIP_UNUSED_KEY];
     return {
       // An absent key means "never configured", which must land on the
       // defaults; an empty saved list means "the user deleted every rule" and
@@ -50,6 +52,10 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
       months: normalizeMonthPlan(settings[MONTHS_KEY]),
       backup:
         typeof backup === "boolean" ? backup : DEFAULT_BST_PUSH_CONFIG.backup,
+      skipUnusedCombos:
+        typeof skipUnusedCombos === "boolean"
+          ? skipUnusedCombos
+          : DEFAULT_BST_PUSH_CONFIG.skipUnusedCombos,
     };
   } catch (error) {
     console.warn("[BST Push] Could not read the saved configuration:", error);
@@ -57,6 +63,7 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
       clearPrefixes: [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes],
       months: [...DEFAULT_BST_PUSH_CONFIG.months],
       backup: DEFAULT_BST_PUSH_CONFIG.backup,
+      skipUnusedCombos: DEFAULT_BST_PUSH_CONFIG.skipUnusedCombos,
     };
   }
 }
@@ -78,6 +85,9 @@ export async function writeBstPushConfig(raw: unknown): Promise<BstPushConfig> {
   }
   if (typeof patch.backup === "boolean") {
     updates[BACKUP_KEY] = patch.backup;
+  }
+  if (typeof patch.skipUnusedCombos === "boolean") {
+    updates[SKIP_UNUSED_KEY] = patch.skipUnusedCombos;
   }
 
   if (Object.keys(updates).length > 0) {

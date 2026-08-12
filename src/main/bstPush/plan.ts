@@ -246,6 +246,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
   const writeCellsByMonth = new Array<number>(PUSH_MONTHS).fill(0);
   const writeTotalByMonth = new Array<number>(PUSH_MONTHS).fill(0);
   let nonFiniteRows = 0;
+  const skippedCombos = new Set<string>();
 
   for (const row of outputs) {
     const sheet = toSheetName(row.dept);
@@ -259,14 +260,20 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     // zeroes means adding the row to the BST would change nothing, so the row
     // is informational — it must not count as a problem or trigger the
     // missing-sheet warning. (A zero row that DOES exist stays a write: a
-    // genuine zero is still a value the BST should hold.)
+    // genuine zero is still a value the BST should hold — unless the user
+    // switched `skipUnusedCombos` on, in which case the row is left exactly as
+    // the BST holds it, excluded from the clear pass included.)
     const hasData = row.months.some((value) => (Number(value) || 0) !== 0);
 
     let status: ComboStatus;
-    if (location) status = location.duplicate ? "duplicate_row" : "write";
-    else if (!hasData) status = "no_data";
+    if (location) {
+      if (!hasData && options.skipUnusedCombos) status = "skipped";
+      else status = location.duplicate ? "duplicate_row" : "write";
+    } else if (!hasData) status = "no_data";
     else if (sheetExists) status = "no_row";
     else status = "no_sheet";
+
+    if (status === "skipped") skippedCombos.add(combo);
 
     const scaled = scaleMonths(row.months, bareAccount, options.months);
     if (scaled.skippedNonFinite) nonFiniteRows++;
@@ -282,7 +289,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         writeCellsByMonth[m]++;
         writeTotalByMonth[m] += scaled.months[m];
       }
-    } else if (status !== "no_data") {
+    } else if (status !== "no_data" && status !== "skipped") {
       problemCount++;
       if (status === "no_sheet") missingSheets.add(sheet);
     }
@@ -318,7 +325,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
 
   // Tallied from the writer's own list rather than recomputed, so the number on
   // every month tile is by construction the number of cells that will change.
-  const zeroWrites = toZeroWrites(target, options, clearPrefixes);
+  const zeroWrites = toZeroWrites(target, options, clearPrefixes, skippedCombos);
   const clearCellsByMonth = new Array<number>(PUSH_MONTHS).fill(0);
   for (const write of zeroWrites) {
     clearCellsByMonth[write.col - BUDGET_COL_START]++;
@@ -369,6 +376,13 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     warnings.push(
       `${nonFiniteRows} row(s) contained a value that is not a finite number. ` +
         `Those months were skipped rather than written.`
+    );
+  }
+  if (skippedCombos.size > 0) {
+    warnings.push(
+      `${skippedCombos.size} combo(s) exist in the BST but hold no data in ` +
+        `Kairos, and "skip unused combos" is on — those rows keep whatever ` +
+        `the BST already has, and the clear rules leave them alone too.`
     );
   }
   const skipped = monthsWhere((action) => action === "skip");
@@ -453,6 +467,7 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     departmentCount: departments.size,
     writeCount,
     problemCount,
+    skippedCount: skippedCombos.size,
     cellCount,
     zeroCellCount: zeroWrites.length,
     warnings,
@@ -464,9 +479,10 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
 export function countZeroableCells(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[]
+  prefixes: string[],
+  excludeCombos?: ReadonlySet<string>
 ): number {
-  return toZeroWrites(target, options, prefixes).length;
+  return toZeroWrites(target, options, prefixes, excludeCombos).length;
 }
 
 /** One cell the writer must change: sheet, row, 0-based column, value. */
@@ -493,7 +509,10 @@ export interface CellWrite {
 export function toZeroWrites(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[]
+  prefixes: string[],
+  /** Combos the push is leaving untouched (`skipUnusedCombos`) — a skipped row
+   *  that the clear pass then zeroed anyway would make the option a no-op. */
+  excludeCombos?: ReadonlySet<string>
 ): CellWrite[] {
   const columns: number[] = [];
   for (let m = 0; m < PUSH_MONTHS; m++) {
@@ -504,6 +523,7 @@ export function toZeroWrites(
   const writes: CellWrite[] = [];
   for (const locations of target.bySheet.values()) {
     for (const location of locations) {
+      if (excludeCombos?.has(location.combo)) continue;
       if (!matchesClearRules(location.combo.slice(5), prefixes)) continue;
       for (const col of columns) {
         writes.push({
@@ -532,14 +552,22 @@ export function toZeroWrites(
  * bug is not ported.
  */
 export function toCellWrites(plan: BstPushPlan, target: BstTarget): CellWrite[] {
+  // Rebuilt from the plan's own rows for the same reason the prefixes are: the
+  // skips the user approved are the skips the writer honours.
+  const skippedCombos = new Set(
+    plan.rows
+      .filter((row) => row.status === "skipped")
+      .map((row) => row.combo)
+  );
   const writes: CellWrite[] = toZeroWrites(
     target,
     plan.options,
-    plan.clearScope.prefixes
+    plan.clearScope.prefixes,
+    skippedCombos
   );
 
   for (const row of plan.rows) {
-    if (row.targetRow == null) continue;
+    if (row.targetRow == null || row.status === "skipped") continue;
     for (let m = 0; m < PUSH_MONTHS; m++) {
       const action = plan.options.months[m];
       if (!writesValues(action)) continue;

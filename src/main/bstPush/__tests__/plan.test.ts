@@ -139,6 +139,7 @@ const RULES = [...DEFAULT_CLEAR_PREFIXES];
 const every = (action: MonthAction): BstPushOptions => ({
   months: Array.from({ length: 12 }, () => action),
   backup: true,
+  skipUnusedCombos: false,
 });
 
 /** `skip` everywhere except the 1-based months listed. */
@@ -147,6 +148,7 @@ const only = (action: MonthAction, ...months: number[]): BstPushOptions => ({
     months.includes(index + 1) ? action : "skip"
   ),
   backup: true,
+  skipUnusedCombos: false,
 });
 
 function plan(
@@ -248,6 +250,14 @@ describe("option normalization", () => {
     expect(
       normalizeBstPushOptions({ mode: "add", zeroFirst: true }).months[0]
     ).toBe("replace");
+  });
+
+  it("defaults skipUnusedCombos off and passes an explicit choice through", () => {
+    // Off is the behaviour the tool always had — a genuine zero row still
+    // overwrites — so an absent or garbled flag must land there.
+    expect(normalizeBstPushOptions(undefined).skipUnusedCombos).toBe(false);
+    expect(normalizeBstPushOptions({ skipUnusedCombos: "yes" }).skipUnusedCombos).toBe(false);
+    expect(normalizeBstPushOptions({ skipUnusedCombos: true }).skipUnusedCombos).toBe(true);
   });
 
   it("defaults anything unrecognisable to a full replace", () => {
@@ -387,6 +397,44 @@ describe("buildPushPlan", () => {
     expect(result.warnings.join(" ")).not.toMatch(/Dept Settings/);
   });
 
+  it("leaves an unused combo entirely alone when skipUnusedCombos is on", () => {
+    const options: BstPushOptions = { ...every("replace"), skipUnusedCombos: true };
+    const result = plan(
+      [
+        outRow("D0010", "A560320", 0), // matched in the BST, all zeroes → skipped
+        outRow("D0010", "A510000", 1000), // has data → written as before
+      ],
+      options
+    );
+    const status = Object.fromEntries(
+      result.rows.map((row) => [row.combo, row.status])
+    );
+    expect(status["0010-560320"]).toBe("skipped");
+    expect(status["0010-510000"]).toBe("duplicate_row");
+    expect(result.skippedCount).toBe(1);
+    expect(result.writeCount).toBe(1);
+    // Skipped is deliberate, not a failure to land.
+    expect(result.problemCount).toBe(0);
+    expect(result.warnings.join(" ")).toMatch(/skip unused combos/);
+
+    // The whole point: the skipped row (560320, row 33) gets no write at all —
+    // not even from the clear pass its "5" prefix would otherwise pull it into.
+    const writes = toCellWrites(result, target);
+    expect(writes.some((write) => write.sheet === "0010" && write.row === 33)).toBe(false);
+    // Rows Kairos never produces still clear — the rules' clean-up job is not
+    // narrowed, only the combos the user chose to leave alone are spared.
+    expect(writes.some((write) => write.sheet === "0010" && write.row === 226)).toBe(true);
+    // The tile arithmetic follows: nothing counted for the skipped row.
+    expect(result.zeroCellCount).toBe(toZeroWrites(target, options, RULES).length - 12);
+  });
+
+  it("still overwrites an all-zero row when the toggle is off", () => {
+    const result = plan([outRow("D0010", "A560320", 0)], every("replace"));
+    expect(result.rows[0].status).toBe("write");
+    expect(result.skippedCount).toBe(0);
+    expect(result.cellCount).toBe(12);
+  });
+
   it("writes only the chosen months, without shifting the data", () => {
     const result = plan(
       [outRow("D0010", "A560320", 12_000)],
@@ -409,6 +457,7 @@ describe("buildPushPlan", () => {
         "replace", "replace", "replace", "replace",
       ],
       backup: true,
+      skipUnusedCombos: false,
     };
     const result = plan([outRow("D0010", "A560320", 12_000)], options);
     const byMonth = Object.fromEntries(
@@ -588,6 +637,7 @@ describe("cell writes", () => {
         "replace", "replace", "replace",
       ],
       backup: true,
+      skipUnusedCombos: false,
     };
     const result = plan([outRow("D0010", "A560320", 12_000)], options);
     const writes = toCellWrites(result, target);

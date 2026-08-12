@@ -307,6 +307,7 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
           clearScope: plan.clearScope,
           writeCount: plan.writeCount,
           problemCount: plan.problemCount,
+          skippedCount: plan.skippedCount,
           cellCount: plan.cellCount,
           zeroCellCount: plan.zeroCellCount,
           sheetsTouched: applied.sheetsTouched,

@@ -85,6 +85,15 @@ export interface BstPushOptions {
   months: MonthAction[];
   /** Copy the workbook next to itself before touching it. */
   backup: boolean;
+  /**
+   * Leave BST rows alone when Kairos holds only zeroes for the combo — the
+   * combos that exist purely because departments × accounts matrixes them out.
+   * Off by default: a genuine zero is a value the BST should hold, and
+   * overwriting is what the tool always did. When on, a skipped row is not
+   * written AND not cleared — otherwise the clear pass would zero it anyway and
+   * the option would change nothing.
+   */
+  skipUnusedCombos: boolean;
 }
 
 /** Every month replaced — the same thing the old mode/zeroFirst/firstMonth
@@ -97,6 +106,7 @@ export const DEFAULT_MONTH_PLAN: MonthAction[] = Array.from(
 export const DEFAULT_BST_PUSH_OPTIONS: BstPushOptions = {
   months: [...DEFAULT_MONTH_PLAN],
   backup: true,
+  skipUnusedCombos: false,
 };
 
 function isMonthAction(value: unknown): value is MonthAction {
@@ -152,7 +162,11 @@ export function normalizeMonthPlan(raw: unknown): MonthAction[] {
 
 /** Defensive normalizer — the renderer's payload is untrusted. */
 export function normalizeBstPushOptions(raw: unknown): BstPushOptions {
-  const source = (raw ?? {}) as { months?: unknown; backup?: unknown };
+  const source = (raw ?? {}) as {
+    months?: unknown;
+    backup?: unknown;
+    skipUnusedCombos?: unknown;
+  };
   return {
     months: normalizeMonthPlan(
       source.months !== undefined ? source.months : source
@@ -161,6 +175,10 @@ export function normalizeBstPushOptions(raw: unknown): BstPushOptions {
       typeof source.backup === "boolean"
         ? source.backup
         : DEFAULT_BST_PUSH_OPTIONS.backup,
+    skipUnusedCombos:
+      typeof source.skipUnusedCombos === "boolean"
+        ? source.skipUnusedCombos
+        : DEFAULT_BST_PUSH_OPTIONS.skipUnusedCombos,
   };
 }
 
@@ -234,12 +252,14 @@ export interface BstPushConfig {
   /** The month plan the user last used — the same selection tends to repeat. */
   months: MonthAction[];
   backup: boolean;
+  skipUnusedCombos: boolean;
 }
 
 export const DEFAULT_BST_PUSH_CONFIG: BstPushConfig = {
   clearPrefixes: [...DEFAULT_CLEAR_PREFIXES],
   months: [...DEFAULT_MONTH_PLAN],
   backup: true,
+  skipUnusedCombos: false,
 };
 
 export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
@@ -251,6 +271,10 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
       typeof source.backup === "boolean"
         ? source.backup
         : DEFAULT_BST_PUSH_CONFIG.backup,
+    skipUnusedCombos:
+      typeof source.skipUnusedCombos === "boolean"
+        ? source.skipUnusedCombos
+        : DEFAULT_BST_PUSH_CONFIG.skipUnusedCombos,
   };
 }
 
@@ -266,12 +290,17 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
  * `no_data` is the quiet cousin of those two: the combo is missing from the BST
  * *and* Kairos holds only zeroes for it, so adding the row would change nothing.
  * It is informational, not a problem — it never counts toward `problemCount`.
+ *
+ * `skipped` is `no_data`'s counterpart for a combo that IS in the BST: Kairos
+ * holds only zeroes and the user switched `skipUnusedCombos` on, so the row is
+ * deliberately left exactly as the BST has it — neither written nor cleared.
  */
 export type ComboStatus =
   | "write"
   | "no_sheet"
   | "no_row"
   | "no_data"
+  | "skipped"
   | "duplicate_row"
   | "zeroed";
 
@@ -385,6 +414,8 @@ export interface BstPushPlan {
   writeCount: number;
   /** Rows that cannot be written (no_sheet + no_row). */
   problemCount: number;
+  /** BST rows left untouched because `skipUnusedCombos` is on. */
+  skippedCount: number;
   /** Individual month cells that will be written. */
   cellCount: number;
   /** Cells the clear pass will zero, summed over the cleared months. */
@@ -401,6 +432,7 @@ export interface BstPushReport {
   clearScope: ClearScope;
   writeCount: number;
   problemCount: number;
+  skippedCount: number;
   cellCount: number;
   zeroCellCount: number;
   /** Department sheets the writer actually changed. */

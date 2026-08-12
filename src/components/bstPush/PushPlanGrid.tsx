@@ -78,6 +78,15 @@ export const STATUS_META: Record<
       "no need to add it.",
     icon: HorizontalRuleIcon,
   },
+  skipped: {
+    label: "Left untouched",
+    color: "default",
+    hint:
+      "Kairos has no data for this combo and unused combos are being " +
+      "skipped, so the BST row keeps exactly what it holds — the clear " +
+      "rules pass over it too.",
+    icon: HorizontalRuleIcon,
+  },
   zeroed: {
     label: "Cleared only",
     color: "default",
@@ -262,7 +271,7 @@ export default function PushPlanGrid({
       getRowClassName={(params) =>
         params.row?.status === "no_row" || params.row?.status === "no_sheet"
           ? "bst-row--problem"
-          : params.row?.status === "no_data"
+          : params.row?.status === "no_data" || params.row?.status === "skipped"
             ? "bst-row--muted"
             : ""
       }

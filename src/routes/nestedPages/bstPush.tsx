@@ -284,6 +284,12 @@ function consequence(plan: BstPushPlan): string {
         ` matching the clear rules.`
     );
   }
+  if (plan.skippedCount > 0) {
+    parts.push(
+      `Leaves ${count(plan.skippedCount)} unused combo row${plan.skippedCount === 1 ? "" : "s"}` +
+        ` untouched.`
+    );
+  }
   parts.push(
     plan.options.backup
       ? "A backup is saved beside the file first."
@@ -303,6 +309,7 @@ function reportText(report: BstPushReport): string {
     `Rows written: ${report.writeCount}`,
     `Cells written: ${report.cellCount}`,
     `Cells cleared: ${report.zeroCellCount}`,
+    `Unused combos left untouched: ${report.skippedCount}`,
     `Sheets touched: ${report.sheetsTouched}`,
     `Rows not written: ${report.problemCount}`,
     `Backup: ${report.backupPath ?? "none"}`,
@@ -476,7 +483,11 @@ export default function BstPush() {
         const saved = await loadBstPushConfig(ou);
         if (cancelled) return;
         setPushConfig(saved);
-        setOptions({ months: saved.months, backup: saved.backup });
+        setOptions({
+          months: saved.months,
+          backup: saved.backup,
+          skipUnusedCombos: saved.skipUnusedCombos,
+        });
       } catch (err) {
         console.error("Failed to read the saved BST push config:", err);
       }
@@ -528,7 +539,11 @@ export default function BstPush() {
     (next: BstPushOptions) => {
       setOptions(next);
       if (!ou) return;
-      void saveBstPushConfig(ou, { months: next.months, backup: next.backup })
+      void saveBstPushConfig(ou, {
+        months: next.months,
+        backup: next.backup,
+        skipUnusedCombos: next.skipUnusedCombos,
+      })
         .then(setPushConfig)
         .catch((err) =>
           console.error("Failed to save the BST push config:", err)
@@ -599,7 +614,11 @@ export default function BstPush() {
   // A newly chosen file already arrives with its options applied, so the first
   // run after one lands must not re-fetch.
   const settledOptions = useRef<string | null>(null);
-  const optionKey = `${planFilePath}|${options.months.join(",")}|r${rulesRevision}`;
+  // `skipUnusedCombos` is here and `backup` is not: the former changes what the
+  // plan writes, the latter changes nothing about it.
+  const optionKey =
+    `${planFilePath}|${options.months.join(",")}` +
+    `|u${options.skipUnusedCombos ? 1 : 0}|r${rulesRevision}`;
   useEffect(() => {
     if (!planFilePath) {
       settledOptions.current = null;
@@ -825,6 +844,31 @@ export default function BstPush() {
                   label={
                     <Typography variant="body2">
                       Back up the file before writing
+                    </Typography>
+                  }
+                />
+                <FormControlLabel
+                  sx={{ display: "flex", mt: 0.5 }}
+                  control={
+                    <Switch
+                      size="small"
+                      checked={options.skipUnusedCombos}
+                      // A refresh must not lock this either — same reason as the
+                      // month strip above.
+                      disabled={busy === "commit"}
+                      onChange={(event) =>
+                        updateOptions({
+                          ...options,
+                          skipUnusedCombos: event.target.checked,
+                        })
+                      }
+                    />
+                  }
+                  label={
+                    <Typography variant="body2">
+                      Skip unused combos — a row Kairos holds no data for keeps
+                      whatever the BST already has, instead of being overwritten
+                      with zeroes
                     </Typography>
                   }
                 />
@@ -1161,6 +1205,13 @@ function SummaryTiles({
           value={count(source.zeroCellCount)}
           label={past ? "Cells cleared" : "Cells to clear"}
           hint={`Rows matching the clear rules (${source.clearScope.prefixes.join(", ") || "none"}), zeroed in every cleared month`}
+        />
+      )}
+      {source.skippedCount > 0 && (
+        <StatTile
+          value={count(source.skippedCount)}
+          label={past ? "Rows left untouched" : "Rows to leave untouched"}
+          hint="Unused combos — Kairos holds no data for them, so they keep whatever the BST already has"
         />
       )}
       <StatTile
