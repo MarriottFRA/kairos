@@ -158,7 +158,14 @@ export async function loadScenarioInput(
         scope.ou,
         record.cluster,
         record.clusterMultiplierOverride,
-        clusterById
+        clusterById,
+        // The travelling ratio: on a machine without the cluster definition
+        // (a downloaded plan), the owner-stamped weight and name apply instead
+        // of the ×1 DANGLING fallback. Mirrors runLiveSim.
+        {
+          weight: record.clusterWeightSnapshot,
+          name: record.clusterNameSnapshot,
+        }
       );
       // Length of service from the hiring date, for the SERVICE bases. Mirrors
       // runLiveSim; serviceDaysParity pins the two.

@@ -178,6 +178,16 @@ export const POSITIONS_VALUE_TABLES_SQL = `
       vacation_days            REAL NOT NULL DEFAULT 0,
       vacation_monthly_weights TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
       accrual_days_per_month   REAL NOT NULL DEFAULT 0,
+      -- The effective cluster ratio and name, as last computed by a machine
+      -- that HOLDS the cluster definition (secure v5). Cluster definitions are
+      -- plaintext reference data that never sync; these travel with the
+      -- position through publish/pull so a machine WITHOUT the definition
+      -- still shows the right name and computes the right share instead of
+      -- silently falling back to ×1. NULL = never stamped (no cluster, or the
+      -- row predates the column). Written by the sync pull and by the publish
+      -- collector — never by the grid.
+      cluster_weight_snapshot  REAL,
+      cluster_name_snapshot    TEXT,
       extra_values             TEXT NOT NULL DEFAULT '{}',
       updated_at               TEXT NOT NULL,
       deleted_at               TEXT
@@ -497,6 +507,37 @@ export function applyValueStoreV12(
     `CREATE INDEX IF NOT EXISTS idx_positions_cluster_link
        ON positions (cluster_link_id)`
   );
+}
+
+/**
+ * Add positions.cluster_weight_snapshot / cluster_name_snapshot (secure v5).
+ *
+ * The travelling copy of a position's effective cluster share. Cluster
+ * definitions live in the plaintext store of the machine that created them and
+ * never sync, so a plan downloaded elsewhere resolved every assignment to
+ * DANGLING — weight ×1 and no name — and quietly computed different totals
+ * than the owner's machine. These columns carry the owner-resolved name and
+ * weight inside the position payload; `resolveHotelClusterWeight` falls back
+ * to them when the definition is absent. Fresh installs get the columns from
+ * the DDL above; this backfills upgraded stores. No data backfill — values
+ * arrive with the next publish/pull. Idempotent — the column check is the
+ * guard.
+ */
+export function applyClusterSnapshotColumns(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("cluster_weight_snapshot")) {
+    handle.exec(`ALTER TABLE positions ADD COLUMN cluster_weight_snapshot REAL`);
+  }
+  if (!present.has("cluster_name_snapshot")) {
+    handle.exec(`ALTER TABLE positions ADD COLUMN cluster_name_snapshot TEXT`);
+  }
 }
 
 /**

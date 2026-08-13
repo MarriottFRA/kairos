@@ -37,6 +37,7 @@ import {
   DepartmentWritePolicy,
   canWriteDepartment,
 } from "../../shared/kairosSync/writePolicy";
+import { clusterSnapshotContext, stampClusterSnapshot } from "./clusterSnapshot";
 
 type Db = InstanceType<typeof Database>;
 
@@ -190,12 +191,21 @@ export function collectLocalEntities(
   const unpublishable: UnpublishableRow[] = [];
   const scannedTypes = new Set<PublishedEntityType>();
 
+  // The cluster definitions this machine holds — positions get their effective
+  // cluster ratio stamped into the payload before hashing, so the ratio
+  // travels to machines that lack the definitions. Every other site that
+  // hashes a position payload stamps the same way; see clusterSnapshot.ts.
+  const clusters = clusterSnapshotContext(deps.localDb);
+
   for (const entityType of PUBLISH_ORDER) {
     if (entityType === "position_pii" && !includePii) continue;
     scannedTypes.add(entityType);
 
     for (const row of rowsFor(deps, entityType, ou, planId)) {
-      const mapped = toEntity(entityType, row);
+      const mapped = toEntity(
+        entityType,
+        entityType === "position" ? stampClusterSnapshot(row, clusters) : row
+      );
       if (entityType === "position") {
         departmentByPosition.set(mapped.entityId, mapped.department);
       }

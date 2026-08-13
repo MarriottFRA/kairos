@@ -228,7 +228,27 @@ export function scenarioFromPayload(payload: EntityPayload): Row {
 // ------------------------------------------------------------------ position
 
 export function positionToPayload(row: Row): EntityPayload {
+  /**
+   * The travelling cluster ratio — only ever PRESENT, never null.
+   *
+   * Omitting the keys when there is nothing stamped keeps the payload — and
+   * therefore the content hash — byte-identical to what every pre-snapshot
+   * build produced, so shipping this does not mark every position in every
+   * plan as "changed, publish me". Only rows that actually gain a ratio
+   * re-hash, and those genuinely did change. The pair is gated on the weight:
+   * a name with no ratio is not a snapshot, it is leftovers.
+   */
+  const weightSnapshot = nullableNum(row.cluster_weight_snapshot);
+  const snapshot =
+    weightSnapshot !== null
+      ? {
+          clusterWeightSnapshot: weightSnapshot,
+          clusterNameSnapshot: str(row.cluster_name_snapshot),
+        }
+      : {};
+
   return {
+    ...snapshot,
     id: str(row.id),
     ou: str(row.ou),
     scenarioId: str(row.scenario_id),
@@ -288,6 +308,13 @@ export function positionFromPayload(payload: EntityPayload): Row {
     vacation_days: num(payload.vacationDays),
     vacation_monthly_weights: text(months(payload.vacationMonthlyWeights)),
     accrual_days_per_month: num(payload.accrualDaysPerMonth),
+    // Always emitted, so a pull OVERWRITES a stale local snapshot with null
+    // when the incoming payload no longer carries one (cluster cleared).
+    cluster_weight_snapshot: nullableNum(payload.clusterWeightSnapshot),
+    cluster_name_snapshot:
+      nullableNum(payload.clusterWeightSnapshot) !== null
+        ? str(payload.clusterNameSnapshot)
+        : null,
     extra_values: text(json<Record<string, unknown>>(payload.extraValues, {})),
     updated_at: nullableStr(payload.updatedAt) ?? new Date().toISOString(),
     deleted_at: nullableStr(payload.deletedAt),

@@ -81,6 +81,17 @@ export interface ApplyResult {
   deleted: number;
   /** Types the server sent that this client version does not know. */
   skippedTypes: string[];
+  /**
+   * Rows put aside because their parent position is not in the store yet.
+   *
+   * Only with `deferMissingParents`, and only the two types whose FK points at
+   * `positions(id)`. `/changes` orders rows by server sequence, not by type, and
+   * a page boundary can therefore land a component value a page ahead of the
+   * position it belongs to — each page commits its own transaction, so "later
+   * this page" is not enough. The caller retries these after the last page,
+   * when every position that is coming has arrived.
+   */
+  deferred: ChangeEntity[];
 }
 
 /**
@@ -115,7 +126,8 @@ function upsertSql(entityType: PublishedEntityType, columns: string[]): string {
 export function applyEntities(
   deps: ApplyDeps,
   entities: ChangeEntity[],
-  order: readonly string[]
+  order: readonly string[],
+  opts?: { deferMissingParents?: boolean }
 ): ApplyResult {
   const byType = new Map<string, ChangeEntity[]>();
   for (const entity of entities) {
@@ -129,7 +141,7 @@ export function applyEntities(
     ...[...byType.keys()].filter((type) => !order.includes(type)),
   ];
 
-  const result: ApplyResult = { applied: 0, deleted: 0, skippedTypes: [] };
+  const result: ApplyResult = { applied: 0, deleted: 0, skippedTypes: [], deferred: [] };
   const localWork: Array<() => void> = [];
   const secureWork: Array<() => void> = [];
 
@@ -162,7 +174,26 @@ export function applyEntities(
       if (entity.deleted) result.deleted += 1;
       else result.applied += 1;
 
-      queue.push(() => upsertRow(db, type, row));
+      queue.push(() => {
+        try {
+          upsertRow(db, type, row);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            opts?.deferMissingParents === true &&
+            /FOREIGN KEY/i.test(message) &&
+            missingParentPositionId(db, type, entity) !== null
+          ) {
+            // Not lost, not counted: the caller re-applies these after the
+            // last page, once the parent has had every chance to arrive.
+            if (entity.deleted) result.deleted -= 1;
+            else result.applied -= 1;
+            result.deferred.push(entity);
+            return;
+          }
+          throw describeApplyFailure(db, error, type, entity);
+        }
+      });
     }
   }
 
@@ -177,6 +208,79 @@ export function applyEntities(
   }
 
   return result;
+}
+
+/**
+ * Turn a bare SQLite error into one that names the row it died on.
+ *
+ * "FOREIGN KEY constraint failed" reaches the Sync page with no way to tell
+ * WHICH of ten thousand rows was the problem, and the only two FKs on this
+ * path both point at `positions(id)` — so when that is the failure, look the
+ * parent up and say whether it is missing or merely arrived after its
+ * children. The full detail also goes to the main-process console, which is
+ * where a dev build's terminal shows it.
+ */
+function describeApplyFailure(
+  db: Db,
+  error: unknown,
+  entityType: PublishedEntityType,
+  entity: ChangeEntity
+): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  let diagnosis = "";
+  if (
+    /FOREIGN KEY/i.test(message) &&
+    (entityType === "component_value" || entityType === "position_pii")
+  ) {
+    const missing = missingParentPositionId(db, entityType, entity);
+    diagnosis =
+      missing !== null
+        ? ` Its position ${missing} is not on this computer — ` +
+          "the server sent this row without its parent position."
+        : " Its position exists locally, so the failure is on another key.";
+  }
+  console.error("[kairosSync] apply failed", {
+    entityType,
+    entityId: entity.entityId,
+    department: entity.department,
+    deleted: entity.deleted,
+    serverSeq: entity.serverSeq,
+    sqlite: message,
+    diagnosis: diagnosis.trim(),
+  });
+  return new Error(
+    `Could not write ${entityType} ${entity.entityId}` +
+      (entity.department ? ` (department ${entity.department})` : "") +
+      `: ${message}.${diagnosis}`
+  );
+}
+
+/**
+ * The id of the parent position a child row needs and the store lacks, or null
+ * when it is present (or the type has no parent).
+ *
+ * Both FKs on this path point at `positions(id)`: `component_value` carries the
+ * parent in the first half of its composite id, `position_pii` IS the parent id.
+ * A soft-deleted parent still satisfies the constraint, so no deleted_at filter.
+ */
+function missingParentPositionId(
+  db: Db,
+  entityType: PublishedEntityType,
+  entity: ChangeEntity
+): string | null {
+  let positionId: string;
+  if (entityType === "component_value") {
+    const cut = entity.entityId.indexOf(":");
+    if (cut <= 0) return null;
+    positionId = entity.entityId.slice(0, cut);
+  } else if (entityType === "position_pii") {
+    positionId = entity.entityId;
+  } else {
+    return null;
+  }
+  const held =
+    prepared(db, `SELECT 1 FROM positions WHERE id = ?`).get(positionId) !== undefined;
+  return held ? null : positionId;
 }
 
 function upsertRow(db: Db, entityType: PublishedEntityType, row: Row): void {

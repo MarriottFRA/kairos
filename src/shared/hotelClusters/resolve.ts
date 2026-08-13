@@ -7,6 +7,9 @@
  * Resolution order (the spec):
  *   1. No cluster id ('' / null)            → weight 1, NONE
  *   2. Unknown / deleted cluster            → weight 1, DANGLING  (+ warning)
+ *      — UNLESS the row carries a snapshot (see below): a downloaded plan's
+ *        rows travel with the owner-resolved name and weight, and a machine
+ *        that lacks the definitions uses them → snapshot weight, SNAPSHOT.
  *   3. Position's OU not a member           → weight 1, NOT_MEMBER (+ warning)
  *      — membership is checked BEFORE the override: an override never
  *        rescues a broken assignment.
@@ -14,6 +17,11 @@
  *      — the manual override is only honored while the cluster has exactly
  *        one member hotel; with several members the weights ARE the spread.
  *   5. Otherwise                            → the member's weight, CLUSTER
+ *
+ * The snapshot fallback only ever applies at step 2. A definition this machine
+ * HOLDS always wins over whatever a payload once said — the snapshot exists
+ * for machines where the cluster cannot be resolved at all, not as a second
+ * opinion where it can.
  */
 
 import { isValidClusterWeight, type HotelClusterDto } from "./ipc";
@@ -23,7 +31,15 @@ export type ClusterWeightSource =
   | "CLUSTER"
   | "OVERRIDE"
   | "DANGLING"
-  | "NOT_MEMBER";
+  | "NOT_MEMBER"
+  /** The travelling ratio a machine without the definition falls back to. */
+  | "SNAPSHOT";
+
+/** The owner-resolved ratio that travels on the position row itself. */
+export interface ClusterSnapshot {
+  weight: number | null | undefined;
+  name?: string | null;
+}
 
 export interface ResolvedClusterWeight {
   weight: number;
@@ -44,12 +60,20 @@ export function resolveHotelClusterWeight(
   ou: string,
   clusterId: string | null | undefined,
   override: number | null | undefined,
-  clusterById: ReadonlyMap<string, HotelClusterDto>
+  clusterById: ReadonlyMap<string, HotelClusterDto>,
+  snapshot?: ClusterSnapshot
 ): ResolvedClusterWeight {
   if (!clusterId) return { weight: 1, source: "NONE", clusterName: "" };
 
   const cluster = clusterById.get(clusterId);
   if (!cluster) {
+    if (isValidClusterWeight(snapshot?.weight)) {
+      return {
+        weight: snapshot.weight as number,
+        source: "SNAPSHOT",
+        clusterName: snapshot?.name ?? "",
+      };
+    }
     return {
       weight: 1,
       source: "DANGLING",

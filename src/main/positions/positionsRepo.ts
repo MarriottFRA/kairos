@@ -52,7 +52,7 @@ export { applyUpdate, splitPiiFields, splitPositionFields } from "./positionWrit
 const POSITION_COLUMNS = `
   id, scenario_id, lineage_id, active,
   department_code, job_type_code, cluster, cluster_multiplier_override,
-  cluster_link_id, pay_type,
+  cluster_link_id, cluster_weight_snapshot, cluster_name_snapshot, pay_type,
   headcount, fte, seasonality, monthly_base_salary, hourly_rate,
   additional_monthly_costs,
   merit_increase_pct, manual_yearly_increase, increase_month,
@@ -100,6 +100,8 @@ function rowToPosition(row: Record<string, unknown>): PositionRecord {
     clusterMultiplierOverride:
       (row.cluster_multiplier_override as number | null) ?? null,
     clusterLinkId: (row.cluster_link_id as string) ?? "",
+    clusterWeightSnapshot: (row.cluster_weight_snapshot as number | null) ?? null,
+    clusterNameSnapshot: (row.cluster_name_snapshot as string | null) ?? null,
     payType: row.pay_type as PositionRecord["payType"],
     headcount: row.headcount as number,
     fte: row.fte as number,
@@ -639,7 +641,8 @@ export function cloneScenarioValues(
       `INSERT INTO positions (
          id, ou, scenario_id, lineage_id, active,
          department_code, job_type_code, cluster, cluster_multiplier_override,
-         cluster_link_id, pay_type, headcount, fte,
+         cluster_link_id, cluster_weight_snapshot, cluster_name_snapshot,
+         pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,
@@ -647,7 +650,8 @@ export function cloneScenarioValues(
          extra_values, updated_at, deleted_at)
        SELECT ?, ou, ?, lineage_id, active,
          department_code, job_type_code, cluster, cluster_multiplier_override,
-         cluster_link_id, pay_type, headcount, fte,
+         cluster_link_id, cluster_weight_snapshot, cluster_name_snapshot,
+         pay_type, headcount, fte,
          seasonality, monthly_base_salary, hourly_rate, additional_monthly_costs,
          merit_increase_pct, manual_yearly_increase, increase_month,
          daily_contract_hours, yearly_hours_worked, vacation_days,

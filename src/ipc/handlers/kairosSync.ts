@@ -64,6 +64,10 @@ import {
 } from "../../shared/kairosSync/entityMap";
 import { WriteScope, isUnsent, shadowIsComplete } from "../../main/kairosSync/collect";
 import {
+  clusterSnapshotContext,
+  stampClusterSnapshot,
+} from "../../main/kairosSync/clusterSnapshot";
+import {
   KAIROS_SYNC_CHANNELS,
   PendingByDepartment,
   PlanSyncStatus,
@@ -2136,10 +2140,17 @@ function pendingEntityKeys(planId: string, ou: string): ReadonlySet<string> {
   const db = secureDb();
   const complete = pendingShadowIsComplete(planId);
   const keys = new Set<string>();
+  // Positions are stamped with their effective cluster ratio before hashing —
+  // the SAME transform the collector applies, or the two disagree about what
+  // is pending. See clusterSnapshot.ts.
+  const clusters = clusterSnapshotContext(localDbHandle());
   for (const source of PENDING_SOURCES) {
     const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
     for (const row of rows) {
-      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const mapped = toEntity(
+        source.entityType as PublishedEntityType,
+        source.entityType === "position" ? stampClusterSnapshot(row, clusters) : row
+      );
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
       const local = { hash: contentHash(mapped.payload), deleted: mapped.deleted };
       if (isUnsent(known, local, complete)) keys.add(`${source.entityType}:${mapped.entityId}`);
@@ -2171,6 +2182,8 @@ function pendingByDepartment(planId: string, ou: string): Record<string, number>
   const db = secureDb();
   const complete = pendingShadowIsComplete(planId);
   const byDepartment: Record<string, number> = {};
+  // Same stamp as the collector — see pendingEntityKeys.
+  const clusters = clusterSnapshotContext(localDbHandle());
 
   for (const source of PENDING_SOURCES) {
     const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
@@ -2201,7 +2214,10 @@ function pendingByDepartment(planId: string, ou: string): Record<string, number>
         : null;
 
     for (const row of rows) {
-      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const mapped = toEntity(
+        source.entityType as PublishedEntityType,
+        source.entityType === "position" ? stampClusterSnapshot(row, clusters) : row
+      );
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
       const local = { hash: contentHash(mapped.payload), deleted: mapped.deleted };
       if (!isUnsent(known, local, complete)) continue;
@@ -2247,10 +2263,15 @@ function pendingCount(planId: string, ou: string): number {
    */
   let changed = 0;
   const complete = pendingShadowIsComplete(planId);
+  // Same stamp as the collector — see pendingEntityKeys.
+  const clusters = clusterSnapshotContext(localDbHandle());
   for (const source of PENDING_SOURCES) {
     const rows = prepared(db, candidateSql(source, "r.*")).all(ou, planId) as Row[];
     for (const row of rows) {
-      const mapped = toEntity(source.entityType as PublishedEntityType, row);
+      const mapped = toEntity(
+        source.entityType as PublishedEntityType,
+        source.entityType === "position" ? stampClusterSnapshot(row, clusters) : row
+      );
       const known = getShadow(db, planId, source.entityType, mapped.entityId);
       // No shadow entry means the server has never confirmed this row, whatever
       // its hash happens to be — genuinely pending, unless the row is a deletion

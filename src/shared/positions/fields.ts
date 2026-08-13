@@ -241,6 +241,13 @@ export type AnnualDivisorBasis = "WORKING_MONTHS" | "TWELVE";
 export const HOTEL_CLUSTER_KEY = "cluster";
 export const HOTEL_CLUSTER_MULT_KEY = "clusterMultiplierOverride";
 
+/** The travelling cluster ratio (weight + name), stamped by the machine that
+ *  holds the cluster definition and carried on the row through sync. Read-only
+ *  everywhere in the renderer — not catalog keys, so they never reach a patch.
+ *  Both engine input paths fall back to them when the definition is absent. */
+export const HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY = "clusterWeightSnapshot";
+export const HOTEL_CLUSTER_NAME_SNAPSHOT_KEY = "clusterNameSnapshot";
+
 /**
  * The department code a row belongs to.
  *

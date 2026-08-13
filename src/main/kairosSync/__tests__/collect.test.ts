@@ -14,6 +14,7 @@ import {
   POSITIONS_VALUE_TABLES_SQL,
 } from "../../positions/schema";
 import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
+import { HOTEL_CLUSTERS_SQL } from "../../hotelClusters/schema";
 import { KAIROS_SYNC_TABLES_SQL } from "../schema";
 import { contentHash } from "../hash";
 import { ShadowRow, shadowKey } from "../repo";
@@ -43,6 +44,9 @@ const PLAN = "plan-1";
 function makeStores(): { localDb: Db; secureDb: Db } {
   const localDb = new Database(":memory:");
   localDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
+  // The collector stamps positions with their effective cluster ratio, which
+  // reads the cluster definitions out of the plaintext store.
+  localDb.exec(HOTEL_CLUSTERS_SQL);
 
   const secureDb = new Database(":memory:");
   secureDb.exec(POSITIONS_VALUE_TABLES_SQL);
@@ -140,6 +144,54 @@ describe("collectLocalEntities", () => {
     expect(entities.some((entity) => entity.entityType === "position_pii")).toBe(false);
     // Everything else still goes.
     expect(entities.some((entity) => entity.entityType === "position")).toBe(true);
+  });
+
+  it("stamps a clustered position's payload with the resolved ratio and name", () => {
+    // The travelling snapshot: the machine that HOLDS the cluster definition
+    // resolves the effective weight into the payload, so a machine without it
+    // computes the same share instead of falling back to ×1. Rows with no
+    // cluster carry no snapshot keys at all — their hashes must stay
+    // byte-identical to pre-snapshot builds.
+    const stores = makeStores();
+    seed(stores);
+    stores.localDb.exec(`
+      INSERT INTO hotel_clusters (id, name, sort_order, updated_at)
+      VALUES ('cl-1', 'Lakeside pair', 0, '2026-07-01T00:00:00.000Z');
+      INSERT INTO hotel_cluster_members (cluster_id, ou, weight, sort_order)
+      VALUES ('cl-1', '${OU}', 0.4, 0), ('cl-1', 'OU99999', 0.6, 1);
+    `);
+    stores.secureDb
+      .prepare(`UPDATE positions SET cluster = 'cl-1' WHERE id = 'pos-rooms'`)
+      .run();
+
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const clustered = entities.find((entity) => entity.entityId === "pos-rooms");
+    expect(clustered?.payload.clusterWeightSnapshot).toBe(0.4);
+    expect(clustered?.payload.clusterNameSnapshot).toBe("Lakeside pair");
+
+    const plain = entities.find((entity) => entity.entityId === "pos-fb");
+    expect("clusterWeightSnapshot" in (plain?.payload ?? {})).toBe(false);
+    expect("clusterNameSnapshot" in (plain?.payload ?? {})).toBe(false);
+  });
+
+  it("passes a stored snapshot through when the definition is absent here", () => {
+    // The delegate's machine: it cannot resolve the cluster, so its publish
+    // must not strip the owner's ratio from the payload.
+    const stores = makeStores();
+    seed(stores);
+    stores.secureDb
+      .prepare(
+        `UPDATE positions
+            SET cluster = 'cl-unknown', cluster_weight_snapshot = 0.4,
+                cluster_name_snapshot = 'Lakeside pair'
+          WHERE id = 'pos-rooms'`
+      )
+      .run();
+
+    const { entities } = collectLocalEntities(stores, { ou: OU, planId: PLAN });
+    const clustered = entities.find((entity) => entity.entityId === "pos-rooms");
+    expect(clustered?.payload.clusterWeightSnapshot).toBe(0.4);
+    expect(clustered?.payload.clusterNameSnapshot).toBe("Lakeside pair");
   });
 
   it("stays inside its own hotel and scenario", () => {

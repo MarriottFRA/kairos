@@ -39,6 +39,13 @@ export interface PositionRecord {
    *  sibling rows in the cluster's other member hotels; edits propagate along
    *  it. Read-only to the renderer — only clusterSync.ts ever sets it. */
   clusterLinkId: string;
+  /** The travelling cluster ratio: the effective weight as last resolved by a
+   *  machine that HOLDS the cluster definition, carried through sync so a
+   *  machine WITHOUT it still computes the right share. null = never stamped.
+   *  Read-only everywhere — written only by the sync pull. */
+  clusterWeightSnapshot: number | null;
+  /** The cluster's name as last resolved alongside the weight ("" = none). */
+  clusterNameSnapshot: string | null;
   payType: "HOURLY" | "SALARIED";
   headcount: number;
   fte: number;

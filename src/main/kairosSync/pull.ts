@@ -195,6 +195,8 @@ async function runPull(
     deletedByDepartment: {},
   };
   const skippedTypes = new Set<string>();
+  /** Child rows whose parent position had not arrived yet — see below. */
+  const deferred: ChangeEntity[] = [];
 
   let cursor: string | null = null;
   let last: ChangesPage | null = null;
@@ -214,23 +216,39 @@ async function runPull(
     tally(summary, page.entities, options.collidesWith);
 
     if (apply) {
-      const result = applyEntities(deps, page.entities, order);
+      // Rows arrive in server-sequence order, not dependency order, and each
+      // page commits alone — so a component value can land a page ahead of the
+      // position its FK points at. Those rows are put aside and re-applied
+      // after the last page instead of failing the whole download.
+      const result = applyEntities(deps, page.entities, order, {
+        deferMissingParents: true,
+      });
       result.skippedTypes.forEach((type) => skippedTypes.add(type));
+      deferred.push(...result.deferred);
+      const deferredKeys = new Set(
+        result.deferred.map((entity) => `${entity.entityType}:${entity.entityId}`)
+      );
 
       // The shadow moves with the rows, page by page. This is safe to do
       // incrementally — unlike the watermark — because a shadow entry only ever
       // claims "the server had this hash at this seq", which stays true whether
-      // or not the rest of the pages arrive.
+      // or not the rest of the pages arrive. Deferred rows are NOT in it yet:
+      // a shadow entry for a row the store does not hold reads to the next
+      // publish as "deleted here", which it would dutifully purge server-side.
       writeShadow(
         db,
         planId,
-        page.entities.map((entity) => ({
-          entityType: entity.entityType,
-          entityId: entity.entityId,
-          hash: hashOf(entity),
-          serverSeq: entity.serverSeq,
-          deleted: entity.deleted,
-        })),
+        page.entities
+          .filter(
+            (entity) => !deferredKeys.has(`${entity.entityType}:${entity.entityId}`)
+          )
+          .map((entity) => ({
+            entityType: entity.entityType,
+            entityId: entity.entityId,
+            hash: hashOf(entity),
+            serverSeq: entity.serverSeq,
+            deleted: entity.deleted,
+          })),
         new Date().toISOString()
       );
     }
@@ -241,6 +259,31 @@ async function runPull(
 
   if (last === null) {
     throw new Error("The server returned no pages for this plan.");
+  }
+
+  if (apply && deferred.length > 0) {
+    // Every position that is coming has arrived; the put-aside children go in
+    // now. No deferral this time — a parent still missing here was never sent,
+    // and that FAILS the pull (with the row named) rather than advancing the
+    // watermark past rows that were never written. The server holding a child
+    // whose parent it will not send is a data problem to surface, not skip.
+    console.warn(
+      `[kairosSync] pull ${planId}: retrying ${deferred.length} row(s) whose ` +
+        "parent position arrived on a later page"
+    );
+    applyEntities(deps, deferred, order);
+    writeShadow(
+      db,
+      planId,
+      deferred.map((entity) => ({
+        entityType: entity.entityType,
+        entityId: entity.entityId,
+        hash: hashOf(entity),
+        serverSeq: entity.serverSeq,
+        deleted: entity.deleted,
+      })),
+      new Date().toISOString()
+    );
   }
 
   if (apply) {

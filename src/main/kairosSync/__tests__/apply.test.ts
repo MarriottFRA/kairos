@@ -24,8 +24,12 @@ const PLAN = "plan-1";
 
 function makeStores(): { localDb: Db; secureDb: Db } {
   const localDb = new Database(":memory:");
+  localDb.pragma("foreign_keys = ON");
   localDb.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   const secureDb = new Database(":memory:");
+  // The production stores run with FKs on; without this the constraint these
+  // tests exist to exercise is silently not enforced.
+  secureDb.pragma("foreign_keys = ON");
   secureDb.exec(POSITIONS_VALUE_TABLES_SQL);
   secureDb.exec(MANUAL_INPUT_TABLES_SQL);
   secureDb.exec(ENGINE_OUTPUTS_SQL);
@@ -72,6 +76,34 @@ function positionEntity(id: string, overrides: Partial<ChangeEntity> = {}): Chan
       deletedAt: null,
     },
     ...overrides,
+  };
+}
+
+function componentValueEntity(positionId: string, defId: string): ChangeEntity {
+  return {
+    entityType: "component_value",
+    entityId: `${positionId}:${defId}`,
+    parentId: positionId,
+    department: null,
+    deleted: false,
+    clientUpdatedAt: "2026-07-01T00:00:00.000Z",
+    serverSeq: 2,
+    payload: {
+      positionId,
+      componentDefId: defId,
+      ou: OU,
+      scenarioId: PLAN,
+      rate: 0.07,
+      yearlyValue: null,
+      monthlyValues: null,
+      qty: null,
+      unitRate: null,
+      ssOpeningBase: null,
+      accountCode: null,
+      statsAccountCode: null,
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      deletedAt: null,
+    },
   };
 }
 
@@ -160,36 +192,11 @@ describe("applyEntities", () => {
   it("applies parents before children whatever order they arrive in", () => {
     // The FK on component_values means a child written first would fail outright.
     const stores = makeStores();
-    const child: ChangeEntity = {
-      entityType: "component_value",
-      entityId: "p1:def-1",
-      parentId: "p1",
-      department: null,
-      deleted: false,
-      clientUpdatedAt: "2026-07-01T00:00:00.000Z",
-      serverSeq: 2,
-      payload: {
-        positionId: "p1",
-        componentDefId: "def-1",
-        ou: OU,
-        scenarioId: PLAN,
-        rate: 0.07,
-        yearlyValue: null,
-        monthlyValues: null,
-        qty: null,
-        unitRate: null,
-        ssOpeningBase: null,
-        accountCode: null,
-        statsAccountCode: null,
-        updatedAt: "2026-07-01T00:00:00.000Z",
-        deletedAt: null,
-      },
-    };
 
     // Child listed FIRST — the apply order has to correct it.
     const result = applyEntities(
       stores,
-      [child, positionEntity("p1")],
+      [componentValueEntity("p1", "def-1"), positionEntity("p1")],
       FALLBACK_APPLY_ORDER
     );
     expect(result.applied).toBe(2);
@@ -197,6 +204,40 @@ describe("applyEntities", () => {
       .prepare(`SELECT rate FROM component_values WHERE position_id = 'p1'`)
       .get() as { rate: number };
     expect(stored.rate).toBe(0.07);
+  });
+
+  it("defers a child whose parent is on a later page, and applies it on retry", () => {
+    // /changes orders rows by server sequence, and each page commits alone —
+    // so a component value can arrive a page ahead of its position.
+    const stores = makeStores();
+    const child = componentValueEntity("p9", "def-1");
+
+    const first = applyEntities(stores, [child], FALLBACK_APPLY_ORDER, {
+      deferMissingParents: true,
+    });
+    expect(first.deferred).toHaveLength(1);
+    expect(first.applied).toBe(0);
+    expect(
+      stores.secureDb.prepare(`SELECT COUNT(*) AS total FROM component_values`).get()
+    ).toEqual({ total: 0 });
+
+    // The "later page" with the parent, then the caller's retry of the deferred.
+    applyEntities(stores, [positionEntity("p9")], FALLBACK_APPLY_ORDER);
+    const retry = applyEntities(stores, first.deferred, FALLBACK_APPLY_ORDER);
+    expect(retry.applied).toBe(1);
+    const stored = stores.secureDb
+      .prepare(`SELECT rate FROM component_values WHERE position_id = 'p9'`)
+      .get() as { rate: number };
+    expect(stored.rate).toBe(0.07);
+  });
+
+  it("names the row and the missing parent when deferral is not allowed", () => {
+    // The retry pass runs without deferral: a parent still missing after the
+    // last page was never sent, and the error has to say which row died.
+    const stores = makeStores();
+    expect(() =>
+      applyEntities(stores, [componentValueEntity("ghost", "def-1")], FALLBACK_APPLY_ORDER)
+    ).toThrow(/component_value ghost:def-1.*position ghost is not on this computer/s);
   });
 
   it("writes a scenario to the plaintext store, not the encrypted one", () => {

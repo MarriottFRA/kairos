@@ -95,4 +95,41 @@ describe("resolveHotelClusterWeight", () => {
     const resolved = resolveHotelClusterWeight(" ou11111 ", "pair", null, MAP);
     expect(resolved.weight).toBe(0.25);
   });
+
+  it("unknown cluster + travelling snapshot → the snapshot, SNAPSHOT, no warning", () => {
+    // A downloaded plan on a machine without the definitions: the row carries
+    // the owner-resolved ratio and name, and the engine uses them instead of
+    // the ×1 fallback.
+    const resolved = resolveHotelClusterWeight(HOTEL_A, "gone", null, MAP, {
+      weight: 0.4,
+      name: "Lakeside pair",
+    });
+    expect(resolved).toEqual({
+      weight: 0.4,
+      source: "SNAPSHOT",
+      clusterName: "Lakeside pair",
+    });
+  });
+
+  it("a definition this machine holds beats the snapshot", () => {
+    // The snapshot exists for machines that cannot resolve at all — never as
+    // a second opinion where they can.
+    const resolved = resolveHotelClusterWeight(HOTEL_A, "pair", null, MAP, {
+      weight: 0.9,
+      name: "Stale",
+    });
+    expect(resolved.weight).toBe(0.25);
+    expect(resolved.source).toBe("CLUSTER");
+  });
+
+  it("an invalid snapshot falls through to DANGLING", () => {
+    for (const weight of [0, -1, 1.5, Number.NaN, null, undefined]) {
+      const resolved = resolveHotelClusterWeight(HOTEL_A, "gone", null, MAP, {
+        weight,
+        name: "Broken",
+      });
+      expect(resolved.source, String(weight)).toBe("DANGLING");
+      expect(resolved.weight, String(weight)).toBe(1);
+    }
+  });
 });

@@ -47,6 +47,8 @@ import {
   fieldLabel,
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
+  HOTEL_CLUSTER_NAME_SNAPSHOT_KEY,
+  HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY,
   SectionId,
   vectorKeys,
   VectorName,
@@ -770,7 +772,19 @@ function clusterResolverFor(
       typeof row[HOTEL_CLUSTER_MULT_KEY] === "number"
         ? (row[HOTEL_CLUSTER_MULT_KEY] as number)
         : null,
-      clusterById
+      clusterById,
+      // The travelling ratio a downloaded plan carries — same fallback as both
+      // engine paths, so the cell shows the number the engine will use.
+      {
+        weight:
+          typeof row[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] === "number"
+            ? (row[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] as number)
+            : null,
+        name:
+          typeof row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] === "string"
+            ? (row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] as string)
+            : null,
+      }
     );
     cache.set(row, resolved);
     return resolved;
@@ -1184,16 +1198,33 @@ function buildColumn(
   // Hotel cluster with NO clusters loaded (none created yet, or the list
   // failed to load): unlike departments there is no legitimate free-text
   // entry — a typed raw id is never right — so the cell goes read-only
-  // instead of degrading to text. Stored ids render as a placeholder rather
-  // than leaking uuids into the grid.
+  // instead of degrading to text. A downloaded plan's rows carry the owner's
+  // resolved cluster name and ratio with them (see cluster_name_snapshot), so
+  // those render read-only as "Name (×0.40)" — the number the engine uses —
+  // rather than a placeholder. Only a stored id with no snapshot (a
+  // pre-snapshot download) still says "(cluster unavailable)".
   if (
     def.dropdownSource?.kind === "hotelClusters" &&
     ctx.hotelClusters.length === 0
   ) {
     column.editable = false;
     column.cellClassName = "pos-cell--derived";
-    column.valueFormatter = (value: unknown) =>
-      typeof value === "string" && value !== "" ? "(cluster unavailable)" : "";
+    column.valueFormatter = (value: unknown, row: PositionRow | undefined) => {
+      if (typeof value !== "string" || value === "") return "";
+      const name =
+        typeof row?.[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] as string)
+          : "";
+      const weight =
+        typeof row?.[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] === "number"
+          ? (row[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] as number)
+          : null;
+      if (weight === null) return "(cluster unavailable)";
+      return `${name || "Cluster"} (×${weight.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })})`;
+    };
   }
 
   // Hotel cluster: the cell stores a cluster ID; the picker and display both
@@ -1224,20 +1255,44 @@ function buildColumn(
     // "(deleted cluster)" finds no match and is rejected, which leaves the
     // orphan id intact rather than blanking it behind the user's back.
     column.pastedValueParser = makeOptionPasteParser(options);
-    column.valueFormatter = (value: unknown) => {
+    column.valueFormatter = (value: unknown, row: PositionRow | undefined) => {
       const id = typeof value === "string" ? value : "";
       if (!id) return "";
-      return clusterById.get(id)?.name ?? "(deleted cluster)";
+      const known = clusterById.get(id)?.name;
+      if (known) return known;
+      // Not one of this machine's clusters — but a downloaded plan's rows
+      // carry the owner's resolved name. Only a bare id with no snapshot is
+      // genuinely a leftover of a deleted cluster.
+      const snapshotName =
+        typeof row?.[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] === "string"
+          ? (row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] as string)
+          : "";
+      const snapshotWeight =
+        typeof row?.[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] === "number"
+          ? (row[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] as number)
+          : null;
+      if (snapshotWeight !== null) return snapshotName || "Cluster";
+      return "(deleted cluster)";
     };
     column.renderEditCell = (params) => {
       const stored = typeof params.value === "string" ? params.value : "";
       const orphan = stored !== "" && !clusterById.has(stored);
+      // An orphan with a snapshot is the plan owner's cluster, not a deleted
+      // one — keep its name so re-picking it stays possible and recognisable.
+      const orphanName =
+        typeof params.row?.[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] === "string" &&
+        typeof params.row?.[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY] === "number"
+          ? (params.row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] as string)
+          : "";
       return (
         <SelectEditCell
           {...params}
           options={
             orphan
-              ? [{ value: stored, label: "(deleted cluster)" }, ...options]
+              ? [
+                  { value: stored, label: orphanName || "(deleted cluster)" },
+                  ...options,
+                ]
               : options
           }
         />
@@ -1249,9 +1304,26 @@ function buildColumn(
       const resolved = resolveRow(params.row);
       const label = column.valueFormatter
         ? String(
-            (column.valueFormatter as (value: unknown) => string)(params.value)
+            (
+              column.valueFormatter as (
+                value: unknown,
+                row: PositionRow | undefined
+              ) => string
+            )(params.value, params.row)
           )
         : "";
+
+      // The travelling ratio: the definition lives on the plan owner's
+      // computer, so the cell is informative, not editable here.
+      if (resolved.source === "SNAPSHOT") {
+        return (
+          <Tooltip
+            title={`Synced with the plan — “${resolved.clusterName || "this cluster"}” is managed on the plan owner's computer. This position takes ×${resolved.weight.toFixed(2)} here.`}
+          >
+            <span>{label}</span>
+          </Tooltip>
+        );
+      }
 
       if (resolved.warning) {
         const title =
@@ -1398,7 +1470,9 @@ function buildColumn(
         ? resolved.warning === "DANGLING"
           ? "The assigned cluster no longer exists — multiplier ×1."
           : `This hotel is not a member of “${resolved.clusterName}” — multiplier ×1.`
-        : resolved.source === "OVERRIDE"
+        : resolved.source === "SNAPSHOT"
+          ? `Synced with the plan — “${resolved.clusterName || "the cluster"}” is managed on the plan owner's computer.${flexNote}`
+          : resolved.source === "OVERRIDE"
           ? `Manual override — the cluster weight is ×${clusterWeight().toFixed(2)}. Clear the cell to fall back.${flexNote}`
           : overridable(params.row)
             ? `Manual override allowed (single-hotel cluster). Clear the cell to fall back to the cluster weight.${flexNote}`

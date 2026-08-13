@@ -5,6 +5,7 @@ import { clearWrappedDbKey, resolveDbKey } from "./main/security/dbKeyMaterial";
 import {
   ENGINE_OUTPUTS_SQL,
   POSITIONS_VALUE_TABLES_SQL,
+  applyClusterSnapshotColumns,
   applyComponentValueDepartment,
   applyOutputLineProvenance,
   applyValueStoreV12,
@@ -68,7 +69,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -253,6 +254,10 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   // Per-row department overrides: a MULTIPLIER block can let each row choose
   // where its cost line books. component_values.department_code.
   4: applyComponentValueDepartment,
+  // The travelling cluster ratio: positions.cluster_weight_snapshot +
+  // cluster_name_snapshot, so a machine without the (never-synced) cluster
+  // definitions still shows the right name and computes the right share.
+  5: applyClusterSnapshotColumns,
 };
 
 function createSchema(handle: SecureDb): void {

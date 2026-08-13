@@ -55,7 +55,12 @@ import {
 } from "../hotelClusters/resolve";
 import { applyPoolSpread, buildPoolSpecs } from "./poolSpread";
 import { rowToComponentValues } from "./blockRows";
-import { HOTEL_CLUSTER_MULT_KEY, HOTEL_CLUSTER_KEY } from "./fields";
+import {
+  HOTEL_CLUSTER_KEY,
+  HOTEL_CLUSTER_MULT_KEY,
+  HOTEL_CLUSTER_NAME_SNAPSHOT_KEY,
+  HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY,
+} from "./fields";
 import { PositionRow, rowToEnginePosition } from "./rowModel";
 
 export interface BlockLineResult {
@@ -185,7 +190,15 @@ export function runLiveSim(args: {
           ? (row[HOTEL_CLUSTER_KEY] as string)
           : "",
         toFiniteOrNull(row[HOTEL_CLUSTER_MULT_KEY]),
-        clusterById
+        clusterById,
+        // The travelling ratio — mirror of loadScenarioInput (liveSimParity).
+        {
+          weight: toFiniteOrNull(row[HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY]),
+          name:
+            typeof row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] === "string"
+              ? (row[HOTEL_CLUSTER_NAME_SNAPSHOT_KEY] as string)
+              : null,
+        }
       );
       position.cluster = resolved.clusterName;
       position.hotelClusterWeight = resolved.weight;

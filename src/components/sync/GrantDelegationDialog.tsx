@@ -299,9 +299,31 @@ export default function GrantDelegationDialog(props: GrantDelegationDialogProps)
       <DialogContent dividers>
         <Stack spacing={3}>
           <Box>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Departments
-            </Typography>
+            <Stack
+              direction="row"
+              sx={{ alignItems: "center", justifyContent: "space-between", mb: 1 }}
+            >
+              <Typography variant="subtitle2">Departments</Typography>
+              {/* Most grants are one or two departments, but "hand over the
+                  whole hotel" is common enough that ticking twenty boxes one by
+                  one is a chore. Only grantable departments are included —
+                  blocked ones cannot be selected by any route. */}
+              <Button
+                size="small"
+                disabled={grantable.length === 0}
+                onClick={() =>
+                  setSelected(
+                    selected.length === grantable.length
+                      ? []
+                      : grantable.map((department) => department.code)
+                  )
+                }
+              >
+                {grantable.length > 0 && selected.length === grantable.length
+                  ? "Unselect all"
+                  : `Select all (${grantable.length})`}
+              </Button>
+            </Stack>
             <Autocomplete
               multiple
               disableCloseOnSelect

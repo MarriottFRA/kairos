@@ -199,6 +199,8 @@ function legacyRecord(monthly: number, workingMonths = 12): PositionRecord {
     cluster: "",
     clusterMultiplierOverride: null,
     clusterLinkId: "",
+    clusterWeightSnapshot: null,
+    clusterNameSnapshot: null,
     payType: "SALARIED",
     headcount: 1,
     fte: 1,

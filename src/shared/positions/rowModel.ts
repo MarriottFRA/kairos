@@ -42,6 +42,8 @@ import {
   FieldDef,
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
+  HOTEL_CLUSTER_NAME_SNAPSHOT_KEY,
+  HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY,
   PII_CORE_COLUMNS,
   SALARY_ENTRY_MODE_KEY,
   SalaryEntryMode,
@@ -86,6 +88,12 @@ export function toRow(position: PositionRecord, pii?: PiiRecord | null): Positio
     // grid can show that edits here also land in the other member hotels. Not a
     // catalog key, so it never reaches a patch.
     [CLUSTER_LINK_ROW_KEY]: position.clusterLinkId ?? "",
+    // Read-only: the travelling cluster ratio (weight + name), stamped by the
+    // machine that holds the cluster definition. The live sim and the grid fall
+    // back to these when the definition is absent here. Not catalog keys, so
+    // they never reach a patch.
+    [HOTEL_CLUSTER_WEIGHT_SNAPSHOT_KEY]: position.clusterWeightSnapshot ?? null,
+    [HOTEL_CLUSTER_NAME_SNAPSHOT_KEY]: position.clusterNameSnapshot ?? null,
     ...position.extraValues,
   };
 
