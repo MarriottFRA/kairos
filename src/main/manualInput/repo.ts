@@ -126,6 +126,33 @@ export function healRowScenario(
   ).run(scenarioId, scopeOf(ou));
 }
 
+/**
+ * Give a real id to any row stored under the empty-string primary key.
+ *
+ * Those rows are the residue of the `input.id ?? randomUUID()` bug in the save
+ * handler: "Add row" sends id: "", and `""` is not nullish, so the row landed on
+ * the `''` key. Whatever the user then typed into it was saved there too, so the
+ * row is real data and is renamed, never dropped. Delete could not name it (the
+ * handler filters blank ids, hence "Missing row id(s).") and the next add
+ * overwrote it, because `id` is the table's PRIMARY KEY — at most one such row
+ * exists install-wide, so the OU scope here only decides who heals it.
+ *
+ * `newId` is passed in to keep this repo deterministic in tests, like the
+ * clock/id values everything else here takes.
+ */
+export function healBlankRowIds(
+  db: SecureDb,
+  ou: string,
+  newId: () => string
+): void {
+  const stmt = db.prepare(
+    "UPDATE manual_input_rows SET id = ? WHERE id = '' AND ou = ?"
+  );
+  db.transaction(() => {
+    stmt.run(newId(), scopeOf(ou));
+  })();
+}
+
 /** The next sort_order for a new row in this (OU, scenario). */
 export function nextSortOrder(
   db: SecureDb,

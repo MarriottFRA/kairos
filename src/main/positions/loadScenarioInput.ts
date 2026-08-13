@@ -30,6 +30,8 @@ import type {
 } from "../../shared/engine/types";
 import {
   applyPositionAccounts,
+  applyRateRules,
+  applyRuleRateDependencies,
   applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
@@ -58,7 +60,7 @@ import { OuScope } from "./ouScope";
 import { prepared } from "./stmtCache";
 import { getComponentDefinitions, getSsSchemes } from "./structureRepo";
 import { getSeries } from "../kpiDrivers/repo";
-import { getHiringDates, loadScenarioValues } from "./positionsRepo";
+import { getHiringDates, getPii, loadScenarioValues } from "./positionsRepo";
 import { serviceDaysFor } from "../../shared/positions/serviceDays";
 
 type Db = InstanceType<typeof Database>;
@@ -265,17 +267,57 @@ export async function loadScenarioInput(
   const blocks = listBlocks(structureDb, scope);
   const ssSchemes = getSsSchemes(structureDb, scope);
   applySocialSecurityBase(definitions, ssSchemes);
+  // Topo edges for block-valued rule multipliers (same load-time pattern).
+  applyRuleRateDependencies(definitions, blocks);
+
+  // Derive each row's rate for rules-driven multiplier blocks. BEFORE
+  // injectKpiSeries so a rules block on a KPI base multiplies by the derived
+  // rate. Mirror in runLiveSim (the row IS the bag there) — liveSimParity
+  // pins the two.
+  const ruleSpecs = blocks
+    .filter((block) => block.blockType === "MULTIPLIER" && block.rateRules)
+    .map((block) => ({ costDefId: block.costDefId, config: block.rateRules! }));
+  // The bag: the position's extra_values blob (the same one resolveFte reads
+  // above) merged with its PII fields — rules may reference PII columns, and
+  // only the DERIVED NUMBER survives into ScenarioInput, so the engine input
+  // stays PII-free (the hiring-date → service-days discipline). PII is read
+  // at all only when a rules block exists.
+  const piiByPosition = ruleSpecs.length > 0 ? getPii(valuesDb, scope, scenarioId) : {};
+  const ruleBags = new Map(
+    values.positions
+      .filter((record) => record.active)
+      .map((record) => {
+        const pii = piiByPosition[record.id];
+        return [
+          record.id,
+          pii
+            ? {
+                ...record.extraValues,
+                hiringDate: pii.hiringDate,
+                empNumber: pii.empNumber,
+                lastName: pii.lastName,
+                firstName: pii.firstName,
+                title: pii.title,
+                ...pii.extraValues,
+              }
+            : record.extraValues,
+        ] as const;
+      })
+  );
+  const ruledValues = applyRateRules(ruleSpecs, positions, ruleBags, componentValues, {
+    kpiSeries: (driverId) => getSeries(structureDb, scope.ou, driverId),
+  });
 
   // Resolve KPI-driven blocks to absolute monthly values (the KPI precalc cache
   // lives in the same plaintext store as the structure). Positions carry the
   // per-position multiplier as ComponentValue.rate. Then synthesize the
   // yearly slots dual "Count × Rate" blocks read (shared resolution).
-  injectKpiSeries(definitions, positions, componentValues, (driverId) =>
+  injectKpiSeries(definitions, positions, ruledValues, (driverId) =>
     getSeries(structureDb, scope.ou, driverId)
   );
   const resolvedValues = resolveBlockValues(
     definitions,
-    componentValues,
+    ruledValues,
     blocks.map((block) => ({
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,

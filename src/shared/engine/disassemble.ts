@@ -91,6 +91,9 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
       case Op.PCT_OF_ACC:
         detail = `rate=${fmt(pool[pp])}`;
         break;
+      case Op.PCT_OF_ACC_M:
+        detail = `rates=${fmtVector(pool, pp, MONTHS)}`;
+        break;
       case Op.WEIGHT_BY_ACC:
       case Op.FLAT_ACTIVE:
       case Op.FLAT_DAY:

@@ -12,7 +12,7 @@ import { compile } from "../../../shared/engine/compile";
 import { simulate } from "../../../shared/engine/simulate";
 import { POSITIONS_STRUCTURE_TABLES_SQL } from "../../positions/schema";
 import { resolveOuScope } from "../../positions/ouScope";
-import { getComponentDefinitions } from "../../positions/structureRepo";
+import { getComponentDefinitions, saveFieldCatalog } from "../../positions/structureRepo";
 import { applyStructureColumns } from "../schema";
 import {
   blockCostDefId,
@@ -848,6 +848,472 @@ describe("reorderBlocks", () => {
 
     const defs = getComponentDefinitions(db, OU_A);
     expect(defs.map((def) => def.label)).toEqual(["B", "A"]);
+  });
+});
+
+describe("saveBlock — rate rules", () => {
+  function rulesMultiplier(overrides: Partial<BlockInput> = {}): BlockInput {
+    return {
+      blockType: "MULTIPLIER",
+      label: "Banded Bonus",
+      accountCode: "520000",
+      accountLocked: true,
+      base: { kind: "BASE_SALARY" },
+      rateRules: {
+        rules: [
+          {
+            when: [
+              {
+                source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+                op: "EQ",
+                value: "1310",
+              },
+            ],
+            rate: 0.1,
+          },
+        ],
+        otherwise: 0.05,
+      },
+      ...overrides,
+    };
+  }
+
+  it("round-trips rules through save/list, normalized", () => {
+    saveBlock(db, OU_A, rulesMultiplier(), NOW);
+
+    const block = listBlocks(db, OU_A)[0];
+    expect(block.rateRules).toEqual({
+      rules: [
+        {
+          when: [
+            {
+              source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+              op: "EQ",
+              value: "1310",
+            },
+          ],
+          rate: 0.1,
+        },
+      ],
+      otherwise: 0.05,
+    });
+    // The compiled def is byte-identical to a plain multiplier — rules resolve
+    // to per-row values at load time, never into the definition.
+    const def = getComponentDefinitions(db, OU_A).find((d) => d.label === "Banded Bonus")!;
+    expect(def.spreadMethod).toBe("PERCENT_OF");
+    expect(def.baseSelector?.kind).toBe("BASE_SALARY");
+  });
+
+  it("keeps rules across an unrelated re-save and drops them when cleared", () => {
+    const id = saveBlock(db, OU_A, rulesMultiplier(), NOW);
+
+    const withRules = listBlocks(db, OU_A)[0];
+    saveBlock(
+      db,
+      OU_A,
+      { ...rulesMultiplier(), id, label: "Renamed", rateRules: withRules.rateRules },
+      NOW
+    );
+    expect(listBlocks(db, OU_A)[0].rateRules?.otherwise).toBe(0.05);
+
+    // Clearing (switching back to "typed per row") removes the key entirely.
+    saveBlock(db, OU_A, { ...rulesMultiplier(), id, rateRules: undefined }, NOW);
+    expect(listBlocks(db, OU_A)[0].rateRules).toBeUndefined();
+  });
+
+  it("accepts a USER field with POSITION_EXTRA storage", () => {
+    const created = saveFieldCatalog(db, OU_A, [
+      {
+        create: {
+          section: "employee",
+          dataType: "TEXT",
+          defaultLabel: "Band",
+          storage: "POSITION_EXTRA",
+        },
+      },
+    ]);
+    const bandKey = created.fields.find((f) => f.defaultLabel === "Band")!.key;
+
+    saveBlock(
+      db,
+      OU_A,
+      rulesMultiplier({
+        rateRules: {
+          rules: [
+            {
+              when: [
+                {
+                  source: { kind: "FIELD", fieldKey: bandKey, dataType: "TEXT" },
+                  op: "EQ",
+                  value: "blue",
+                },
+              ],
+              rate: 0.2,
+            },
+          ],
+          otherwise: 0,
+        },
+      }),
+      NOW
+    );
+    expect(listBlocks(db, OU_A)[0].rateRules?.rules[0]?.rate).toBe(0.2);
+  });
+
+  it("rejects rules on a non-multiplier block", () => {
+    expect(() =>
+      saveBlock(db, OU_A, { ...flatMonthly(), rateRules: { rules: [], otherwise: 1 } }, NOW)
+    ).toThrow(/Only a Multiplier/);
+  });
+
+  it("rejects an unknown field key at save", () => {
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          rateRules: {
+            rules: [
+              {
+                when: [
+                  {
+                    source: { kind: "FIELD", fieldKey: "u_nope", dataType: "TEXT" },
+                    op: "EQ",
+                    value: "x",
+                  },
+                ],
+                rate: 1,
+              },
+            ],
+            otherwise: 0,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/does not exist/);
+  });
+
+  it("accepts a PII field (the loaders merge PII into the rules bag)", () => {
+    const created = saveFieldCatalog(db, OU_A, [
+      {
+        create: {
+          section: "pii",
+          dataType: "TEXT",
+          defaultLabel: "Union",
+          storage: "PII_EXTRA",
+        },
+      },
+    ]);
+    const piiKey = created.fields.find((f) => f.defaultLabel === "Union")!.key;
+
+    saveBlock(
+      db,
+      OU_A,
+      rulesMultiplier({
+        rateRules: {
+          rules: [
+            {
+              when: [
+                {
+                  source: { kind: "FIELD", fieldKey: piiKey, dataType: "TEXT" },
+                  op: "EQ",
+                  value: "x",
+                },
+              ],
+              rate: 1,
+            },
+          ],
+          otherwise: 0,
+        },
+      }),
+      NOW
+    );
+    expect(listBlocks(db, OU_A)[0].rateRules?.rules).toHaveLength(1);
+  });
+
+  it("still rejects a COMPUTED field (renderer-only value)", () => {
+    // fte is seeded as a COMPUTED catalog field — it never reaches the loader.
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          rateRules: {
+            rules: [
+              {
+                when: [
+                  {
+                    source: { kind: "FIELD", fieldKey: "fte", dataType: "NUMBER" },
+                    op: "GTE",
+                    value: 1,
+                  },
+                ],
+                rate: 1,
+              },
+            ],
+            otherwise: 0,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/cannot be used in a rule/);
+  });
+
+  it("round-trips a block-valued multiplier and guards its references", () => {
+    const targetId = saveBlock(db, OU_A, flatMonthly({ label: "Uniform Budget" }), NOW);
+    const rulesId = saveBlock(
+      db,
+      OU_A,
+      rulesMultiplier({
+        label: "Scaled Uniforms",
+        rateRules: {
+          rules: [
+            {
+              when: [
+                {
+                  source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+                  op: "EQ",
+                  value: "1310",
+                },
+              ],
+              rate: 0,
+              rateBlockId: targetId,
+            },
+          ],
+          otherwise: 0.5,
+        },
+      }),
+      NOW
+    );
+    expect(listBlocks(db, OU_A).find((b) => b.id === rulesId)?.rateRules?.rules[0]?.rateBlockId).toBe(
+      targetId
+    );
+    // The referenced block cannot be deleted out from under the rule…
+    expect(() => deleteBlock(db, OU_A, targetId, NOW)).toThrow(/Scaled Uniforms/);
+    // …and a rule multiplier cannot loop back through the base chain: pointing
+    // the flat block's… actually the reverse — the rules block cannot
+    // reference something that (via bases) depends on the rules block itself.
+    const dependentId = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Depends On Rules",
+        accountCode: "",
+        accountLocked: true,
+        base: { kind: "BLOCK", blockId: rulesId },
+      },
+      NOW
+    );
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          id: rulesId,
+          label: "Scaled Uniforms",
+          rateRules: {
+            rules: [
+              {
+                when: [
+                  {
+                    source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+                    op: "EQ",
+                    value: "1310",
+                  },
+                ],
+                rate: 0,
+                rateBlockId: dependentId,
+              },
+            ],
+            otherwise: 0.5,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/loops back/);
+  });
+
+  it("rejects a block multiplier on combined and KPI bases, and mixed with month-varying terms", () => {
+    const targetId = saveBlock(db, OU_A, flatMonthly({ label: "Target" }), NOW);
+    const blockOutcome = {
+      rules: [
+        {
+          when: [
+            {
+              source: { kind: "FIELD" as const, fieldKey: "departmentCode", dataType: "TEXT" as const },
+              op: "EQ" as const,
+              value: "1310",
+            },
+          ],
+          rate: 0,
+          rateBlockId: targetId,
+        },
+      ],
+      otherwise: 0,
+    };
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          base: {
+            kind: "COMBINE",
+            op: "DIV",
+            left: { kind: "BASE_SALARY" },
+            right: { kind: "STAT", stat: "HOURS" },
+          },
+          rateRules: blockOutcome,
+        }),
+        NOW
+      )
+    ).toThrow(/combined base/);
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          base: { kind: "KPI", kpiDriverId: "kpi-x" },
+          rateRules: blockOutcome,
+        }),
+        NOW
+      )
+    ).toThrow(/KPI base/);
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          rateRules: {
+            rules: [
+              ...blockOutcome.rules,
+              {
+                when: [{ source: { kind: "DAYS_IN_POSITION" }, op: "GTE", value: 100 }],
+                rate: 2,
+              },
+            ],
+            otherwise: 0,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/cannot mix/);
+  });
+
+  it("rejects an operator that is illegal for the field type", () => {
+    // IN is a text-family operator; a NUMBER term may not use it.
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          rateRules: {
+            rules: [
+              {
+                when: [
+                  {
+                    source: { kind: "FIELD", fieldKey: "u_num", dataType: "NUMBER" },
+                    op: "IN",
+                    value: [1, 2],
+                  },
+                ],
+                rate: 1,
+              },
+            ],
+            otherwise: 0,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/not available for this field/);
+  });
+
+  it("rejects a rule with no conditions and a non-finite rate", () => {
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({ rateRules: { rules: [{ when: [], rate: 1 }], otherwise: 0 } }),
+        NOW
+      )
+    ).toThrow(/at least one condition/);
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          rateRules: {
+            rules: [
+              {
+                when: [
+                  {
+                    source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+                    op: "EQ",
+                    value: "1310",
+                  },
+                ],
+                rate: Number.NaN,
+              },
+            ],
+            otherwise: 0,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/must be a number/);
+  });
+
+  it("rejects a days-in-position rule on a combined base", () => {
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        rulesMultiplier({
+          base: {
+            kind: "COMBINE",
+            op: "DIV",
+            left: { kind: "BASE_SALARY" },
+            right: { kind: "STAT", stat: "HOURS" },
+          },
+          rateRules: {
+            rules: [
+              {
+                when: [{ source: { kind: "DAYS_IN_POSITION" }, op: "GTE", value: 100 }],
+                rate: 30,
+              },
+            ],
+            otherwise: 21,
+          },
+        }),
+        NOW
+      )
+    ).toThrow(/combined base/);
+  });
+
+  it("does NOT pin the COMBINE rate to 1 when rules drive the rate", () => {
+    // useRowRate false alone pins rate 1 (no column, no value). With rules the
+    // loaders synthesize the per-row value, and a pinned selector rate would
+    // silently shadow it in the engine.
+    saveBlock(
+      db,
+      OU_A,
+      rulesMultiplier({
+        label: "Ruled Ratio",
+        base: {
+          kind: "COMBINE",
+          op: "DIV",
+          left: { kind: "BASE_SALARY" },
+          right: { kind: "STAT", stat: "HOURS" },
+        },
+        useRowRate: false,
+      }),
+      NOW
+    );
+
+    const selector = getComponentDefinitions(db, OU_A).find(
+      (def) => def.label === "Ruled Ratio"
+    )!.baseSelector;
+    expect(selector?.kind).toBe("COMBINE");
+    expect(selector?.kind === "COMBINE" && selector.rate).toBeUndefined();
   });
 });
 

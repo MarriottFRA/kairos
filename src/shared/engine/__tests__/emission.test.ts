@@ -176,6 +176,69 @@ describe("instruction emission", () => {
     expect(transport).toMatchObject({ arg0: 0, params: [900] });
   });
 
+  it("emits PCT_OF_ACC_M with twelve rate params when a value carries monthlyRates", () => {
+    const rates = Array.from({ length: MONTHS }, (_, m) => (m < 5 ? 21 : 30));
+    const plan = mustCompile(
+      makeInput({
+        definitions: [
+          baseDef(),
+          makeDef({ id: "pct", spreadMethod: "PERCENT_OF" }),
+          makeDef({ id: "scalar", spreadMethod: "PERCENT_OF" }),
+        ],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [
+          makeValue("p1", "pct", { monthlyRates: rates }),
+          // A scalar sibling proves the monthly form is chosen per VALUE, not
+          // globally: same method, same base, different emission.
+          makeValue("p1", "scalar", { rate: 0.07 }),
+        ],
+      })
+    );
+    const decoded = decode(plan, 0);
+    const monthly = decoded.find((instr) => instr.name === "PCT_OF_ACC_M");
+    expect(monthly).toMatchObject({ outLine: lineOf(plan, 0, "pct"), params: rates });
+    const scalar = decoded.find((instr) => instr.name === "PCT_OF_ACC");
+    expect(scalar).toMatchObject({ outLine: lineOf(plan, 0, "scalar"), params: [0.07] });
+  });
+
+  it("emits the ACC_PUSH/COMBINE_ACC pair for a block-valued multiplier", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [
+          baseDef(),
+          makeDef({ id: "housing", spreadMethod: "FLAT_PER_ACTIVE_MONTH" }),
+          makeDef({
+            id: "pct",
+            spreadMethod: "PERCENT_OF",
+            ruleRateDefIds: [defId("housing")],
+          }),
+        ],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [
+          makeValue("p1", "housing", { yearlyValue: 1200 }),
+          makeValue("p1", "pct", { rateDefId: defId("housing") }),
+        ],
+      })
+    );
+    const decoded = decode(plan, 0);
+    const pushAt = decoded.findIndex((instr) => instr.name === "ACC_PUSH");
+    expect(pushAt).toBeGreaterThan(0);
+    // base in acc → parked → rate line loaded → multiplied with rate 1.
+    expect(decoded.slice(pushAt, pushAt + 4).map((instr) => instr.name)).toEqual([
+      "ACC_PUSH", "ACC_CLEAR", "ACC_ADD_LINE", "COMBINE_ACC",
+    ]);
+    expect(decoded[pushAt + 2].arg0).toBe(lineOf(plan, 0, "housing"));
+    expect(decoded[pushAt + 3]).toMatchObject({
+      outLine: lineOf(plan, 0, "pct"),
+      params: [1, 2], // rate 1, COMBINE_OPS.indexOf("MUL")
+    });
+    // The topo edge must have ordered housing BEFORE the block-valued line.
+    const order = plan.componentDefs.map((def) => def.id as string);
+    expect(order.indexOf(defId("housing") as string)).toBeLessThan(
+      order.indexOf(defId("pct") as string)
+    );
+  });
+
   it("emits DIRECT with exactly twelve month params, zero-filled", () => {
     const plan = mustCompile(
       makeInput({

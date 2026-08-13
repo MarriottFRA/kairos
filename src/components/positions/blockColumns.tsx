@@ -27,6 +27,7 @@ import {
   blockDepartmentRowKeys,
   blockFieldKey,
   blockInputSlots,
+  blockRuleRateKey,
   blockTotalKey,
   POOL_WEIGHT_SLOT,
   BlockSlot,
@@ -240,6 +241,12 @@ function poolRuleSummary(block: BlockDto): string {
   return parts.length > 0 ? parts.join(" and ") : "every position";
 }
 
+/** Month names for the derived-rate tooltip ("first change in June"). */
+const RULE_RATE_MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
 /** Same two-line header treatment as the catalog columns (columnFactory). */
 function renderBlockHeader(short: string, unit: string) {
   return () => (
@@ -405,6 +412,72 @@ export function buildBlockColumns(
         pastedValueParser: parsePastedNumber,
       });
     });
+
+    // Rules-driven multiplier: the read-only derived rate, in the slot the
+    // editable rate column vacated (blockInputSlots is empty for these). Read
+    // through the derived ref like the Total, so a re-evaluation never
+    // rebuilds the columns. A month-varying rate shows "21 → 30" with the
+    // step month in the tooltip; a block-valued multiplier shows "× label".
+    if (block.blockType === "MULTIPLIER" && block.rateRules) {
+      // Labels for block-valued outcomes, resolved at build time (a rules
+      // config referencing a block always has that block in this list).
+      const labelByBlockId = new Map(blocks.map((entry) => [entry.id, entry.label]));
+      columns.push({
+        field: blockRuleRateKey(block),
+        headerName: `${block.label} — Rate`,
+        description: `${block.label}: the multiplier this row's rules resolved to. Edit the rules from the block's cog.`,
+        width: 104,
+        type: "number",
+        align: "right",
+        headerAlign: "right",
+        editable: false,
+        sortable: true,
+        headerClassName: "pos-col--blocks pos-col--sectionStart",
+        cellClassName: "pos-cell--num pos-cell--sectionStart pos-cell--derived",
+        renderHeader: renderBlockHeader("Rate", "by rules"),
+        // Sort/filter on the year-end rate — for a mid-year step that is the
+        // rate the row settles on; block-valued outcomes sort as blanks.
+        valueGetter: (_value: unknown, row: PositionRow) => {
+          if (!row) return null;
+          const result = ctx.derived.current.ruleRatesById.get(row.id)?.get(block.costDefId);
+          if (!result) return null;
+          if ("rateBlockId" in result) return null;
+          return "rate" in result ? result.rate : result.monthlyRates[11] ?? null;
+        },
+        renderCell: (params) => {
+          const row = params.row as PositionRow | undefined;
+          const result = row
+            ? ctx.derived.current.ruleRatesById.get(row.id)?.get(block.costDefId)
+            : undefined;
+          if (!result) return <span />;
+          if ("rateBlockId" in result) {
+            const name = labelByBlockId.get(result.rateBlockId) ?? "another block";
+            return (
+              <Tooltip title={`Multiplies the base by "${name}" — that block's monthly value.`}>
+                <span>× {name}</span>
+              </Tooltip>
+            );
+          }
+          if ("rate" in result) {
+            return <span>{ctx.numberFormat.format(result.rate)}</span>;
+          }
+          const rates = result.monthlyRates;
+          const stepAt = rates.findIndex((rate) => rate !== rates[0]);
+          const label = `${ctx.numberFormat.format(rates[0])} → ${ctx.numberFormat.format(
+            rates[11] ?? 0
+          )}`;
+          return (
+            <Tooltip
+              title={`The rules change this row's rate during the year — first change in ${
+                RULE_RATE_MONTHS[stepAt] ?? ""
+              }.`}
+            >
+              <span>{label}</span>
+            </Tooltip>
+          );
+        },
+      });
+    }
 
     // Per-row account cells (unlocked blocks): pick any account, blank falls
     // back to the block's configured default (shown muted).

@@ -17,6 +17,7 @@ import type {
   SocialSecurityScheme,
   SpreadMethod,
 } from "../engine/types";
+import type { RateRulesConfig } from "./rateRules";
 
 /** The user-facing block palette. */
 export type BlockType =
@@ -259,6 +260,10 @@ export interface BlockInput {
    *  multiplier because it is a ratio. Defaults to true for DIV, false
    *  otherwise (a ÷ b is the same figure however many people the row counts). */
   ratioNoHeadcount?: boolean;
+  /** MULTIPLIER only: derive the rate from if/then rules instead of the per-row
+   *  rate column (which the grid then shows read-only). See
+   *  shared/blocks/rateRules.ts for the config shape and evaluation contract. */
+  rateRules?: RateRulesConfig;
   /** COUNT_RATE only; defaults to ACTIVE_MONTHS. */
   spread?: BlockSpread;
   /** Apply the merit increase from the position's increase month onward. */
@@ -300,6 +305,10 @@ export interface BlockDto {
   useRowRate?: boolean;
   /** MULTIPLIER + COMBINE base — see BlockInput. */
   ratioNoHeadcount?: boolean;
+  /** MULTIPLIER only — see BlockInput. When set, the loaders derive each row's
+   *  rate from these rules at input-build time (applyRateRules) and the grid's
+   *  rate column becomes the read-only derived display. */
+  rateRules?: RateRulesConfig;
   spread: BlockSpread;
   increaseAware: boolean;
   departmentMode: BlockDepartmentMode;

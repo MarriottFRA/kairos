@@ -28,7 +28,16 @@
  * totals actually moved.
  */
 
+import type { BlockDto } from "../blocks/ipc";
+import {
+  RateRuleBindContext,
+  RateRuleResult,
+  bindRateRules,
+  evaluateBoundRules,
+} from "../blocks/rateRules";
 import type { BlockResultsById } from "./liveSim";
+import type { PositionRow } from "./rowModel";
+import { serviceDaysFor } from "./serviceDays";
 
 export interface DerivedRowValues {
   /** Simulated vacation cost per row id (engine reference math). */
@@ -45,6 +54,9 @@ export interface DerivedRowValues {
    * cell), and a non-nullable field removes a branch from a per-cell callback.
    */
   blockResults: BlockResultsById;
+  /** rowId → costDefId → the rate a rules-driven multiplier resolved to (the
+   *  read-only cell where the rate column used to be). */
+  ruleRatesById: ReadonlyMap<string, ReadonlyMap<string, RateRuleResult>>;
 }
 
 /**
@@ -58,7 +70,55 @@ export const EMPTY_DERIVED_ROW_VALUES: DerivedRowValues = {
   manhoursWorkedById: new Map(),
   fteById: new Map(),
   blockResults: new Map(),
+  ruleRatesById: new Map(),
 };
+
+/**
+ * The displayed rate of every rules-driven multiplier, per row — the SAME
+ * evaluator the loaders run (bind once per block, evaluate per row), over the
+ * SAME subject shape the live sim builds (the row is the bag, engine scalars
+ * read off the row's own columns, service days from the hiring date). The cell
+ * therefore cannot disagree with what the engine multiplied by.
+ */
+export function ruleRatesForRows(
+  rows: readonly PositionRow[],
+  blocks: readonly BlockDto[],
+  planYear: number | null,
+  ctx: RateRuleBindContext = {}
+): Map<string, Map<string, RateRuleResult>> {
+  const out = new Map<string, Map<string, RateRuleResult>>();
+  const ruleBlocks = blocks.filter(
+    (block) => block.blockType === "MULTIPLIER" && block.rateRules
+  );
+  if (ruleBlocks.length === 0 || planYear === null) return out;
+
+  const bound = ruleBlocks.map((block) => ({
+    costDefId: block.costDefId,
+    rules: bindRateRules(block.rateRules!, ctx),
+  }));
+
+  for (const row of rows) {
+    if (row.active === false) continue;
+    const service = serviceDaysFor(
+      typeof row.hiringDate === "string" ? row.hiringDate : null,
+      planYear
+    );
+    const subject = {
+      bag: row as Record<string, unknown>,
+      departmentCode: typeof row.departmentCode === "string" ? row.departmentCode : "",
+      jobTypeCode: typeof row.jobTypeCode === "string" ? row.jobTypeCode : "",
+      payType: typeof row.payType === "string" ? row.payType : "",
+      serviceDaysPerMonth: service.perMonth,
+      serviceDaysOpening: service.opening,
+    };
+    const byDef = new Map<string, RateRuleResult>();
+    for (const block of bound) {
+      byDef.set(block.costDefId, evaluateBoundRules(block.rules, subject));
+    }
+    out.set(String(row.id), byDef);
+  }
+  return out;
+}
 
 /**
  * A fixed ref for callers with nothing to update — tests, and any consumer

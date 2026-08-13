@@ -51,6 +51,7 @@ import {
 import {
   DerivedRowValues,
   rowIdsWithChangedTotals,
+  ruleRatesForRows,
 } from "../../shared/positions/derivedRowValues";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
@@ -646,6 +647,18 @@ export default function Positions() {
     return (driverId: string) => map.get(driverId) ?? [];
   }, [kpiDrivers]);
 
+  // The rate each rules-driven multiplier resolved per row — the read-only
+  // cell where the rate column used to be. Same evaluator the loaders run
+  // (including KPI-condition series), so the display can never disagree with
+  // the engine.
+  const ruleRates = useMemo(
+    () =>
+      ruleRatesForRows(rows, blocks, calendarYear?.year ?? null, {
+        kpiSeries: kpiSeriesByDriver,
+      }),
+    [rows, blocks, calendarYear, kpiSeriesByDriver]
+  );
+
   /**
    * What the server says this user may write on this plan.
    *
@@ -908,8 +921,9 @@ export default function Positions() {
       manhoursWorkedById: manhoursWorked,
       fteById: ftes,
       blockResults: liveSim.results ?? EMPTY_BLOCK_RESULTS,
+      ruleRatesById: ruleRates,
     }),
-    [vacationCosts, manhoursWorked, ftes, liveSim]
+    [vacationCosts, manhoursWorked, ftes, liveSim, ruleRates]
   );
   const derivedRef = useRef<DerivedRowValues>(derived);
   derivedRef.current = derived;
@@ -2068,6 +2082,7 @@ export default function Positions() {
         open={!!blockDialog}
         block={blockDialog?.mode === "edit" ? blockDialog.block : null}
         blocks={blocksModel?.blocks ?? []}
+        catalog={catalog}
         kpiDrivers={kpiDrivers.map((entry) => ({
           id: entry.driver.id as string,
           label: entry.driver.label,

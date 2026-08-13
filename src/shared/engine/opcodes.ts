@@ -92,6 +92,13 @@
  *  ACC_ADD_VAC   acc[m] += vac[m] (the vacation-cost scratch set by VACATION).
  *                The VACATION base selector; topo-depends on BASE_SALARY.
  *  PCT_OF_ACC    params: rate; line[m] = rate·acc[m]
+ *  PCT_OF_ACC_M  params: rate[12]; line[m] = rate[m]·acc[m]
+ *                PCT_OF_ACC with a month-varying rate — emitted instead of the
+ *                scalar form when a ComponentValue carries monthlyRates (rate
+ *                rules with a days-in-position term that flips mid-year). The
+ *                rates are resolved by the loaders and folded into params at
+ *                compile time, so the VM just multiplies (the ACC_ADD_SERVICE
+ *                pattern). Never paired with a COMBINE base.
  *  WEIGHT_BY_ACC params: yearly; line[m] = yearly·acc[m]/Σacc  (0 if Σacc = 0)
  *  FLAT_ACTIVE   params: yearly; line[m] = yearly/twm·seas[m]  (0 months with seas 0)
  *                arg0 bit0: multiply by inc[m] (increase-aware component)
@@ -155,6 +162,7 @@ export const Op = {
   ACC_PUSH: 23,
   COMBINE_ACC: 24,
   ACC_ADD_SERVICE: 25,
+  PCT_OF_ACC_M: 26,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];

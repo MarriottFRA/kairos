@@ -303,6 +303,31 @@ export function standardDefinitions(): CostComponentDefinition[] {
       sortOrder: 17.3,
       baseSelector: { kind: "SERVICE", mode: "MONTH" },
     }),
+    // The month-varying-rate form (ComponentValue.monthlyRates → PCT_OF_ACC_M):
+    // the rate-rules indemnity shape — a days-in-position threshold flips the
+    // rate mid-year. Values mix scalar and monthly so both emissions are fuzzed
+    // on one def.
+    makeDef({
+      id: "def-multtiered",
+      spreadMethod: "PERCENT_OF",
+      label: "Tiered Indemnity Levy",
+      accountCode: "628700",
+      sortOrder: 17.4,
+      baseSelector: { kind: "SERVICE", mode: "TOTAL" },
+    }),
+    // The block-valued-multiplier form (ComponentValue.rateDefId): rate rules
+    // whose outcome is another block's line — base × that line via the
+    // ACC_PUSH/COMBINE_ACC pair. ruleRateDefIds is the topo edge; the def
+    // deliberately sorts BEFORE housing so only the edge orders them right.
+    makeDef({
+      id: "def-multblockrate",
+      spreadMethod: "PERCENT_OF",
+      label: "Housing-Scaled Levy",
+      accountCode: "628800",
+      sortOrder: 3.5,
+      baseSelector: { kind: "CALENDAR", series: "PAY_DAYS" },
+      ruleRateDefIds: [defId("def-housing")],
+    }),
     makeDef({
       id: "def-multhours",
       spreadMethod: "PERCENT_OF",
@@ -598,7 +623,36 @@ export function randomScenario(
       makeValue(id, "def-weightedservice", {
         yearlyValue: Math.round(rand() * 2500 * 100) / 100,
       }),
-      makeValue(id, "def-costperhour", { rate: 1 })
+      makeValue(id, "def-costperhour", { rate: 1 }),
+      // ~half scalar, ~half month-varying (a step at a random month — the
+      // shape a days-in-position rule produces), so PCT_OF_ACC and
+      // PCT_OF_ACC_M are both exercised against reference.resolveBase.
+      makeValue(
+        id,
+        "def-multtiered",
+        rand() < 0.5
+          ? { rate: Math.round(rand() * 5 * 100) / 10000 }
+          : {
+              monthlyRates: (() => {
+                const before = Math.round(rand() * 5 * 100) / 10000;
+                const after = Math.round(rand() * 5 * 100) / 10000;
+                const step = Math.floor(rand() * 12);
+                return Array.from({ length: MONTHS }, (_, m) =>
+                  m < step ? before : after
+                );
+              })(),
+            }
+      ),
+      // ~half block-valued (base × housing's line), ~half plain scalar, so
+      // the rateDefId emission and its topo edge are fuzzed alongside the
+      // ordinary path on the same def.
+      makeValue(
+        id,
+        "def-multblockrate",
+        rand() < 0.5
+          ? { rateDefId: defId("def-housing") }
+          : { rate: Math.round(rand() * 100) / 10000 }
+      )
     );
 
     // Width-axis extras. Appended AFTER the standard values so the RNG stream

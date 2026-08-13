@@ -17,6 +17,7 @@ import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
 import {
   deleteRows,
+  healBlankRowIds,
   healRowScenario,
   listRows,
   nextSortOrder,
@@ -67,6 +68,9 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
       const scope = resolveOuScope(request);
       const db = secureDb();
       const scenarioId = scenarioOf(db, request, scope.ou);
+      // Rescue rows minted with an empty id by the bug fixed in `save` below —
+      // list is the first thing the page does, so they arrive already healed.
+      healBlankRowIds(db, scope.ou, () => randomUUID());
       return ok(listRows(db, scope.ou, scenarioId));
     } catch (error) {
       console.error("Manual input list failed:", error);
@@ -87,8 +91,13 @@ export function createManualInputHandlers(): Record<string, IpcHandler> {
       const db = secureDb();
       const scenarioId = scenarioOf(db, request, scope.ou);
       const now = new Date().toISOString();
+      // `??` was wrong here: "Add row" sends id: "" (the renderer has no id to
+      // give yet), and `"" ?? uuid` is "", so every new row was stored under the
+      // empty-string primary key — one shared blank row per install, which the
+      // next add overwrote and which delete could never name ("Missing row
+      // id(s)."). `isNew` already treated "" as new; this now agrees with it.
       const isNew = !input.id;
-      const id = input.id ?? (randomUUID() as unknown as ManualInputRowId);
+      const id = (isNew ? randomUUID() : input.id) as ManualInputRowId;
       const createdBy =
         typeof request?.createdBy === "string" && request.createdBy.trim()
           ? request.createdBy.trim()

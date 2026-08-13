@@ -114,7 +114,10 @@ export function toInput(row: ManualGridRow): ManualInputRowInput {
   }
   const rate = baseOrNull(row.rate);
   return {
-    id: row.id as ManualInputRowId,
+    // Omitted, not sent blank: a fresh row has no id yet, and "Add row" builds
+    // its payload from `emptyGridRow("")`. The contract says "omit to create",
+    // and a blank id sent as one was what the handler mistook for a real key.
+    ...(row.id ? { id: row.id as ManualInputRowId } : {}),
     description: String(row.description ?? ""),
     department: String(row.department ?? ""),
     departmentCode: String(row.departmentCode ?? ""),

@@ -74,6 +74,7 @@ const OP_ACC_ADD_DAYS = Op.ACC_ADD_DAYS;
 const OP_ACC_ADD_SERVICE = Op.ACC_ADD_SERVICE;
 const OP_ACC_ADD_VAC = Op.ACC_ADD_VAC;
 const OP_PCT_OF_ACC = Op.PCT_OF_ACC;
+const OP_PCT_OF_ACC_M = Op.PCT_OF_ACC_M;
 const OP_WEIGHT_BY_ACC = Op.WEIGHT_BY_ACC;
 const OP_FLAT_ACTIVE = Op.FLAT_ACTIVE;
 const OP_FLAT_DAY = Op.FLAT_DAY;
@@ -311,6 +312,14 @@ export function executePosition(
         const out = outLine[i] * MONTHS;
         const rate = paramPool[pp];
         for (let m = 0; m < MONTHS; m++) values[out + m] = rate * scratch[SCRATCH_ACC + m];
+        break;
+      }
+
+      case OP_PCT_OF_ACC_M: {
+        const out = outLine[i] * MONTHS;
+        for (let m = 0; m < MONTHS; m++) {
+          values[out + m] = paramPool[pp + m] * scratch[SCRATCH_ACC + m];
+        }
         break;
       }
 

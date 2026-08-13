@@ -46,9 +46,21 @@ import {
   systemStatDefId,
   vacationCostDefId,
 } from "../../shared/blocks/ipc";
+import {
+  RATE_RULE_ENGINE_FIELDS,
+  RATE_RULE_OPERATORS,
+  RateRulesConfig,
+  normalizeRateRules,
+  operatorNeedsValue,
+  rateRulesBlockIds,
+  rateRulesMonthVarying,
+  ruleSourceType,
+} from "../../shared/blocks/rateRules";
+import { fieldLabel } from "../../shared/positions/fields";
 import { POSITION_COUNT_ACCOUNT } from "../../shared/positions/systemAccounts";
 import { OuScope } from "../positions/ouScope";
 import { prepared } from "../positions/stmtCache";
+import { getFieldCatalog } from "../positions/structureRepo";
 
 type Db = InstanceType<typeof Database>;
 
@@ -63,6 +75,9 @@ interface StoredConfig {
   useRowRate?: boolean;
   /** MULTIPLIER + COMBINE base only — see BlockInput.ratioNoHeadcount. */
   ratioNoHeadcount?: boolean;
+  /** MULTIPLIER only — see BlockInput.rateRules. Stored normalized; absent
+   *  when the block uses the per-row rate column. */
+  rateRules?: RateRulesConfig;
   spread: BlockSpread;
   increaseAware: boolean;
   departmentMode: BlockDepartmentMode;
@@ -143,6 +158,12 @@ function rowToDto(row: BlockRow): BlockDto {
     statsAccountCode: config.statsAccountCode ?? "",
     statsAccountLocked: config.statsAccountLocked ?? true,
     base: config.base,
+    // Normalize-on-read (the normPoolAmounts discipline): a synced or
+    // hand-edited blob must not crash the grid, and a malformed rule must not
+    // silently widen its match.
+    ...(blockType === "MULTIPLIER" && config.rateRules
+      ? { rateRules: normalizeRateRules(config.rateRules) }
+      : {}),
     // Only meaningful for a compound base; defaults keep every existing block
     // (which has no COMBINE base) reading exactly as before.
     useRowRate: config.useRowRate ?? true,
@@ -233,7 +254,9 @@ function baseBlockIds(base: BlockBaseRef | undefined): string[] {
   }
 }
 
-/** Every block this one would reach through its base chain, plus their labels. */
+/** Every block this one would reach through its base chain — INCLUDING the
+ *  blocks its rate rules use as multipliers, which are dependency edges in
+ *  the engine's topological sort exactly like a base — plus their labels. */
 function walkBaseChain(
   db: Db,
   scope: OuScope,
@@ -251,8 +274,10 @@ function walkBaseChain(
     ).get(blockId, scope.ou) as { label: string; config: string } | undefined;
     if (!row) continue;
     seen.set(blockId, row.label);
-    const base = (JSON.parse(row.config || "{}") as Partial<StoredConfig>).base;
-    queue.push(...baseBlockIds(base));
+    const config = JSON.parse(row.config || "{}") as Partial<StoredConfig>;
+    queue.push(...baseBlockIds(config.base));
+    const rules = config.rateRules ? normalizeRateRules(config.rateRules) : undefined;
+    if (rules) queue.push(...rateRulesBlockIds(rules));
   }
   return seen;
 }
@@ -273,6 +298,129 @@ function assertNoBaseCycle(
         `Pick a base that does not depend on it.`
     );
   }
+}
+
+/**
+ * Rate rules are validated with the catalog in hand: a typo'd or PII field key
+ * is a hard error at save time (the user is configuring right now — a soft
+ * warning would surface as silently-wrong money months later). Blank-reading
+ * tolerance is reserved for fields deleted AFTER the rules were saved.
+ */
+function validateRateRules(
+  db: Db,
+  scope: OuScope,
+  selfId: string | undefined,
+  config: RateRulesConfig,
+  base: BlockBaseRef | undefined
+): void {
+  if (!Number.isFinite(config.otherwise)) {
+    throw new Error('The "otherwise" rate must be a number.');
+  }
+  const catalogByKey = new Map(
+    getFieldCatalog(db, scope).fields.map((field) => [field.key, field])
+  );
+  const engineByKey = new Map(RATE_RULE_ENGINE_FIELDS.map((field) => [field.key, field]));
+
+  // Block-valued multipliers: the referenced lines are engine dependencies
+  // exactly like a base, so they get the same guards — existence, no
+  // self-reference, no cycle — plus the shapes the emission cannot take.
+  const ruleBlockIds = rateRulesBlockIds(config);
+  if (ruleBlockIds.length > 0) {
+    if (base?.kind === "COMBINE") {
+      throw new Error(
+        "A block multiplier is not available on a combined base — combine the blocks directly instead."
+      );
+    }
+    if (base?.kind === "KPI") {
+      throw new Error(
+        "A block multiplier is not available on a KPI base — use the block as the base and the KPI in the rules instead."
+      );
+    }
+    if (rateRulesMonthVarying(config)) {
+      throw new Error(
+        'A rule set cannot mix a block multiplier with "days in position" or KPI conditions — those change during the year, and a block multiplier cannot.'
+      );
+    }
+    for (const blockId of ruleBlockIds) {
+      assertUsableBaseBlock(db, scope, selfId, blockId);
+    }
+    assertNoBaseCycle(db, scope, selfId, ruleBlockIds);
+  }
+
+  config.rules.forEach((rule, index) => {
+    const label = `Rule ${index + 1}`;
+    if (!rule.rateBlockId && !Number.isFinite(rule.rate)) {
+      throw new Error(`${label}: the rate must be a number.`);
+    }
+    if (rule.when.length === 0) {
+      throw new Error(`${label}: add at least one condition.`);
+    }
+    for (const term of rule.when) {
+      const sourceType = ruleSourceType(term.source);
+      if (!RATE_RULE_OPERATORS[sourceType]?.includes(term.op)) {
+        throw new Error(`${label}: that comparison is not available for this field.`);
+      }
+      if (operatorNeedsValue(term.op)) {
+        if (term.op === "IN") {
+          if (!Array.isArray(term.value) || term.value.length === 0) {
+            throw new Error(`${label}: list at least one value to match.`);
+          }
+        } else if (
+          term.value === undefined ||
+          (typeof term.value === "string" && term.value.trim() === "") ||
+          (typeof term.value === "number" && !Number.isFinite(term.value))
+        ) {
+          throw new Error(`${label}: fill in the value to compare against.`);
+        }
+      }
+      if (term.source.kind === "DAYS_IN_POSITION" || term.source.kind === "KPI") {
+        // COMBINE_ACC takes one scalar rate — a month-varying rate has nowhere
+        // to go on a compound base (per-position-constant rules stay legal).
+        if (base?.kind === "COMBINE") {
+          throw new Error(
+            "Conditions that change during the year are not available on a combined base — the rate cannot vary by month there."
+          );
+        }
+        if (term.source.kind === "KPI" && !term.source.kpiDriverId.trim()) {
+          throw new Error(`${label}: pick the KPI to compare against.`);
+        }
+        continue;
+      }
+      const key = term.source.fieldKey;
+      const field = catalogByKey.get(key);
+      if (field) {
+        // Catalog first (the dialog reads dataType/options from it): extra
+        // values and PII fields are usable (the loaders merge PII into the
+        // rules bag — only the derived NUMBER reaches the engine); an ENGINE
+        // field only through the explicit whitelist (those are the scalars
+        // present on Position in BOTH loaders). COMPUTED exists only in the
+        // renderer and is rejected.
+        const usable =
+          field.storage === "POSITION_EXTRA" ||
+          field.storage === "PII_CORE" ||
+          field.storage === "PII_EXTRA" ||
+          (field.storage === "ENGINE" && engineByKey.has(key));
+        if (!usable) {
+          throw new Error(
+            `${label}: the field "${fieldLabel(field)}" cannot be used in a rule.`
+          );
+        }
+        if (field.dataType !== term.source.dataType) {
+          throw new Error(
+            `${label}: the field "${fieldLabel(field)}" changed type — re-pick it.`
+          );
+        }
+        continue;
+      }
+      const engineField = engineByKey.get(key);
+      if (!engineField) {
+        throw new Error(`${label}: the field "${key}" does not exist.`);
+      }
+      if (engineField.dataType !== term.source.dataType) {
+        throw new Error(`${label}: the field "${key}" changed type — re-pick it.`);
+      }
+    }
+  });
 }
 
 function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
@@ -335,6 +483,13 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
       }
       assertNoBaseCycle(db, scope, input.id, referenced);
     }
+  }
+
+  if (input.rateRules && input.blockType !== "MULTIPLIER") {
+    throw new Error("Only a Multiplier block can derive its rate from rules.");
+  }
+  if (input.blockType === "MULTIPLIER" && input.rateRules) {
+    validateRateRules(db, scope, input.id, input.rateRules, input.base);
   }
 
   if (input.blockType === "POOL_SPREAD") {
@@ -595,9 +750,11 @@ export function compileBlockDefs(
         // in SQLite, the same reason CALENDAR/VACATION ride the JSON column.
         // No per-row column means no stored value, which would read as rate 0
         // and zero the line — pin the rate to 1 so the block IS the
-        // combination. See BaseSelector.COMBINE.rate.
+        // combination. See BaseSelector.COMBINE.rate. NOT when rate rules are
+        // on: a pinned rate wins over the per-row value in the engine, and the
+        // rules deliver their derived rate through exactly that value.
         const selector = toEngineSelector(base, ou);
-        if (input.useRowRate === false && selector.kind === "COMBINE") {
+        if (input.useRowRate === false && !input.rateRules && selector.kind === "COMBINE") {
           selector.rate = 1;
         }
         def.baseRefJson = JSON.stringify(selector);
@@ -739,6 +896,10 @@ export function saveBlock(
           useRowRate: input.useRowRate ?? true,
           ratioNoHeadcount: input.ratioNoHeadcount ?? input.base.op === "DIV",
         }
+      : {}),
+    // Stored normalized so the blob hashes identically however it was typed.
+    ...(input.blockType === "MULTIPLIER" && input.rateRules
+      ? { rateRules: normalizeRateRules(input.rateRules) }
       : {}),
     spread: input.spread ?? "ACTIVE_MONTHS",
     increaseAware: input.increaseAware ?? false,
@@ -888,7 +1049,21 @@ export function referencingBlockLabels(
   ).all(scope.ou, blockId, blockCostDefId(blockId), blockStatDefId(blockId)) as Array<{
     label: string;
   }>;
-  return rows.map((row) => row.label);
+  const labels = new Set(rows.map((row) => row.label));
+  // Rule-multiplier references live only in the config blob (deliberately NOT
+  // in component_base_refs, which the COMPONENTS base resolution reads), so
+  // the guard scans multiplier configs too.
+  const configRows = prepared(
+    db,
+    `SELECT label, config FROM block_configs
+      WHERE ou = ? AND deleted_at IS NULL AND id != ? AND block_type = 'MULTIPLIER'`
+  ).all(scope.ou, blockId) as Array<{ label: string; config: string }>;
+  for (const row of configRows) {
+    const raw = (JSON.parse(row.config || "{}") as Partial<StoredConfig>).rateRules;
+    const rules = raw ? normalizeRateRules(raw) : undefined;
+    if (rules && rateRulesBlockIds(rules).includes(blockId)) labels.add(row.label);
+  }
+  return [...labels];
 }
 
 export function deleteBlock(

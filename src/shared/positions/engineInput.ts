@@ -13,11 +13,21 @@
 import { CalendarYear } from "../calendar";
 import {
   baseSalaryDefId,
+  blockCostDefId,
   holidayAccrualDefId,
   systemStatDefId,
   vacationCostDefId,
+  type BlockDto,
 } from "../blocks/ipc";
 import { KPI_EXPLICIT_DEPT_KEY } from "../kpiDrivers/ipc";
+import {
+  RateRuleBindContext,
+  RateRulesConfig,
+  RateRuleSubject,
+  bindRateRules,
+  evaluateBoundRules,
+  rateRulesBlockIds,
+} from "../blocks/rateRules";
 import {
   CalendarContext,
   ComponentDefId,
@@ -345,15 +355,136 @@ export function injectKpiSeries(
     for (const position of positions) {
       const value = valueByKey.get(`${position.id}|${def.id}`);
       if (!value) continue; // no multiplier -> zero line, nothing to inject
+      const rates = value.monthlyRates; // rate rules with a mid-year flip
       const multiplier = value.rate ?? 0;
       const resolved = explicit ?? byDept.get(position.departmentCode);
       const monthly = new Array<number>(MONTHS).fill(0);
       if (resolved) {
-        for (let m = 0; m < MONTHS; m++) monthly[m] = resolved[m] * multiplier;
+        for (let m = 0; m < MONTHS; m++) {
+          monthly[m] = resolved[m] * (rates ? rates[m] ?? 0 : multiplier);
+        }
       }
       value.monthlyValues = monthly;
     }
   }
+}
+
+/** One rules-driven multiplier block: its cost def and the rules to run. */
+export interface RateRuleBlockSpec {
+  costDefId: string;
+  config: RateRulesConfig;
+}
+
+const EMPTY_BAG: Record<string, unknown> = {};
+
+/**
+ * Inject the topo-ordering edges for block-valued rule multipliers: a rules
+ * block whose outcome is "use block X's value" needs X's line computed first,
+ * and the sort reads that off CostComponentDefinition.ruleRateDefIds. Injected
+ * at load from the block configs (the applySocialSecurityBase pattern) rather
+ * than persisted — no schema or sync change, and it can never go stale.
+ * Mutates `definitions` entries in place (the callers pass loader-owned
+ * copies). Call in BOTH loaders; liveSimParity pins the two.
+ */
+export function applyRuleRateDependencies(
+  definitions: CostComponentDefinition[],
+  blocks: readonly BlockDto[]
+): void {
+  const defById = new Map(definitions.map((def) => [def.id as string, def]));
+  for (const block of blocks) {
+    if (block.blockType !== "MULTIPLIER" || !block.rateRules) continue;
+    const blockIds = rateRulesBlockIds(block.rateRules);
+    if (blockIds.length === 0) continue;
+    const def = defById.get(block.costDefId);
+    if (!def) continue;
+    def.ruleRateDefIds = blockIds.map(
+      (id) => blockCostDefId(id) as ComponentDefId
+    );
+  }
+}
+
+/**
+ * Derive each position's rate for every rules-driven multiplier block, BEFORE
+ * injectKpiSeries (so a rules block on a KPI base gets its multiplier) and
+ * before resolveBlockValues (which shallow-clones values and must carry the
+ * derived rate through).
+ *
+ * The derived rate OVERWRITES any stored per-row rate — rules are the single
+ * source of truth while they are on. The stored value stays in the DB
+ * untouched and returns if the block is switched back to "typed per row".
+ * Positions with no stored ComponentValue get one synthesized (an absent
+ * value reads as rate 0 in the engine, which would zero the line for exactly
+ * the rows the rules were meant to cover). Synthesized rows carry no
+ * account/department override, so aggregation keys are unaffected.
+ *
+ * `bagByPosition` supplies each position's extra-values: the extraValues blob
+ * in the main loader, the flat grid row in the live sim (u_* keys sit at the
+ * top level there — the readPositionAccounts contract). Engine scalars are
+ * read from the Position itself, never the bag, so the two loaders cannot
+ * drift. Returns a NEW array; input entries are shallow-cloned where changed.
+ */
+export function applyRateRules(
+  specs: RateRuleBlockSpec[],
+  positions: Position[],
+  bagByPosition: Map<string, Record<string, unknown>>,
+  componentValues: ComponentValue[],
+  ctx: RateRuleBindContext = {}
+): ComponentValue[] {
+  if (specs.length === 0) return componentValues;
+
+  // Bind once per block per call — every constant coercion (and KPI series
+  // fetch) happens here, the per-position loop below is property reads and
+  // comparisons only.
+  const bound = specs.map((spec) => ({
+    costDefId: spec.costDefId,
+    rules: bindRateRules(spec.config, ctx),
+  }));
+
+  const out = componentValues.slice();
+  const indexByKey = new Map<string, number>();
+  for (let i = 0; i < componentValues.length; i++) {
+    const value = componentValues[i];
+    indexByKey.set(`${value.positionId}|${value.componentDefId}`, i);
+  }
+
+  for (const spec of bound) {
+    for (const position of positions) {
+      const subject: RateRuleSubject = {
+        bag: bagByPosition.get(position.id as string) ?? EMPTY_BAG,
+        departmentCode: position.departmentCode,
+        jobTypeCode: position.jobTypeCode,
+        payType: position.payType,
+        serviceDaysPerMonth: position.serviceDaysPerMonth,
+        serviceDaysOpening: position.serviceDaysOpening,
+      };
+      const result = evaluateBoundRules(spec.rules, subject);
+      // Exactly one of the three is set — the engine reads them in
+      // rateDefId → monthlyRates → rate priority (see ComponentValue).
+      const rate = "rate" in result ? result.rate : undefined;
+      const monthlyRates = "monthlyRates" in result ? result.monthlyRates : undefined;
+      const rateDefId =
+        "rateBlockId" in result
+          ? (blockCostDefId(result.rateBlockId) as ComponentDefId)
+          : undefined;
+
+      const key = `${position.id}|${spec.costDefId}`;
+      const index = indexByKey.get(key);
+      if (index !== undefined) {
+        out[index] = { ...out[index], rate, monthlyRates, rateDefId };
+      } else {
+        out.push({
+          positionId: position.id,
+          componentDefId: spec.costDefId as ComponentDefId,
+          rate,
+          monthlyRates,
+          rateDefId,
+          updatedAt: position.updatedAt,
+          deletedAt: null,
+        });
+      }
+    }
+  }
+  return out;
 }
 
 const STAT_SUFFIX = ":stat";

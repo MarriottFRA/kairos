@@ -51,8 +51,11 @@ export interface ServiceDays {
  * building the timestamp in UTC avoids the local-timezone off-by-one that would
  * otherwise shift a hire date across a month boundary west of Greenwich (the
  * same trap gridValueBridge documents for the grid's date columns).
+ *
+ * Exported for rate-rule DATE comparisons (shared/blocks/rateRules.ts), which
+ * must parse stored date values with exactly this discipline.
  */
-function parseIsoDayUtc(value: string | null | undefined): number | null {
+export function parseIsoDayUtc(value: string | null | undefined): number | null {
   if (typeof value !== "string") return null;
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
   if (!match) return null;

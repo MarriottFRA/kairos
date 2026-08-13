@@ -40,6 +40,7 @@ import {
   getComponentDefinitions,
   getFieldCatalog,
   getSsSchemes,
+  saveFieldCatalog,
   saveScenario,
 } from "../../../main/positions/structureRepo";
 import {
@@ -84,6 +85,11 @@ const FULL_TIME_CONTRACT = {
 const GRAT_DRIVER = "kpi-gratuities";
 const GRAT_SERIES = new Array(12).fill(1200);
 
+/** A seasonal KPI for the rules-condition leg: above 80 for the first half of
+ *  the year, below it after — so a "KPI ≥ 80" rule flips mid-year. */
+const OCC_DRIVER = "kpi-occupancy";
+const OCC_SERIES = [90, 90, 90, 90, 90, 90, 40, 40, 40, 40, 40, 40];
+
 /** Seed the KPI precalc cache the loader reads (the renderer gets the same
  *  numbers from its own drivers list — see the kpiSeries lambda below). */
 function seedKpiSeries(db: Db): void {
@@ -94,7 +100,16 @@ function seedKpiSeries(db: Db): void {
   );
   for (let period = 1; period <= 12; period++) {
     insert.run(GRAT_DRIVER, SCOPE.ou, period, GRAT_SERIES[period - 1], NOW.now);
+    insert.run(OCC_DRIVER, SCOPE.ou, period, OCC_SERIES[period - 1], NOW.now);
   }
+}
+
+/** The renderer's own copy of the cached series — shared by every runLiveSim
+ *  call in this file so the two paths always read the same numbers. */
+function rendererKpiSeries(driverId: string) {
+  if (driverId === GRAT_DRIVER) return [{ deptKey: "*", values: GRAT_SERIES }];
+  if (driverId === OCC_DRIVER) return [{ deptKey: "*", values: OCC_SERIES }];
+  return [];
 }
 
 let structureDb: Db;
@@ -158,6 +173,121 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   const multVacId = saveBlock(
     structureDb, SCOPE,
     { blockType: "MULTIPLIER", label: "Vacation Levy", accountCode: "", accountLocked: true, base: { kind: "VACATION" } },
+    NOW
+  );
+  // Rules-driven multipliers — nothing stored per row for either, so the rate
+  // only lands if BOTH paths derive it from the block config (applyRateRules):
+  // one keyed on a USER field, one on days-in-position. pos-2 was hired
+  // mid-plan-year and crosses 100 days of service inside it, so the
+  // monthlyRates → PCT_OF_ACC_M leg runs on this parity fixture too.
+  const bandKey = saveFieldCatalog(structureDb, SCOPE, [
+    {
+      create: {
+        section: "employee", dataType: "TEXT", defaultLabel: "Band",
+        storage: "POSITION_EXTRA",
+      },
+    },
+  ]).fields.find((field) => field.defaultLabel === "Band")!.key;
+  const ruleBandId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Banded Bonus", accountCode: "516700",
+      accountLocked: true, base: { kind: "BASE_SALARY" },
+      rateRules: {
+        rules: [
+          {
+            when: [
+              { source: { kind: "FIELD", fieldKey: bandKey, dataType: "TEXT" }, op: "EQ", value: "blue" },
+            ],
+            rate: 0.1,
+          },
+        ],
+        otherwise: 0.04,
+      },
+    },
+    NOW
+  );
+  const ruleTenureId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Tiered Indemnity", accountCode: "516800",
+      accountLocked: true, base: { kind: "SERVICE", mode: "MONTH" },
+      rateRules: {
+        rules: [
+          { when: [{ source: { kind: "DAYS_IN_POSITION" }, op: "LTE", value: 100 }], rate: 21 / 365 },
+        ],
+        otherwise: 30 / 365,
+      },
+    },
+    NOW
+  );
+  // KPI condition: the occupancy series crosses 80 mid-year, so this rate
+  // steps DOWN in July on every row — the KPI leg of the monthly path.
+  const ruleKpiId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "High-Season Premium", accountCode: "516900",
+      accountLocked: true, base: { kind: "BASE_SALARY" },
+      rateRules: {
+        rules: [
+          {
+            when: [{ source: { kind: "KPI", kpiDriverId: OCC_DRIVER }, op: "GTE", value: 80 }],
+            rate: 0.05,
+          },
+        ],
+        otherwise: 0.01,
+      },
+    },
+    NOW
+  );
+  // PII condition: hiring date (PII_CORE, DATE) — pos-1 was hired years ago
+  // and matches, pos-2 mid-plan-year and does not. The PII values reach the
+  // rules through the merged bag on the main path and the row on the live one;
+  // only the derived rate enters the engine on either.
+  const rulePiiId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Long-Service Bonus", accountCode: "517100",
+      accountLocked: true, base: { kind: "BASE_SALARY" },
+      rateRules: {
+        rules: [
+          {
+            when: [
+              {
+                source: { kind: "FIELD", fieldKey: "hiringDate", dataType: "DATE" },
+                op: "LT",
+                value: "2025-01-01",
+              },
+            ],
+            rate: 0.07,
+          },
+        ],
+        otherwise: 0.03,
+      },
+    },
+    NOW
+  );
+  // Block-valued multiplier: banded rows multiply pay days by the Uniforms
+  // block's own monthly value; everyone else takes a plain number. Also the
+  // topo edge — Uniforms must compute before this line on both paths.
+  const ruleBlockOutId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Uniform-Scaled Levy", accountCode: "517200",
+      accountLocked: true, base: { kind: "CALENDAR", series: "PAY_DAYS" },
+      rateRules: {
+        rules: [
+          {
+            when: [
+              { source: { kind: "FIELD", fieldKey: bandKey, dataType: "TEXT" }, op: "EQ", value: "blue" },
+            ],
+            rate: 0,
+            rateBlockId: flatId,
+          },
+        ],
+        otherwise: 0.02,
+      },
+    },
     NOW
   );
   // "Each row picks" its department: the override moves the aggregation key
@@ -229,6 +359,9 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
           id: "pos-1",
           fields: {
             departmentCode: "0410", jobTypeCode: "Manager", cluster: "Rooms",
+            // The rules block's IF matches this row ("blue" → 0.10); pos-2 has
+            // no band at all and falls through to the otherwise rate.
+            [bandKey]: "blue",
             payType: "SALARIED", headcount: 2, monthlyBaseSalary: 3200,
             seasonality: [1, 1, 1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1],
             vacationMonthlyWeights: [0, 0, 0.5, 0, 0, 0.25, 0, 0, 0.25, 0, 0, 0],
@@ -343,10 +476,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     calendarYear: CALENDAR,
     // The renderer's own copy of the cached series — same numbers the loader
     // reads out of kpi_driver_values, which is what parity is testing.
-    kpiSeries: (driverId) =>
-      driverId === GRAT_DRIVER
-        ? [{ deptKey: "*", values: GRAT_SERIES }]
-        : [],
+    kpiSeries: rendererKpiSeries,
     scenarioId,
     ou: SCOPE.ou,
     fullTime: FULL_TIME,
@@ -381,8 +511,38 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 13 blocks + 1 dual stat line, × 2 positions.
-  expect(comparedLines).toBe(28);
+  // 18 blocks + 1 dual stat line, × 2 positions.
+  expect(comparedLines).toBe(38);
+
+  // Teeth for the rules blocks — two identical ZERO lines would also "match",
+  // so pin that the derived rates actually landed on both paths. pos-1 wears
+  // band "blue" (0.10 of salary); pos-2 has no band and takes the otherwise
+  // rate, so its bonus is smaller relative to pay but still non-zero.
+  const bonusLine = live.results.get("pos-1")!.get(`${ruleBandId}:cost`)!;
+  expect(bonusLine.total).toBeGreaterThan(0);
+  expect(live.results.get("pos-2")!.get(`${ruleBandId}:cost`)!.total).toBeGreaterThan(0);
+  // pos-2 (hired 15 Mar) crosses 100 days of service in June, so the tiered
+  // indemnity rate must STEP UP mid-year: May (31 days × 21/365) < July
+  // (31 days × 30/365). This is the PCT_OF_ACC_M leg working end to end.
+  const tenureMonths = live.results.get("pos-2")!.get(`${ruleTenureId}:cost`)!.months;
+  expect(tenureMonths[4]).toBeGreaterThan(0);
+  expect(tenureMonths[6]).toBeGreaterThan(tenureMonths[4]);
+  // The KPI condition steps DOWN when occupancy falls below 80 in July —
+  // 0.05 × salary in June vs 0.01 × salary in July (both full months).
+  const kpiMonths = live.results.get("pos-2")!.get(`${ruleKpiId}:cost`)!.months;
+  expect(kpiMonths[6]).toBeGreaterThan(0);
+  expect(kpiMonths[5]).toBeGreaterThan(kpiMonths[6]);
+  // The PII (hiring date) condition matches only the long-serving pos-1.
+  expect(live.results.get("pos-1")!.get(`${rulePiiId}:cost`)!.total).toBeGreaterThan(0);
+  expect(live.results.get("pos-2")!.get(`${rulePiiId}:cost`)!.total).toBeGreaterThan(0);
+  // The block-valued multiplier: pos-1 (band blue) multiplies pay days by the
+  // Uniforms block's line; pos-2 takes the plain 0.02 number. Both non-zero,
+  // and pos-1's January figure is exactly payDays × Uniforms' January value.
+  const scaled1 = live.results.get("pos-1")!.get(`${ruleBlockOutId}:cost`)!;
+  const uniforms1 = live.results.get("pos-1")!.get(`${flatId}:cost`)!;
+  expect(scaled1.total).toBeGreaterThan(0);
+  expect(uniforms1.months[0]).toBeGreaterThan(0);
+  expect(live.results.get("pos-2")!.get(`${ruleBlockOutId}:cost`)!.total).toBeGreaterThan(0);
 
   // ── The structure cache must not change a single number ──
   // Same call, twice, through a cache: the first run compiles and fills it, the
@@ -397,8 +557,7 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     definitions: getComponentDefinitions(structureDb, SCOPE),
     ssSchemes: getSsSchemes(structureDb, SCOPE),
     calendarYear: CALENDAR,
-    kpiSeries: (driverId: string) =>
-      driverId === GRAT_DRIVER ? [{ deptKey: "*", values: GRAT_SERIES }] : [],
+    kpiSeries: rendererKpiSeries,
     scenarioId,
     ou: SCOPE.ou,
     fullTime: FULL_TIME,

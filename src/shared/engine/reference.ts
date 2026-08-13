@@ -523,14 +523,35 @@ export function referencePosition(
 
         switch (def.spreadMethod) {
           case "PERCENT_OF": {
+            const simpleBase = def.baseSelector?.kind !== "COMBINE";
+            // A block-valued multiplier (rate rules whose outcome is another
+            // block): line = that block's own line × the base, month by month.
+            // A reference to a definition that no longer exists reads as a
+            // zero series — the "missing = zero" contract everywhere else.
+            // Never combined with a COMBINE base (the loaders only synthesize
+            // rateDefId on simple bases; validated at save).
+            if (simpleBase && value?.rateDefId) {
+              const rateDef = defById.get(value.rateDefId as string);
+              const series = rateDef ? computeLine(rateDef) : null;
+              const base = resolveBase(def.baseSelector);
+              for (let m = 0; m < MONTHS; m++) {
+                out[m] = (series ? series[m] : 0) * base[m];
+              }
+              break;
+            }
             // A compound base may pin its own rate — see BaseSelector.COMBINE.
             const rate =
               def.baseSelector?.kind === "COMBINE" &&
               def.baseSelector.rate !== undefined
                 ? def.baseSelector.rate
                 : value?.rate ?? 0;
+            // A month-varying rate (rate rules with a days-in-position or KPI
+            // term) overrides the scalar per month. Never combined with a
+            // COMBINE base — the loaders only synthesize monthlyRates on
+            // simple bases.
+            const rates = simpleBase ? value?.monthlyRates : undefined;
             const base = resolveBase(def.baseSelector);
-            for (let m = 0; m < MONTHS; m++) out[m] = rate * base[m];
+            for (let m = 0; m < MONTHS; m++) out[m] = (rates ? rates[m] ?? 0 : rate) * base[m];
             break;
           }
           case "WEIGHTED_BY_BASE": {

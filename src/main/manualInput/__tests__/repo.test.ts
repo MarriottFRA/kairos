@@ -7,7 +7,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { MANUAL_INPUT_TABLES_SQL } from "../schema";
-import { deleteRows, listRows, nextSortOrder, saveRow } from "../repo";
+import {
+  deleteRows,
+  healBlankRowIds,
+  listRows,
+  nextSortOrder,
+  saveRow,
+} from "../repo";
 import type { SpreadMode } from "../../../shared/manualInput/ipc";
 
 type Db = InstanceType<typeof Database>;
@@ -139,5 +145,25 @@ describe("manual-input repo", () => {
     saveRow(db, baseRow({ id: "b" }));
     deleteRows(db, OU_A, ["a"], { now: NOW });
     expect(listRows(db, OU_A, SCEN).map((r) => r.id)).toEqual(["b"]);
+  });
+
+  // The rows the `input.id ?? randomUUID()` bug left behind: stored on the ''
+  // primary key, so undeletable (the handler drops blank ids) and overwritten by
+  // the next add. Renamed, keeping whatever was typed into them.
+  it("heals a row stored under the empty id, keeping its content", () => {
+    saveRow(db, baseRow({ id: "", description: "Typed into the blank row" }));
+    healBlankRowIds(db, OU_A, () => "minted-1");
+    const rows = listRows(db, OU_A, SCEN);
+    expect(rows.map((r) => r.id)).toEqual(["minted-1"]);
+    expect(rows[0].description).toBe("Typed into the blank row");
+    // And it is now deletable, which was the symptom.
+    deleteRows(db, OU_A, ["minted-1"], { now: NOW });
+    expect(listRows(db, OU_A, SCEN)).toHaveLength(0);
+  });
+
+  it("leaves well-formed rows alone when healing", () => {
+    saveRow(db, baseRow({ id: "a" }));
+    healBlankRowIds(db, OU_A, () => "minted-1");
+    expect(listRows(db, OU_A, SCEN).map((r) => r.id)).toEqual(["a"]);
   });
 });

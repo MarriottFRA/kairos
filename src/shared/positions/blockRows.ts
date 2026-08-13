@@ -55,10 +55,11 @@ export function blockFieldKey(defId: string, slot: BlockSlot): string {
 export function blockInputSlots(block: BlockDto): BlockSlot[] {
   switch (block.blockType) {
     case "MULTIPLIER":
-      // A compound block can drop its per-row multiplier entirely — the two
-      // combined sides are then the whole calculation and there is nothing to
-      // type, so the block contributes no editable column.
-      return block.useRowRate === false ? [] : ["rate"];
+      // Rate rules own the rate while they are on — the editable column gives
+      // way to the read-only derived display (blockRuleRateKey). A compound
+      // block can also drop its per-row multiplier entirely — the two combined
+      // sides are then the whole calculation and there is nothing to type.
+      return block.rateRules || block.useRowRate === false ? [] : ["rate"];
     case "FLAT_MONTHLY":
       return ["amount"];
     case "COUNT_RATE":
@@ -135,6 +136,16 @@ export function blockOverrideRowKeys(block: BlockDto): string[] {
  */
 export function blockTotalKey(block: BlockDto): string {
   return `${BLOCK_KEY_PREFIX}${block.costDefId}:total`;
+}
+
+/**
+ * The read-only derived rate of a rules-driven multiplier — what the rules
+ * resolved this row to. Like the Total, NOT a stored row key: the grid reads
+ * it from DerivedRowValues.ruleRatesById (computed by the same evaluator the
+ * loaders run, so the cell can never disagree with the engine).
+ */
+export function blockRuleRateKey(block: BlockDto): string {
+  return `${BLOCK_KEY_PREFIX}${block.costDefId}:ruleRate`;
 }
 
 // ---------------------------------------------------------------------------

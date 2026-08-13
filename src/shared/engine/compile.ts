@@ -364,6 +364,12 @@ function topoSort(
       const refIndex = indexById.get(refId);
       if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
     }
+    // Block-valued rule multipliers: any line a position's rateDefId may pick
+    // must be computed first. Dependency edges only — see ruleRateDefIds.
+    for (const refId of def.ruleRateDefIds ?? []) {
+      const refIndex = indexById.get(refId as string);
+      if (refIndex !== undefined && refIndex !== i) dependsOn[i].push(refIndex);
+    }
   }
 
   const indegree = sorted.map((_, i) => dependsOn[i].length);
@@ -1094,6 +1100,36 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
                   def.baseSelector.rate ?? value?.rate ?? 0,
                   COMBINE_OPS.indexOf(def.baseSelector.op),
                 ]);
+              } else if (
+                value?.rateDefId &&
+                defIndexById.get(value.rateDefId) !== undefined
+              ) {
+                // Block-valued multiplier (see ComponentValue.rateDefId):
+                // line = base × that line, built from the existing compound
+                // machinery — park the base in acc2, load the rate line into
+                // acc, multiply with a pinned rate of 1. The topo sort already
+                // ordered the rate line first (ruleRateDefIds).
+                emitter.emit(Op.ACC_PUSH, LINE_NONE, 0, []);
+                emitter.emit(Op.ACC_CLEAR, LINE_NONE, 0, []);
+                emitter.emit(
+                  Op.ACC_ADD_LINE,
+                  LINE_NONE,
+                  lineBase + defIndexById.get(value.rateDefId)!,
+                  []
+                );
+                emitter.emit(Op.COMBINE_ACC, line, 0, [1, COMBINE_OPS.indexOf("MUL")]);
+              } else if (value?.rateDefId) {
+                // The referenced definition no longer exists — a zero series,
+                // exactly what reference.ts computes for the same input.
+                emitter.emit(Op.PCT_OF_ACC, line, 0, [0]);
+              } else if (value?.monthlyRates) {
+                // Month-varying rate (see ComponentValue.monthlyRates) — the
+                // twelve rates fold into params, the VM just multiplies.
+                const rates = value.monthlyRates;
+                const ofs = emitter.emitInto(Op.PCT_OF_ACC_M, line, 0, MONTHS);
+                for (let m = 0; m < MONTHS; m++) {
+                  emitter.paramPool[ofs + m] = rates[m] ?? 0;
+                }
               } else {
                 emitter.emit(Op.PCT_OF_ACC, line, 0, [value?.rate ?? 0]);
               }

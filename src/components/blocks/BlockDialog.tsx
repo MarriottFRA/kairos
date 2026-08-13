@@ -59,6 +59,12 @@ import AccountBalanceWalletOutlinedIcon from "@mui/icons-material/AccountBalance
 import SchoolOutlinedIcon from "@mui/icons-material/SchoolOutlined";
 import Autocomplete from "@mui/material/Autocomplete";
 import Chip from "@mui/material/Chip";
+import IconButton from "@mui/material/IconButton";
+import Paper from "@mui/material/Paper";
+import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
+import ArrowDownwardOutlinedIcon from "@mui/icons-material/ArrowDownwardOutlined";
+import ArrowUpwardOutlinedIcon from "@mui/icons-material/ArrowUpwardOutlined";
+import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import {
   BLOCK_COMBINE_OPS,
   BLOCK_COMBINE_OP_META,
@@ -91,12 +97,19 @@ import {
   SsCountryPreset,
 } from "../../shared/socialSecurity/presets";
 import { JOB_TYPE_OPTIONS } from "../../shared/positions/fieldSeed";
+import type { FieldCatalog } from "../../shared/positions/fields";
+import {
+  RateRuleTerm,
+  RateRulesConfig,
+  operatorNeedsValue,
+} from "../../shared/blocks/rateRules";
 import {
   AccountOption,
   DepartmentOption,
 } from "../../shared/mappingTables/types";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import DepartmentAutocomplete from "../common/DepartmentAutocomplete";
+import FieldConditionPicker from "./FieldConditionPicker";
 
 export interface BlockDialogProps {
   open: boolean;
@@ -106,6 +119,10 @@ export interface BlockDialogProps {
   blocks: BlockDto[];
   /** KPI drivers for the KPI base options. */
   kpiDrivers: Array<{ id: string; label: string }>;
+  /** Field catalog — the rate-rules condition picker offers position fields
+   *  (including user columns) from it. Null while loading: the rules editor
+   *  still works, the field menu just lists only the built-in sources. */
+  catalog?: FieldCatalog | null;
   /** Synced account cache for the account pickers; empty = free-text entry. */
   accounts: AccountOption[];
   /** Department reference data for a pooled block's eligibility rule. */
@@ -122,6 +139,17 @@ export interface BlockDialogProps {
   /** Ready-made tab picked a block preset — the parent inserts its blocks. */
   onApplyPreset?: (presetId: string) => void;
 }
+
+/** A fresh, deliberately incomplete condition — the pickers fill it in. The
+ *  seeded field is the first "Position" entry so the row renders ready to use. */
+const NEW_RULE_TERM = (): RateRuleTerm => ({
+  source: { kind: "FIELD", fieldKey: "departmentCode", dataType: "TEXT" },
+  op: "EQ",
+  value: undefined,
+});
+
+/** The outcome select's sentinel for "type a number" (vs a block id). */
+const NUMBER_OUTCOME = "__number__";
 
 /** COUNT_RATE spread options, grouped for the dropdown's subheaders. */
 const SPREAD_GROUPS: Record<"byTime" | "byCurve", readonly BlockSpread[]> = {
@@ -846,6 +874,7 @@ export default function BlockDialog({
   block,
   blocks,
   kpiDrivers,
+  catalog,
   accounts,
   departments = [],
   saving,
@@ -867,6 +896,15 @@ export default function BlockDialog({
   // Compound-base options; ignored for every other base kind.
   const [useRowRate, setUseRowRate] = useState(true);
   const [ratioNoHeadcount, setRatioNoHeadcount] = useState(false);
+  // MULTIPLIER rate source: typed per row, or derived from if/then rules.
+  // Rule rates are held as TEXT so a half-typed "0.0" survives the keystroke
+  // (the poolAmounts precedent); parsed once on save.
+  const [rateMode, setRateMode] = useState<"ROW" | "RULES">("ROW");
+  const [ruleDrafts, setRuleDrafts] = useState<
+    Array<{ when: RateRuleTerm[]; rate: string; rateBlockId?: string }>
+  >([]);
+  const [otherwiseRate, setOtherwiseRate] = useState("0");
+  const [otherwiseBlockId, setOtherwiseBlockId] = useState<string | undefined>(undefined);
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
   const [increaseAware, setIncreaseAware] = useState(false);
   // Where the cost books. The control is MULTIPLIER-only, but the STATE is
@@ -903,6 +941,16 @@ export default function BlockDialog({
     setAccountLocked(block?.accountLocked ?? true);
     setStatsAccountCode(block?.statsAccountCode ?? "");
     setBase(block?.base);
+    setRateMode(block?.rateRules ? "RULES" : "ROW");
+    setRuleDrafts(
+      (block?.rateRules?.rules ?? []).map((rule) => ({
+        when: rule.when,
+        rate: String(rule.rate),
+        rateBlockId: rule.rateBlockId,
+      }))
+    );
+    setOtherwiseRate(String(block?.rateRules?.otherwise ?? 0));
+    setOtherwiseBlockId(block?.rateRules?.otherwiseBlockId);
     setUseRowRate(block?.useRowRate ?? true);
     setRatioNoHeadcount(
       block?.ratioNoHeadcount ??
@@ -1018,10 +1066,30 @@ export default function BlockDialog({
   // "One department" needs one chosen; the other two modes need nothing.
   const departmentError =
     departmentMode === "FIXED" && fixedDepartment.trim() === "";
+  // Rate rules: every rule needs at least one condition, every condition that
+  // takes a value needs one, and every rate must parse. Local gating only —
+  // the repo's validateInput (with the catalog in hand) stays authoritative.
+  const rulesActive = type === "MULTIPLIER" && rateMode === "RULES";
+  const rulesError =
+    rulesActive &&
+    ((!otherwiseBlockId && !Number.isFinite(Number(otherwiseRate.trim() || "x"))) ||
+      ruleDrafts.some(
+        (rule) =>
+          rule.when.length === 0 ||
+          (!rule.rateBlockId && !Number.isFinite(Number(rule.rate.trim() || "x"))) ||
+          rule.when.some(
+            (term) =>
+              operatorNeedsValue(term.op) &&
+              (term.value === undefined ||
+                (typeof term.value === "string" && term.value.trim() === "") ||
+                (Array.isArray(term.value) && term.value.length === 0))
+          )
+      ));
   const valid =
     !!type &&
     !labelError &&
     !baseError &&
+    !rulesError &&
     !poolAmountError &&
     !poolKpiError &&
     !poolWeightError &&
@@ -1051,6 +1119,19 @@ export default function BlockDialog({
       ...(type === "MULTIPLIER" && base?.kind === "COMBINE"
         ? { useRowRate, ratioNoHeadcount }
         : {}),
+      ...(rulesActive
+        ? {
+            rateRules: {
+              rules: ruleDrafts.map((rule) => ({
+                when: rule.when,
+                rate: rule.rateBlockId ? 0 : Number(rule.rate.trim()),
+                rateBlockId: rule.rateBlockId,
+              })),
+              otherwise: otherwiseBlockId ? 0 : Number(otherwiseRate.trim()),
+              otherwiseBlockId,
+            } satisfies RateRulesConfig,
+          }
+        : {}),
       spread: type === "COUNT_RATE" ? spread : undefined,
       // A pooled block's share IS the pot; a merit increase would inflate it.
       increaseAware:
@@ -1078,7 +1159,14 @@ export default function BlockDialog({
       : "Add a block";
 
   return (
-    <Dialog open={open} onClose={saving ? undefined : onClose} maxWidth="sm" fullWidth>
+    <Dialog
+      open={open}
+      onClose={saving ? undefined : onClose}
+      // Wider while the rule builder is on screen — a condition row is three
+      // coordinated inputs and cramping them wraps every card.
+      maxWidth={rulesActive ? "md" : "sm"}
+      fullWidth
+    >
       <DialogTitle>{title}</DialogTitle>
       <DialogContent>
         {!type ? (
@@ -1365,16 +1453,18 @@ export default function BlockDialog({
                     blockOptions={baseOptions.blockOptions}
                   />
                 </Stack>
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      size="small"
-                      checked={useRowRate}
-                      onChange={(event) => setUseRowRate(event.target.checked)}
-                    />
-                  }
-                  label="Also use a per-row multiplier"
-                />
+                {rateMode !== "RULES" && (
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={useRowRate}
+                        onChange={(event) => setUseRowRate(event.target.checked)}
+                      />
+                    }
+                    label="Also use a per-row multiplier"
+                  />
+                )}
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -1403,6 +1493,279 @@ export default function BlockDialog({
                     ? " A row standing for several people shows the per-person figure, not a multiple of it."
                     : ""}
                 </Typography>
+              </Stack>
+            )}
+
+            {type === "MULTIPLIER" && (
+              <Stack spacing={1}>
+                <Typography variant="subtitle2">Each row's multiplier</Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={rateMode}
+                  onChange={(_event, next: "ROW" | "RULES" | null) =>
+                    next && setRateMode(next)
+                  }
+                >
+                  <ToggleButton value="ROW">Typed per row</ToggleButton>
+                  <ToggleButton value="RULES">By rules</ToggleButton>
+                </ToggleButtonGroup>
+                <Typography variant="caption" color="text.secondary">
+                  {rateMode === "RULES"
+                    ? "The rules below set each row's multiplier from its own fields — the grid shows the result read-only. Rules are checked top to bottom; the first match wins."
+                    : "A multiplier column is typed on each row in the grid."}
+                </Typography>
+
+                {rateMode === "RULES" && (
+                  <Stack spacing={1.25}>
+                    {ruleDrafts.map((rule, index) => (
+                      <Paper key={index} variant="outlined" sx={{ p: 1.5 }}>
+                        <Stack spacing={1}>
+                          <Stack
+                            direction="row"
+                            spacing={0.5}
+                            sx={{ alignItems: "center" }}
+                          >
+                            <Chip size="small" label={`Rule ${index + 1}`} />
+                            <Box sx={{ flex: 1 }} />
+                            <IconButton
+                              size="small"
+                              aria-label="Move rule up"
+                              disabled={saving || index === 0}
+                              onClick={() =>
+                                setRuleDrafts((current) => {
+                                  const next = [...current];
+                                  [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                                  return next;
+                                })
+                              }
+                            >
+                              <ArrowUpwardOutlinedIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              aria-label="Move rule down"
+                              disabled={saving || index === ruleDrafts.length - 1}
+                              onClick={() =>
+                                setRuleDrafts((current) => {
+                                  const next = [...current];
+                                  [next[index], next[index + 1]] = [next[index + 1], next[index]];
+                                  return next;
+                                })
+                              }
+                            >
+                              <ArrowDownwardOutlinedIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              aria-label="Delete rule"
+                              disabled={saving}
+                              onClick={() =>
+                                setRuleDrafts((current) =>
+                                  current.filter((_entry, i) => i !== index)
+                                )
+                              }
+                            >
+                              <DeleteOutlineOutlinedIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                          {rule.when.map((term, termIndex) => (
+                            <Stack
+                              key={termIndex}
+                              direction="row"
+                              spacing={1}
+                              sx={{ alignItems: "flex-start" }}
+                            >
+                              <Typography
+                                variant="caption"
+                                sx={{ width: 28, pt: 1.25, color: "text.secondary" }}
+                              >
+                                {termIndex === 0 ? "If" : "and"}
+                              </Typography>
+                              <Box sx={{ flex: 1, minWidth: 0 }}>
+                                <FieldConditionPicker
+                                  catalog={catalog}
+                                  kpiDrivers={kpiDrivers}
+                                  departments={departments}
+                                  term={term}
+                                  disabled={saving}
+                                  onChange={(next) =>
+                                    setRuleDrafts((current) =>
+                                      current.map((entry, i) =>
+                                        i === index
+                                          ? {
+                                              ...entry,
+                                              when: entry.when.map((existing, j) =>
+                                                j === termIndex ? next : existing
+                                              ),
+                                            }
+                                          : entry
+                                      )
+                                    )
+                                  }
+                                />
+                              </Box>
+                              {rule.when.length > 1 && (
+                                <IconButton
+                                  size="small"
+                                  aria-label="Remove condition"
+                                  disabled={saving}
+                                  sx={{ mt: 0.5 }}
+                                  onClick={() =>
+                                    setRuleDrafts((current) =>
+                                      current.map((entry, i) =>
+                                        i === index
+                                          ? {
+                                              ...entry,
+                                              when: entry.when.filter(
+                                                (_term, j) => j !== termIndex
+                                              ),
+                                            }
+                                          : entry
+                                      )
+                                    )
+                                  }
+                                >
+                                  <DeleteOutlineOutlinedIcon fontSize="small" />
+                                </IconButton>
+                              )}
+                            </Stack>
+                          ))}
+                          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                            <Button
+                              size="small"
+                              startIcon={<AddOutlinedIcon />}
+                              disabled={saving}
+                              onClick={() =>
+                                setRuleDrafts((current) =>
+                                  current.map((entry, i) =>
+                                    i === index
+                                      ? { ...entry, when: [...entry.when, NEW_RULE_TERM()] }
+                                      : entry
+                                  )
+                                )
+                              }
+                            >
+                              And condition
+                            </Button>
+                            <Box sx={{ flex: 1 }} />
+                            <TextField
+                              select
+                              label="then multiplier is"
+                              size="small"
+                              value={rule.rateBlockId ?? NUMBER_OUTCOME}
+                              disabled={saving}
+                              onChange={(event) =>
+                                setRuleDrafts((current) =>
+                                  current.map((entry, i) =>
+                                    i === index
+                                      ? {
+                                          ...entry,
+                                          rateBlockId:
+                                            event.target.value === NUMBER_OUTCOME
+                                              ? undefined
+                                              : event.target.value,
+                                        }
+                                      : entry
+                                  )
+                                )
+                              }
+                              sx={{ width: 176 }}
+                            >
+                              <MenuItem value={NUMBER_OUTCOME}>A number…</MenuItem>
+                              {baseOptions.blockOptions.length > 0 && (
+                                <ListSubheader>A block's value</ListSubheader>
+                              )}
+                              {baseOptions.blockOptions.map((candidate) => (
+                                <MenuItem key={candidate.id} value={candidate.id}>
+                                  {candidate.label}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                            {!rule.rateBlockId && (
+                              <TextField
+                                label="Number"
+                                size="small"
+                                value={rule.rate}
+                                error={!Number.isFinite(Number(rule.rate.trim() || "x"))}
+                                disabled={saving}
+                                onChange={(event) =>
+                                  setRuleDrafts((current) =>
+                                    current.map((entry, i) =>
+                                      i === index
+                                        ? { ...entry, rate: event.target.value }
+                                        : entry
+                                    )
+                                  )
+                                }
+                                sx={{ width: 110 }}
+                              />
+                            )}
+                          </Stack>
+                        </Stack>
+                      </Paper>
+                    ))}
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                      <Button
+                        size="small"
+                        startIcon={<AddOutlinedIcon />}
+                        disabled={saving}
+                        onClick={() =>
+                          setRuleDrafts((current) => [
+                            ...current,
+                            { when: [NEW_RULE_TERM()], rate: "" },
+                          ])
+                        }
+                      >
+                        Add rule
+                      </Button>
+                      <Box sx={{ flex: 1 }} />
+                      <TextField
+                        select
+                        label="Otherwise, multiplier is"
+                        size="small"
+                        value={otherwiseBlockId ?? NUMBER_OUTCOME}
+                        disabled={saving}
+                        onChange={(event) =>
+                          setOtherwiseBlockId(
+                            event.target.value === NUMBER_OUTCOME
+                              ? undefined
+                              : event.target.value
+                          )
+                        }
+                        sx={{ width: 196 }}
+                      >
+                        <MenuItem value={NUMBER_OUTCOME}>A number…</MenuItem>
+                        {baseOptions.blockOptions.length > 0 && (
+                          <ListSubheader>A block's value</ListSubheader>
+                        )}
+                        {baseOptions.blockOptions.map((candidate) => (
+                          <MenuItem key={candidate.id} value={candidate.id}>
+                            {candidate.label}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                      {!otherwiseBlockId && (
+                        <TextField
+                          label="Number"
+                          size="small"
+                          value={otherwiseRate}
+                          error={!Number.isFinite(Number(otherwiseRate.trim() || "x"))}
+                          disabled={saving}
+                          onChange={(event) => setOtherwiseRate(event.target.value)}
+                          sx={{ width: 110 }}
+                        />
+                      )}
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary">
+                      Plain number, like the rate column: 0.1 = 10% of the base, 2 =
+                      double — or pick a block to multiply the base by that block's
+                      monthly value. "Days in position" counts calendar days since the
+                      hiring date, and KPI conditions follow the KPI's own months, so
+                      both can change a row's multiplier part-way through the year.
+                    </Typography>
+                  </Stack>
+                )}
               </Stack>
             )}
 

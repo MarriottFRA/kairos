@@ -35,6 +35,8 @@ import {
 } from "../engine/types";
 import {
   applyPositionAccounts,
+  applyRateRules,
+  applyRuleRateDependencies,
   applySocialSecurityBase,
   buildBankHolidayDefinition,
   injectKpiSeries,
@@ -237,6 +239,8 @@ export function runLiveSim(args: {
   // Fill each NI scheme's contributory base from its own base membership (mirror
   // of loadScenarioInput — liveSimParity pins the two).
   applySocialSecurityBase(defs, ssSchemes);
+  // Topo edges for block-valued rule multipliers (mirror of loadScenarioInput).
+  applyRuleRateDependencies(defs, blocks);
 
   // Rebuild component values from the live rows (one source of truth), then
   // run the same shared resolution the loader applies.
@@ -258,10 +262,28 @@ export function runLiveSim(args: {
       })
     )
   );
-  injectKpiSeries(defs, positions, componentValues, args.kpiSeries);
+  // Derive each row's rate for rules-driven multiplier blocks BEFORE the KPI
+  // injection (mirror of loadScenarioInput — liveSimParity pins the two). The
+  // live row IS the flat bag — u_* extras AND the PII columns sit at the top
+  // level (toRow merges them), the same contract readPositionAccounts ships
+  // under, so PII-referencing rules read the same values the main loader
+  // merges from position_pii.
+  const rowById = new Map<string, Record<string, unknown>>(
+    rows.filter((row) => row.active !== false).map((row) => [String(row.id), row])
+  );
+  const ruledValues = applyRateRules(
+    blocks
+      .filter((block) => block.blockType === "MULTIPLIER" && block.rateRules)
+      .map((block) => ({ costDefId: block.costDefId, config: block.rateRules! })),
+    positions,
+    rowById,
+    componentValues,
+    { kpiSeries: args.kpiSeries }
+  );
+  injectKpiSeries(defs, positions, ruledValues, args.kpiSeries);
   const resolvedValues = resolveBlockValues(
     defs,
-    componentValues,
+    ruledValues,
     blocks.map((block) => ({
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,

@@ -34,6 +34,9 @@ describe("disassemble", () => {
       componentValues: [
         makeValue("p1", "def-pension", { rate: 0.05 }),
         makeValue("p1", "def-overtime", { qty: 120, unitRate: 15 }),
+        makeValue("p1", "def-multtiered", {
+          monthlyRates: [21, 21, 21, 21, 21, 30, 30, 30, 30, 30, 30, 30],
+        }),
       ],
     });
     const compiled = compile(input);
@@ -45,6 +48,10 @@ describe("disassemble", () => {
     expect(text).toContain("meritPct=0.100000");
     expect(text).toContain("increaseMonth=7");
     expect(text).toContain('PCT_OF_ACC    out="Pension" → 1010|620000  rate=0.0500000');
+    // The month-varying rate decodes as the full twelve-rate vector.
+    expect(text).toContain(
+      'PCT_OF_ACC_M  out="Tiered Indemnity Levy" → 1010|628700  rates=[21, 21, 21, 21, 21, 30, 30, 30, 30, 30, 30, 30]'
+    );
     // QTY_TIMES_RATE folds into FLAT_ACTIVE with the premultiplied yearly.
     expect(text).toContain('FLAT_ACTIVE   out="Overtime" → 1010|625000  yearly=1800');
     // The SS base decodes its source lines by label.

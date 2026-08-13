@@ -251,6 +251,14 @@ export interface CostComponentDefinition extends SyncMeta {
   /** For PERCENT_OF / WEIGHTED_BY_BASE / SOCIAL_SECURITY. Defaults to base salary. */
   baseSelector?: BaseSelector;
   /**
+   * DEPENDENCY EDGES ONLY, never values: the definitions this def's rate rules
+   * may use as a block-valued multiplier (ComponentValue.rateDefId picks one
+   * per position). The topological sort orders those lines first; nothing else
+   * reads this. Injected at load time from the block configs by
+   * applyRuleRateDependencies — not persisted on the definition row.
+   */
+  ruleRateDefIds?: ComponentDefId[];
+  /**
    * Exempt this line from the count × cluster-weight post-pass, which normally
    * books every line `headcount` times over. Set for RATIOS — a line like
    * cost ÷ hours is already the per-person figure and is the SAME figure for a
@@ -498,6 +506,19 @@ export interface ComponentValue extends SyncMeta {
   componentDefId: ComponentDefId;
   /** PERCENT_OF (0.1 = 10%). */
   rate?: number;
+  /** PERCENT_OF only: a month-varying rate that overrides `rate` per month.
+   *  Synthesized by the loaders when a block's rate rules contain a
+   *  days-in-position or KPI term that flips inside the year — never
+   *  user-entered, never persisted, never set on a COMBINE base (the loaders
+   *  collapse a constant result back to `rate`). */
+  monthlyRates?: number[];
+  /** PERCENT_OF only: use ANOTHER definition's computed line as this
+   *  position's multiplier — line = that line × the base, month by month.
+   *  Synthesized by the loaders from a rule's block outcome; never persisted,
+   *  never set together with monthlyRates, never on a COMBINE base. The owning
+   *  def's ruleRateDefIds must list every candidate so the topo sort computes
+   *  them first. A reference to a missing definition reads as a zero series. */
+  rateDefId?: ComponentDefId;
   /** WEIGHTED_BY_BASE / FLAT_PER_ACTIVE_MONTH / FLAT_PER_DAY. */
   yearlyValue?: number;
   /** DIRECT_MONTHLY. */
