@@ -118,6 +118,9 @@ describe("migration v3 — count_exempt", () => {
 
   it("leaves a migrated store schema-identical to a fresh one", () => {
     applyCountExemptV3(legacy);
+    // A real upgraded store runs EVERY guarded helper through the baseline,
+    // so columns added after v3 (collapse_months) land on it too.
+    applyStructureColumns(legacy);
 
     const describeColumn = (c: ColumnInfo) => ({
       name: c.name,

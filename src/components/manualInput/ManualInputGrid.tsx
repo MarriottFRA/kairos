@@ -29,8 +29,18 @@ import { AccountFilter } from "../../shared/positions/fields";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import type { DepartmentPickList } from "../../shared/positions/departmentPickList";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
-import { buildManualColumns, isRateLockedField, ManualViewMode } from "./columns";
-import { isRateDriven, ManualGridRow } from "./rowModel";
+import {
+  buildManualColumns,
+  isKpiLockedField,
+  isRateLockedField,
+  ManualViewMode,
+} from "./columns";
+import {
+  isKpiStatsDriven,
+  isRateDriven,
+  ManualGridRow,
+  ManualStatsResolver,
+} from "./rowModel";
 import CellSelectionStats, {
   CELL_SELECTION_PERF_SX,
 } from "../common/CellSelectionStats";
@@ -45,6 +55,10 @@ export interface ManualInputGridProps {
   accountFilter?: AccountFilter | null;
   /** Stats-only / Amount-only / both monthly cells. */
   viewMode?: ManualViewMode;
+  /** The hotel's KPI drivers for the Stats-from-KPI picker. */
+  kpiDrivers?: Array<{ id: string; label: string }>;
+  /** Cached series for a driver id — lets the month cells show derived Stats. */
+  resolveKpiSeries?: ManualStatsResolver;
   /** Shared grid handle, so the page can focus a freshly added row. */
   apiRef?: ReturnType<typeof useGridApiRef>;
   loading?: boolean;
@@ -81,6 +95,8 @@ export default function ManualInputGrid({
   accounts,
   accountFilter,
   viewMode = "both",
+  kpiDrivers,
+  resolveKpiSeries,
   apiRef,
   loading = false,
   writePolicy,
@@ -112,8 +128,20 @@ export default function ManualInputGrid({
         accounts,
         accountFilter,
         viewMode,
+        kpiDrivers,
+        resolveKpiSeries,
       }),
-    [departments, departmentPicks, accounts, accountFilter, viewMode]
+    // kpiDrivers arrives async — the columns must rebuild when it lands or the
+    // picker stays empty forever.
+    [
+      departments,
+      departmentPicks,
+      accounts,
+      accountFilter,
+      viewMode,
+      kpiDrivers,
+      resolveKpiSeries,
+    ]
   );
 
   const rowWritable = useCallback(
@@ -132,12 +160,17 @@ export default function ManualInputGrid({
   // only way to give it one.
   //
   // The rate lock is per-field and unrelated: the monthly Amount cells and the
-  // Amount base are derived while the row is rate-driven.
+  // Amount base are derived while the row is rate-driven. The KPI lock is its
+  // mirror on the Stats side: the monthly Stats cells and the Stats base are
+  // derived while the row is KPI-driven.
   const isCellEditable = useCallback(
     (params: GridCellParams) => {
       if (!rowWritable(params.row as ManualGridRow)) return false;
       if (isRateLockedField(params.field)) {
         return !isRateDriven(params.row as ManualGridRow);
+      }
+      if (isKpiLockedField(params.field)) {
+        return !isKpiStatsDriven(params.row as ManualGridRow);
       }
       return true;
     },

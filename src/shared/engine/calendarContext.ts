@@ -24,12 +24,22 @@ export function buildCalendarContext(calendar: CalendarYear): CalendarContext {
       holidayDays[row.month - 1] = row.publicHolidays;
     }
   }
-  return { realDays, flatDays: new Float64Array(MONTHS).fill(30), holidayDays };
+  return {
+    year: calendar.year,
+    realDays,
+    flatDays: new Float64Array(MONTHS).fill(30),
+    holidayDays,
+  };
 }
 
 /** A context with explicit day counts — used by tests and synthetic data.
- *  `holidayDays` defaults to zeros (no bank-holiday cost). */
-export function makeCalendarContext(realDays: number[], holidayDays?: number[]): CalendarContext {
+ *  `holidayDays` defaults to zeros (no bank-holiday cost); `year` only matters
+ *  to WEEKDAY_COUNT defs. */
+export function makeCalendarContext(
+  realDays: number[],
+  holidayDays?: number[],
+  year = 2026,
+): CalendarContext {
   if (realDays.length !== MONTHS) {
     throw new Error(`realDays must have ${MONTHS} entries`);
   }
@@ -37,6 +47,7 @@ export function makeCalendarContext(realDays: number[], holidayDays?: number[]):
     throw new Error(`holidayDays must have ${MONTHS} entries`);
   }
   return {
+    year,
     realDays: Float64Array.from(realDays),
     flatDays: new Float64Array(MONTHS).fill(30),
     holidayDays: holidayDays ? Float64Array.from(holidayDays) : new Float64Array(MONTHS),

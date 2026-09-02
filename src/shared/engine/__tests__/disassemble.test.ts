@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { disassemble } from "../disassemble";
 import { compile } from "../simulate";
 import {
+  makeDef,
   makeInput,
   makePosition,
   makeValue,
@@ -57,6 +58,32 @@ describe("disassemble", () => {
     // The SS base decodes its source lines by label.
     expect(text).toContain('src="Pension"');
     expect(text).toContain("brackets=[≤6000@0.100000, ≤∞@0.0500000]");
+  });
+
+  it("renders COLLAPSE_LINE with its twelve weights", () => {
+    const input = makeInput({
+      definitions: [
+        ...standardDefinitions(),
+        makeDef({
+          id: "def-13th",
+          spreadMethod: "PERCENT_OF",
+          label: "Thirteenth Salary",
+          accountCode: "628900",
+          sortOrder: 24,
+          collapseMonths: [6, 12],
+        }),
+      ],
+      ssSchemes: [standardScheme()],
+      positions: [makePosition({ id: "p1" })],
+      componentValues: [makeValue("p1", "def-13th", { rate: 1 / 12 })],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const text = disassemble(compiled.plan, posId("p1"));
+
+    expect(text).toContain(
+      'COLLAPSE_LINE out="Thirteenth Salary" → 1010|628900  weights=[0, 0, 0, 0, 0, 0.500000, 0, 0, 0, 0, 0, 0.500000]'
+    );
   });
 
   it("reports an unknown position instead of throwing", () => {

@@ -464,6 +464,11 @@ export function manualInputToPayload(row: Row): EntityPayload {
     // NULL vs a number is the mode switch: null means the amounts were typed,
     // set means they are derived from rate × stats. Never coerce it to 0.
     rate: nullableNum(row.rate),
+    // Same mode switch one level up: null driver id means the stats were
+    // typed, set means they derive from the KPI cache. Never coerce.
+    statsKpiDriverId: nullableStr(row.stats_kpi_driver_id),
+    statsKpiDivisor: nullableNum(row.stats_kpi_divisor),
+    statsKpiFactor: nullableNum(row.stats_kpi_factor),
     stats: months(row.stats_json),
     amounts: months(row.amounts_json),
     spreadMode: nullableStr(row.spread_mode),
@@ -491,6 +496,9 @@ export function manualInputFromPayload(payload: EntityPayload): Row {
     cost_account: str(payload.costAccount),
     stats_account: str(payload.statsAccount),
     rate: nullableNum(payload.rate),
+    stats_kpi_driver_id: nullableStr(payload.statsKpiDriverId),
+    stats_kpi_divisor: nullableNum(payload.statsKpiDivisor),
+    stats_kpi_factor: nullableNum(payload.statsKpiFactor),
     stats_json: text(months(payload.stats)),
     amounts_json: text(months(payload.amounts)),
     spread_mode: nullableStr(payload.spreadMode),

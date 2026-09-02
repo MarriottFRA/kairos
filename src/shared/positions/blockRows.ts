@@ -5,7 +5,9 @@
  * PositionRow the grid edits, under namespaced keys:
  *
  *   blk:<defId>:rate       MULTIPLIER — the per-row multiplier
- *   blk:<defId>:amount     FLAT_MONTHLY — amount per month (yearlyValue slot)
+ *   blk:<defId>:amount     FLAT_MONTHLY — the amount (yearlyValue slot); its
+ *                          unit follows the block's spread (per month / per
+ *                          year / per occurrence — see BlockSpread)
  *   blk:<defId>:qty        COUNT_RATE — the count
  *   blk:<defId>:unitRate   COUNT_RATE — the rate
  *   blk:<defId>:m1..m12    CUSTOM_MONTHLY — exploded months (monthlyValues)

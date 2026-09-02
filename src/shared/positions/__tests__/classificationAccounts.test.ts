@@ -19,8 +19,11 @@ import { BUILTIN_CATALOG, JOB_TYPE_OPTIONS } from "../fieldSeed";
 import { ACCOUNT_FIELD_KEYS, accountAllowed } from "../fields";
 import { PositionRow, sanitizeRow } from "../rowModel";
 import {
+  BUYOUT_JOB_TYPE,
   headcountAccountForJobType,
   HEADCOUNT_ACCOUNT_BY_JOB_TYPE,
+  POSITION_COUNT_ACCOUNT,
+  positionCountAccountForJobType,
   STAFFING_ACCOUNT_FILTER,
   STATS_ACCOUNT_FILTER,
   workingHoursAccountForJobType,
@@ -162,5 +165,27 @@ describe("the per-grade account tables", () => {
       expect(headcountAccountForJobType(jobTypeCode)).toBe("");
       expect(workingHoursAccountForJobType(jobTypeCode)).toBe("");
     }
+  });
+});
+
+describe("the pinned position-count account", () => {
+  it("stays pinned for every grade except Buyout Labour", () => {
+    // The opposite default from the two tables above: an unknown or blank grade
+    // must still report its heads — only bought-in labour opts out.
+    for (const option of JOB_TYPE_OPTIONS) {
+      expect(positionCountAccountForJobType(option.value)).toBe(
+        option.value === BUYOUT_JOB_TYPE ? "" : POSITION_COUNT_ACCOUNT
+      );
+    }
+    for (const jobTypeCode of ["", "Chief Wizard", "  ", null, undefined, 7]) {
+      expect(positionCountAccountForJobType(jobTypeCode)).toBe(POSITION_COUNT_ACCOUNT);
+    }
+  });
+
+  it("names a real classification", () => {
+    // Same fork-guard as the tables: a renamed grade would silently resume
+    // booking buyout heads to A972540.
+    const grades = new Set(JOB_TYPE_OPTIONS.map((option) => option.value));
+    expect(grades.has(BUYOUT_JOB_TYPE)).toBe(true);
   });
 });

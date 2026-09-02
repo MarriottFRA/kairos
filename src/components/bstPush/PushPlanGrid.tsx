@@ -17,6 +17,7 @@ import { Box, Chip, Stack, Tooltip, Typography } from "@mui/material";
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
 import ErrorOutlinedIcon from "@mui/icons-material/ErrorOutlined";
 import HorizontalRuleIcon from "@mui/icons-material/HorizontalRule";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import type { SvgIconComponent } from "@mui/icons-material";
 import { DataGridPremium, GridColDef } from "@mui/x-data-grid-premium";
@@ -87,10 +88,21 @@ export const STATUS_META: Record<
       "its account, the clear pass still zeroes it.",
     icon: HorizontalRuleIcon,
   },
+  guarded: {
+    label: "Left alone",
+    color: "default",
+    hint:
+      "Kairos computed values for this row, but it is an allocation row or " +
+      "its cells are locked by sheet protection, and the push settings say " +
+      "to leave those alone.",
+    icon: LockOutlinedIcon,
+  },
   zeroed: {
     label: "Cleared only",
     color: "default",
-    hint: "Cleared by the zero pass, with nothing from Kairos to put back.",
+    hint:
+      "Cleared to 0 — by the clear rules or the push settings — with no " +
+      "Kairos values written on top.",
     icon: WarningAmberIcon,
   },
 };
@@ -151,7 +163,16 @@ export default function PushPlanGrid({
         width: 88,
         type: "number",
         sortable: false,
-        cellClassName: inert ? "bst-cell--num bst-cell--inert" : "bst-cell--num",
+        cellClassName: (params) => {
+          const base = inert
+            ? "bst-cell--num bst-cell--inert"
+            : "bst-cell--num";
+          // A guard changed what happens to this cell — dim it so the row
+          // reads as partially withheld rather than as a row of zeroes.
+          return params.row?.guardedMonths?.[index]
+            ? `${base} bst-cell--guarded`
+            : base;
+        },
         headerClassName: inert ? "bst-head--inert" : undefined,
         // Grouping adds auto-generated department rows that carry no months —
         // their value comes from the aggregation model, not this getter.
@@ -200,6 +221,33 @@ export default function PushPlanGrid({
                   />
                 </Tooltip>
               )}
+              {params.row.isAllocation && (
+                <Tooltip
+                  title={
+                    params.row.allocationText
+                      ? `Allocation row: "${params.row.allocationText}"`
+                      : "Allocation row"
+                  }
+                >
+                  <Chip
+                    label="alloc"
+                    size="small"
+                    variant="outlined"
+                    color="info"
+                    sx={{ height: 17, fontSize: "0.5625rem" }}
+                  />
+                </Tooltip>
+              )}
+              {Array.isArray(params.row.lockedMonths) &&
+                params.row.lockedMonths.some(Boolean) && (
+                  <Tooltip
+                    title={`${params.row.lockedMonths.filter(Boolean).length} of 12 month cells are locked by sheet protection`}
+                  >
+                    <LockOutlinedIcon
+                      sx={{ fontSize: 13, color: "text.secondary" }}
+                    />
+                  </Tooltip>
+                )}
             </Stack>
           ) : null,
       },
@@ -271,7 +319,9 @@ export default function PushPlanGrid({
       getRowClassName={(params) =>
         params.row?.status === "no_row" || params.row?.status === "no_sheet"
           ? "bst-row--problem"
-          : params.row?.status === "no_data" || params.row?.status === "skipped"
+          : params.row?.status === "no_data" ||
+              params.row?.status === "skipped" ||
+              params.row?.status === "guarded"
             ? "bst-row--muted"
             : ""
       }
@@ -286,6 +336,9 @@ export default function PushPlanGrid({
         },
         "& .bst-cell--total": { fontWeight: 600 },
         "& .bst-cell--inert": { color: "text.disabled" },
+        // A guard (allocation row / locked cell) kept the push away from this
+        // cell, or is clearing it — either way the Kairos value does not land.
+        "& .bst-cell--guarded": { color: "text.disabled", fontStyle: "italic" },
         "& .bst-head--inert .MuiDataGrid-columnHeaderTitle": {
           color: "text.disabled",
           fontWeight: 400,

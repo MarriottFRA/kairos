@@ -44,11 +44,11 @@ export const POSITIONS_STRUCTURE_TABLES_SQL = `
       -- per-position multiplier in component_values.rate) into absolute monthly
       -- values before compile. See src/main/kpiDrivers.
       kpi_driver_id TEXT,
-      -- NOTE: block_id, base_ref (v12) and count_exempt (v3) are deliberately
-      -- NOT declared here — they are added by their column-guarded helpers,
-      -- which the baseline calls too. Declaring one here as well would give a
-      -- fresh install a different COLUMN ORDER from an upgraded store, since
-      -- ALTER TABLE can only append.
+      -- NOTE: block_id, base_ref (v12), count_exempt (v3), collapse_months and
+      -- weekday_mask are deliberately NOT declared here — they are added by
+      -- their column-guarded helpers, which the baseline calls too. Declaring
+      -- one here as well would give a fresh install a different COLUMN ORDER
+      -- from an upgraded store, since ALTER TABLE can only append.
       updated_at TEXT NOT NULL,
       deleted_at TEXT
   );

@@ -133,6 +133,16 @@
  *                2 MUL, 3 DIV)
  *                line[m] = rate · f(acc2[m], acc[m]), left operand FIRST.
  *                DIV yields 0 where acc[m] = 0 (see BaseSelector.COMBINE).
+ *  COLLAPSE_LINE params: w[12]
+ *                total = Σ line[m]; line[m] = w[m]·total — a line POST-op,
+ *                emitted immediately after its def's normal emission when the
+ *                def carries collapseMonths ("13th month lands in June").
+ *                The weights are resolved at compile time per position by
+ *                collapseWeights (even split over the chosen ACTIVE months;
+ *                all-zero when none is active, dropping the cost), so the VM
+ *                just sums and multiplies. Reads/writes only its own line —
+ *                no scratch. Runs before the count × cluster-weight tail,
+ *                with which it commutes.
  */
 
 export const Op = {
@@ -163,6 +173,7 @@ export const Op = {
   COMBINE_ACC: 24,
   ACC_ADD_SERVICE: 25,
   PCT_OF_ACC_M: 26,
+  COLLAPSE_LINE: 27,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];

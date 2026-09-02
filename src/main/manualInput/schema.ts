@@ -7,7 +7,11 @@
  * months of Stats + Amount. "Stats" are operational units (hours, covers, room
  * nights…). When a rate is set the monthly Amount is derived (stats * rate) in the
  * renderer and `amounts_json` is ignored; with no rate the user types the monthly
- * Amount directly, and `amounts_json` is authoritative.
+ * Amount directly, and `amounts_json` is authoritative. The Stats side mirrors
+ * that split one level up: when `stats_kpi_driver_id` references a KPI driver,
+ * the monthly Stats are derived from its cached series (series / divisor *
+ * factor) and `stats_json` is only the last baked snapshot; with no driver the
+ * user types the Stats and `stats_json` is authoritative.
  *
  * The 12-month vectors are stored as JSON text arrays (length 12, Jan..Dec),
  * mirroring the positions `seasonality` convention. The spread_* / increase_*
@@ -40,7 +44,10 @@ export const MANUAL_INPUT_TABLES_SQL = `
       cost_account       TEXT NOT NULL DEFAULT '',   -- base_account code (dollar side)
       stats_account      TEXT NOT NULL DEFAULT '',   -- base_account code (statistical side)
       rate               REAL,                       -- NULL => amounts typed; set => amounts derived
-      stats_json         TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
+      stats_kpi_driver_id TEXT,                      -- NULL => stats typed; set => stats derived from the KPI cache
+      stats_kpi_divisor  REAL,                       -- the "per" amount, e.g. 50000 in "20 hours per 50,000"
+      stats_kpi_factor   REAL,                       -- units per divisor, e.g. the 20 in "20 hours per 50,000"
+      stats_json         TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]', -- authoritative only when stats_kpi_driver_id IS NULL
       amounts_json       TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]', -- authoritative only when rate IS NULL
       spread_mode        TEXT,                       -- NULL | 'flat' | 'daysInMonth'
       spread_base_stats  REAL,                       -- base distributed across the 12 Stats cells
@@ -87,4 +94,38 @@ export function applyManualInputScenarioScope(
     `CREATE INDEX IF NOT EXISTS idx_manual_input_rows_scope
        ON manual_input_rows (ou, scenario_id, deleted_at, sort_order)`
   );
+}
+
+/**
+ * Add the KPI-driven-stats columns (secure v6): a KPI driver reference plus
+ * the per-row divisor/factor ("20 hours per 50,000" => factor 20, divisor
+ * 50000). All three default NULL = feature off, so unlike the scenario-scope
+ * migration there is nothing to heal afterwards. Fresh installs get the
+ * columns from the DDL above. Idempotent: the column check is the guard, since
+ * ALTER TABLE ADD COLUMN has no IF NOT EXISTS.
+ */
+export function applyManualInputKpiStats(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(manual_input_rows)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("stats_kpi_driver_id")) {
+    handle.exec(
+      `ALTER TABLE manual_input_rows ADD COLUMN stats_kpi_driver_id TEXT`
+    );
+  }
+  if (!present.has("stats_kpi_divisor")) {
+    handle.exec(
+      `ALTER TABLE manual_input_rows ADD COLUMN stats_kpi_divisor REAL`
+    );
+  }
+  if (!present.has("stats_kpi_factor")) {
+    handle.exec(
+      `ALTER TABLE manual_input_rows ADD COLUMN stats_kpi_factor REAL`
+    );
+  }
 }

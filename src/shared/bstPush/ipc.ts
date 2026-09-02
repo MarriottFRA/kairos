@@ -79,10 +79,50 @@ export function clearsColumn(action: MonthAction): boolean {
   return action === "replace" || action === "clear";
 }
 
+/**
+ * What the push does to a guarded category of cells — the BST's allocation
+ * rows and its protection-locked cells.
+ *
+ * The OOXML writer bypasses Excel's sheet protection entirely (protection
+ * binds the Excel UI, not the file format), so without a guard the push
+ * happily replaces an allocation formula with a constant. These modes give
+ * the user that decision:
+ *
+ *   skip       Never touched — excluded from the value pass AND the clear
+ *              pass, clear rules notwithstanding. The safe default.
+ *   overwrite  No guard: the cell is treated like any other.
+ *   clear      Zeroed in replaced/cleared months, whether or not a clear
+ *              rule matches the row. Values are never written on top.
+ */
+export type GuardMode = "skip" | "overwrite" | "clear";
+
+export const GUARD_MODES: readonly GuardMode[] = [
+  "skip",
+  "overwrite",
+  "clear",
+] as const;
+
+/** Absent or garbage input falls back to `skip` — the safe default. */
+export function normalizeGuardMode(raw: unknown): GuardMode {
+  return raw === "overwrite" || raw === "clear" ? raw : "skip";
+}
+
 /** Options the user sets before pushing. */
 export interface BstPushOptions {
   /** Jan..Dec, one action each. Always exactly PUSH_MONTHS long. */
   months: MonthAction[];
+  /**
+   * Rows whose column C marks them as allocations ("Allocated from 0363",
+   * "Alloc from 0090", …). Applies to the whole row.
+   */
+  allocationRows: GuardMode;
+  /**
+   * Cells locked under the sheet's protection. Applies per cell — a row can
+   * mix locked and unlocked month cells. Where a cell falls under both
+   * guards with different modes, the most conservative wins:
+   * skip > clear > overwrite.
+   */
+  protectedCells: GuardMode;
   /** Copy the workbook next to itself before touching it. */
   backup: boolean;
   /**
@@ -108,6 +148,8 @@ export const DEFAULT_MONTH_PLAN: MonthAction[] = Array.from(
 
 export const DEFAULT_BST_PUSH_OPTIONS: BstPushOptions = {
   months: [...DEFAULT_MONTH_PLAN],
+  allocationRows: "skip",
+  protectedCells: "skip",
   backup: true,
   skipUnusedCombos: false,
 };
@@ -167,6 +209,8 @@ export function normalizeMonthPlan(raw: unknown): MonthAction[] {
 export function normalizeBstPushOptions(raw: unknown): BstPushOptions {
   const source = (raw ?? {}) as {
     months?: unknown;
+    allocationRows?: unknown;
+    protectedCells?: unknown;
     backup?: unknown;
     skipUnusedCombos?: unknown;
   };
@@ -174,6 +218,8 @@ export function normalizeBstPushOptions(raw: unknown): BstPushOptions {
     months: normalizeMonthPlan(
       source.months !== undefined ? source.months : source
     ),
+    allocationRows: normalizeGuardMode(source.allocationRows),
+    protectedCells: normalizeGuardMode(source.protectedCells),
     backup:
       typeof source.backup === "boolean"
         ? source.backup
@@ -254,6 +300,8 @@ export interface BstPushConfig {
   clearPrefixes: string[];
   /** The month plan the user last used — the same selection tends to repeat. */
   months: MonthAction[];
+  allocationRows: GuardMode;
+  protectedCells: GuardMode;
   backup: boolean;
   skipUnusedCombos: boolean;
 }
@@ -261,6 +309,8 @@ export interface BstPushConfig {
 export const DEFAULT_BST_PUSH_CONFIG: BstPushConfig = {
   clearPrefixes: [...DEFAULT_CLEAR_PREFIXES],
   months: [...DEFAULT_MONTH_PLAN],
+  allocationRows: "skip",
+  protectedCells: "skip",
   backup: true,
   skipUnusedCombos: false,
 };
@@ -270,6 +320,8 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
   return {
     clearPrefixes: normalizeClearPrefixes(source.clearPrefixes),
     months: normalizeMonthPlan(source.months),
+    allocationRows: normalizeGuardMode(source.allocationRows),
+    protectedCells: normalizeGuardMode(source.protectedCells),
     backup:
       typeof source.backup === "boolean"
         ? source.backup
@@ -298,6 +350,11 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
  * holds only zeroes and the user switched `skipUnusedCombos` on, so no values
  * are written to the row. The clear rules operate independently — a skipped
  * row they match is still zeroed in replaced/cleared months.
+ *
+ * `guarded` is a row Kairos had values for, every one of which a `skip` guard
+ * suppressed (see GuardMode) — the BST row is left exactly as it is.
+ * `zeroed` is its `clear`-mode counterpart: no values written, but the row's
+ * guard-cleared cells receive zeroes.
  */
 export type ComboStatus =
   | "write"
@@ -306,6 +363,7 @@ export type ComboStatus =
   | "no_data"
   | "skipped"
   | "duplicate_row"
+  | "guarded"
   | "zeroed";
 
 /** One planned (or completed) combo write. */
@@ -325,6 +383,14 @@ export interface PushComboRow {
   status: ComboStatus;
   /** True for A9… accounts: written in raw units, not thousands. */
   isStats: boolean;
+  /** True when the BST row's column C marks it as an allocation row. */
+  isAllocation: boolean;
+  /** Column C's text, for the allocation chip's tooltip. */
+  allocationText: string | null;
+  /** Jan..Dec: the BST cell is locked under sheet protection. */
+  lockedMonths: boolean[];
+  /** Jan..Dec: the push would have touched this cell but a guard stopped it. */
+  guardedMonths: boolean[];
   /** The 12 values exactly as they will land in the file (already scaled). */
   months: number[];
   /** Sum of `months`. */
@@ -424,6 +490,14 @@ export interface BstPushPlan {
   cellCount: number;
   /** Cells the clear pass will zero, summed over the cleared months. */
   zeroCellCount: number;
+  /** Plan rows sitting on a BST allocation row. */
+  allocationRowCount: number;
+  /** Plan rows with at least one protection-locked month cell. */
+  protectedRowCount: number;
+  /** Rows with status `guarded` — held data, fully suppressed by skip guards. */
+  guardedRowCount: number;
+  /** Individual month cells a skip guard kept the push away from. */
+  guardedCellCount: number;
   warnings: string[];
 }
 
@@ -439,6 +513,10 @@ export interface BstPushReport {
   skippedCount: number;
   cellCount: number;
   zeroCellCount: number;
+  allocationRowCount: number;
+  protectedRowCount: number;
+  guardedRowCount: number;
+  guardedCellCount: number;
   /** Department sheets the writer actually changed. */
   sheetsTouched: number;
   /** Absolute path of the backup copy, when one was made. */

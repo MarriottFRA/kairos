@@ -93,17 +93,20 @@ const OVERRIDES: Readonly<
     hint:
       "Statistics account the Count posts to — set by the Classification, not " +
       "picked: Manager A988101, Manager (Non Exempt) A988113, Supervisor " +
-      "A988102. Associate, Casual and Buyout Labour book none, so the cell is " +
-      "empty and the headcount is still calculated but not reported under an " +
-      "account of its own — the permanent HC Stats head still books it.",
+      "A988102. Associate and Casual book none, so the cell is empty and the " +
+      "headcount is still calculated but not reported under an account of its " +
+      "own — the permanent HC Stats head still books it. Buyout Labour books " +
+      "no heads anywhere: bought-in labour is not a headcount.",
   },
   headcountStatsAccount: {
     short: "HC Stats",
-    unit: "= always",
+    unit: "= pinned",
     hint:
-      "The account every position's Count is ALWAYS booked to, whatever the " +
-      "Headcount account beside it says — so heads can never go unreported. " +
-      "Read-only: this is where the A972540 rows on the Results page come from.",
+      "The account every position's Count is booked to, whatever the Headcount " +
+      "account beside it says — so heads can never go unreported. Read-only: " +
+      "this is where the A972540 rows on the Results page come from. The one " +
+      "exception is Buyout Labour, which is bought in rather than staffed — " +
+      "its cell is empty and its Count posts no headcount.",
   },
 
   // ── Contract ──────────────────────────────────────────────────────

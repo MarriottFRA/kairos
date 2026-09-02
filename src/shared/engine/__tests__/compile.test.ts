@@ -52,9 +52,33 @@ describe("compile validation", () => {
   });
 
   it("rejects unknown and non-referenceable base components", () => {
-    // STAT lines became base-referenceable with the blocks feature
-    // ("multiplier of hours"), so the non-referenceable case is now
-    // HOLIDAY_ACCRUAL (a scratch-coupled line no % base may include).
+    // HOLIDAY_ACCRUAL became base-referenceable with the accrual multiplier
+    // base (social charges on the accrual movement), so the non-referenceable
+    // case is now BANK_HOLIDAY.
+    const result = compile(
+      makeInput({
+        definitions: [
+          makeDef({ id: "b", kind: "BASE_SALARY" }),
+          makeDef({
+            id: "bankhol",
+            kind: "BANK_HOLIDAY",
+            bankHolidayStaffFraction: 0.5,
+            bankHolidayPremiumMultiplier: 2,
+          }),
+          makeDef({
+            id: "pct",
+            spreadMethod: "PERCENT_OF",
+            baseSelector: { kind: "COMPONENTS", componentIds: [defId("ghost"), defId("bankhol")] },
+          }),
+        ],
+        positions: [makePosition({ id: "p1" })],
+      })
+    );
+    expect(errorCodes(result)).toContain("MISSING_DEF");
+    expect(errorCodes(result)).toContain("INVALID_BASE_REF");
+  });
+
+  it("accepts HOLIDAY_ACCRUAL as a base component", () => {
     const result = compile(
       makeInput({
         definitions: [
@@ -63,14 +87,13 @@ describe("compile validation", () => {
           makeDef({
             id: "pct",
             spreadMethod: "PERCENT_OF",
-            baseSelector: { kind: "COMPONENTS", componentIds: [defId("ghost"), defId("accr")] },
+            baseSelector: { kind: "COMPONENTS", componentIds: [defId("accr")] },
           }),
         ],
         positions: [makePosition({ id: "p1" })],
       })
     );
-    expect(errorCodes(result)).toContain("MISSING_DEF");
-    expect(errorCodes(result)).toContain("INVALID_BASE_REF");
+    expect(errorCodes(result)).toEqual([]);
   });
 
   it("interns a per-row account override into the line's aggregation key", () => {

@@ -257,9 +257,11 @@ describe("per-position posting accounts reach the engine", () => {
 
   it("posts no headcount line for a grade that books no account", () => {
     // Associate / Casual / Buyout Labour have no headcount account, and a blank
-    // account has always meant "calculate, don't post". The heads still reach
-    // Results through the pinned position-count head.
-    for (const jobTypeCode of ["Associate", "Casual", "Buyout Labour", ""]) {
+    // account has always meant "calculate, don't post". For Associate / Casual
+    // (and an unclassified row) the heads still reach Results through the
+    // pinned position-count head; Buyout Labour is checked separately below,
+    // because it suppresses that head too.
+    for (const jobTypeCode of ["Associate", "Casual", ""]) {
       const { all, posted } = run(FILLED, { jobTypeCode });
 
       const headcount = all.find((line) => line.label === "Headcount")!;
@@ -268,6 +270,21 @@ describe("per-position posting accounts reach the engine", () => {
       expect(posted.some((line) => line.label === "Headcount")).toBe(false);
       expect(posted.some((line) => line.account === POSITION_COUNT_ACCOUNT)).toBe(true);
     }
+  });
+
+  it("posts no position-count line for Buyout Labour", () => {
+    // Bought-in labour is a spend, not staff: its Count must not inflate the
+    // pinned A972540 head. The line still CALCULATES (a block using it as a
+    // base sees the same number) — it books to a blank account, which the
+    // output projection drops, exactly like every other suppressed line.
+    const { all, posted } = run(FILLED, { jobTypeCode: "Buyout Labour" });
+
+    const positionCount = all.find((line) => line.label === "Position Count")!;
+    expect(positionCount.account).toBe("");
+    expect(positionCount.total).toBe(3 * MONTHS); // still calculated: Count 3 × 12
+    expect(posted.some((line) => line.account === POSITION_COUNT_ACCOUNT)).toBe(false);
+    // No headcount line either — buyout reports no heads anywhere.
+    expect(posted.some((line) => line.label === "Headcount")).toBe(false);
   });
 
   it("ignores a headcount account left in storage by a pre-v26 row", () => {

@@ -211,8 +211,27 @@ export function slotPresentation(
   if (slot === "rate") {
     return { short: "Multiplier", unit: "× base" };
   }
-  if (slot === "amount") return { short: "Amount", unit: "per month" };
-  if (slot === "qty") return { short: "Count", unit: "per year" };
+  if (slot === "amount") {
+    // A fixed block's amount changes UNIT with its spread: per month for the
+    // default, per occurrence for weekdays, a yearly total for the rest — the
+    // header is where the user learns which number the cell wants.
+    const spread = block.spread ?? "ACTIVE_MONTHS";
+    return {
+      short: "Amount",
+      unit:
+        spread === "ACTIVE_MONTHS"
+          ? "per month"
+          : spread === "WEEKDAYS"
+            ? "per occurrence"
+            : "per year",
+    };
+  }
+  if (slot === "qty") {
+    return {
+      short: "Count",
+      unit: block.spread === "WEEKDAYS" ? "per occurrence" : "per year",
+    };
+  }
   if (slot === "unitRate") return { short: "Rate", unit: "per unit" };
   if (slot === "openingBase") return { short: "Opening base", unit: "prior year" };
   if (slot === POOL_WEIGHT_SLOT) {

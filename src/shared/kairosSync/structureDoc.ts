@@ -275,6 +275,16 @@ export function componentDefToDoc(row: Row, baseRefs: Row[]): Row {
     // document from a client that predates it simply omits the key and reads
     // back as false, which is the pre-existing behaviour.
     countExempt: bool(row.count_exempt),
+    // MULTIPLIER "lands in chosen months". Parsed like baseRef so the document
+    // hashes on the VALUES; additive like countExempt — an older client's
+    // document omits the key and reads back as NULL, the pre-existing spread.
+    collapseMonths:
+      nullableStr(row.collapse_months) === null
+        ? null
+        : json(row.collapse_months, null),
+    // WEEKDAY_COUNT weekday mask. Additive like countExempt — an older
+    // client's document omits the key and reads back as NULL.
+    weekdayMask: nullableNum(row.weekday_mask),
     baseRefs: baseRefs
       .map((ref) => ({
         referencedDefId: str(ref.referenced_def_id),
@@ -313,6 +323,8 @@ export function componentDefFromDoc(row: Row): { def: Row; baseRefs: Row[] } {
       block_id: nullableStr(row.blockId),
       base_ref: row.baseRef == null ? null : text(row.baseRef),
       count_exempt: bool(row.countExempt) ? 1 : 0,
+      collapse_months: row.collapseMonths == null ? null : text(row.collapseMonths),
+      weekday_mask: nullableNum(row.weekdayMask),
       updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
       deleted_at: nullableStr(row.deletedAt),
     },

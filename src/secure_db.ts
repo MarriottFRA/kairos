@@ -12,6 +12,7 @@ import {
 } from "./main/positions/schema";
 import {
   MANUAL_INPUT_TABLES_SQL,
+  applyManualInputKpiStats,
   applyManualInputScenarioScope,
 } from "./main/manualInput/schema";
 import { KAIROS_SYNC_TABLES_SQL } from "./main/kairosSync/schema";
@@ -258,6 +259,10 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   // cluster_name_snapshot, so a machine without the (never-synced) cluster
   // definitions still shows the right name and computes the right share.
   5: applyClusterSnapshotColumns,
+  // KPI-driven manual stats: manual_input_rows gains a KPI driver reference
+  // plus the per-row divisor/factor, so monthly Stats can be derived from the
+  // KPI cache the way Amounts are already derived from a rate.
+  6: applyManualInputKpiStats,
 };
 
 function createSchema(handle: SecureDb): void {

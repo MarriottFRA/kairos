@@ -45,6 +45,7 @@ import {
   readTarget,
 } from "../../main/bstPush/readTarget";
 import type { BstTarget } from "../../main/bstPush/readTarget";
+import { annotateProtection } from "../../main/bstPush/readProtection";
 import { buildPushPlan, toCellWrites } from "../../main/bstPush/plan";
 import {
   readBstPushConfig,
@@ -121,7 +122,12 @@ function openTarget(
 
   let target: BstTarget;
   try {
-    target = readTarget(readWorkbookBytes(filePath), sourceFileName);
+    const bytes = readWorkbookBytes(filePath);
+    target = readTarget(bytes, sourceFileName);
+    // SheetJS cannot see sheet protection, so the locked-cell flags come from
+    // a raw-XML scan over the same bytes. Both preview and commit pass through
+    // here, so the guards always have protection data to work from.
+    annotateProtection(target, bytes);
   } catch (error) {
     if (error instanceof NotBstFileError) {
       return {
@@ -291,11 +297,25 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
       );
       if (plan.rows.length === 0) return ok({ outcome: "no_outputs" });
 
-      const applied = applyToFile(
-        filePath,
-        toCellWrites(plan, opened.target),
-        { backup: options.backup }
-      );
+      let applied;
+      try {
+        applied = applyToFile(filePath, toCellWrites(plan, opened.target), {
+          backup: options.backup,
+        });
+      } catch (error) {
+        // A guard-driven clear can newly target formula cells the writer
+        // refuses (array members, shared-formula masters). The refusal fires
+        // before the original file is touched, so it deserves the same calm
+        // copy as a refusal found at read time.
+        if (error instanceof UnsupportedLayoutError) {
+          return ok({
+            outcome: "unsupported_layout",
+            sourceFileName: path.basename(filePath),
+            reason: error.message,
+          });
+        }
+        throw error;
+      }
 
       return ok({
         outcome: "ok",
@@ -310,6 +330,10 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
           skippedCount: plan.skippedCount,
           cellCount: plan.cellCount,
           zeroCellCount: plan.zeroCellCount,
+          allocationRowCount: plan.allocationRowCount,
+          protectedRowCount: plan.protectedRowCount,
+          guardedRowCount: plan.guardedRowCount,
+          guardedCellCount: plan.guardedCellCount,
           sheetsTouched: applied.sheetsTouched,
           backupPath: applied.backupPath,
           warnings: plan.warnings,

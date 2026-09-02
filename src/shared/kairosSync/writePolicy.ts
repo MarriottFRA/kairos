@@ -157,6 +157,56 @@ export function departmentWritePolicy(
 }
 
 /**
+ * The write policy when `/department-ownership` has never answered, derived
+ * from the head.
+ *
+ * The head's scope describes what the caller may READ, which errs wide — the
+ * server still resolves authority per row, so the cost of the guess is a
+ * rejection rather than a lost write. What the guess must never do is fall
+ * through to an open ceiling for somebody who does not own the plan: the same
+ * `ownsPlan` conjunction `departmentWritePolicy` applies to the real answer. A
+ * FULL-scope DELEGATE is a delegate who was handed every department, and for a
+ * grant with `canEdit: false` their honest write scope is EMPTY — the head
+ * cannot see that flag, so the read scope is the tightest bound available, and
+ * an open ceiling would make the read-only share look writable and skip the
+ * "shared with you to look at, not to change" refusal entirely.
+ *
+ * An owner keeps the open ceiling even with no head at all: a brand-new plan's
+ * first publish has nothing cached and the `scenario` row still has to go up.
+ */
+export function headFallbackWritePolicy(
+  relation: string | null | undefined,
+  scopeKind: string | null | undefined,
+  departments: readonly string[] | null | undefined
+): DepartmentWritePolicy {
+  if (ownsPlan(relation)) {
+    return scopeKind === "PARTIAL"
+      ? allowOnly(departments ?? [])
+      : UNRESTRICTED_WRITE;
+  }
+  return allowOnly(departments ?? []);
+}
+
+/**
+ * The delegation's own `canEdit`, applied over whatever the ownership answer
+ * produced.
+ *
+ * `canEdit: false` strips every write capability server-side while leaving the
+ * relation a plain DELEGATE, and the department enumeration cannot be trusted
+ * to carry it alone: `writable` is shaped by who HOLDS a department, and a
+ * read-only delegate displaces nobody. `undefined` means "not asked, or the
+ * ask failed" and changes nothing — the same permissive-on-failure rule as
+ * `canAddRows`, because the server enforces either way and an offline delegate
+ * must not silently lose access they legitimately hold.
+ */
+export function clampToGrant(
+  policy: DepartmentWritePolicy | undefined,
+  canEdit: boolean | undefined
+): DepartmentWritePolicy | undefined {
+  return canEdit === false ? NO_DEPARTMENT_WRITE : policy;
+}
+
+/**
  * The departments the server actually listed as writable.
  *
  * NOT the write predicate — `canWriteDepartment` is. This is the enumeration,

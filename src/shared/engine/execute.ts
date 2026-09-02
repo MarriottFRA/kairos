@@ -87,6 +87,7 @@ const OP_STAT_HOURS = Op.STAT_HOURS;
 const OP_STAT_HOURS_PAID = Op.STAT_HOURS_PAID;
 const OP_ACC_PUSH = Op.ACC_PUSH;
 const OP_COMBINE_ACC = Op.COMBINE_ACC;
+const OP_COLLAPSE_LINE = Op.COLLAPSE_LINE;
 
 export function executePosition(
   plan: CompiledPlan,
@@ -504,6 +505,17 @@ export function executePosition(
             values[out + m] = (totalHours / twd2) * realDays[m] * s;
           }
         }
+        break;
+      }
+
+      case OP_COLLAPSE_LINE: {
+        // Redistribute the line just written by its compile-resolved weights.
+        // Mirrors the collapseMonths block of reference's SPREAD case term for
+        // term — same ascending sum, same w[m]·total association.
+        const out = outLine[i] * MONTHS;
+        let total = 0;
+        for (let m = 0; m < MONTHS; m++) total += values[out + m];
+        for (let m = 0; m < MONTHS; m++) values[out + m] = paramPool[pp + m] * total;
         break;
       }
     }

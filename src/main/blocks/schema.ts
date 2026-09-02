@@ -40,9 +40,9 @@ export const BLOCK_CONFIGS_SQL = `
  *   - block_id — which block compiled this definition (NULL for defs that are
  *     not block-owned, e.g. a future standalone BASE_SALARY admin row).
  *   - base_ref — JSON BaseSelector for base kinds beyond the original
- *     BASE_SALARY/COMPONENTS CHECK (STAT / CALENDAR / VACATION); the legacy
- *     base_selector_kind + component_base_refs path keeps serving the two
- *     original kinds. Read preference in structureRepo.getComponentDefinitions.
+ *     BASE_SALARY/COMPONENTS CHECK (STAT / CALENDAR / SERVICE / VACATION); the
+ *     legacy base_selector_kind + component_base_refs path keeps serving the
+ *     two original kinds. Read preference in structureRepo.getComponentDefinitions.
  *
  * Idempotent — ALTER TABLE ADD COLUMN is not `IF NOT EXISTS`, so guard on the
  * current columns (the applyValueStoreV3 pattern).
@@ -102,6 +102,60 @@ export function applyCountExemptV3(
 }
 
 /**
+ * cost_component_definitions.collapse_months — land a MULTIPLIER's whole
+ * yearly result in chosen months (the 13th/14th-period-salary shape).
+ *
+ * JSON array of 1-based months as TEXT; NULL = the def spreads with its base
+ * as it always has, which is why this upgrades in place — every existing row
+ * keeps its exact behaviour. Additive, column-guarded ALTER like the helpers
+ * above; must stay in step with the baseline DDL in main/positions/schema.ts
+ * (the schema-drift test asserts a migrated store and a fresh one end up
+ * identical).
+ */
+export function applyCollapseMonthsColumn(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(cost_component_definitions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // structure tables not created yet
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("collapse_months")) {
+    handle.exec(
+      `ALTER TABLE cost_component_definitions ADD COLUMN collapse_months TEXT`
+    );
+  }
+}
+
+/**
+ * cost_component_definitions.weekday_mask — which weekdays a WEEKDAY_COUNT
+ * spread books on (7-bit Sunday-first mask, the CalendarYear.weekendMask
+ * convention; `1 << 5` = Fridays).
+ *
+ * NULL = not a weekday def — every existing row keeps its exact behaviour,
+ * which is why this upgrades in place. Additive, column-guarded ALTER like the
+ * helpers above; must stay in step with the baseline DDL in
+ * main/positions/schema.ts (the schema-drift test asserts a migrated store and
+ * a fresh one end up identical).
+ */
+export function applyWeekdayMaskColumn(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(cost_component_definitions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // structure tables not created yet
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("weekday_mask")) {
+    handle.exec(
+      `ALTER TABLE cost_component_definitions ADD COLUMN weekday_mask INTEGER`
+    );
+  }
+}
+
+/**
  * Every guarded column cost_component_definitions needs beyond its CREATE
  * TABLE, in the order applyBaselineSchema applies them.
  *
@@ -116,4 +170,6 @@ export function applyStructureColumns(
 ): void {
   applyBlocksStructureV12(handle);
   applyCountExemptV3(handle);
+  applyCollapseMonthsColumn(handle);
+  applyWeekdayMaskColumn(handle);
 }

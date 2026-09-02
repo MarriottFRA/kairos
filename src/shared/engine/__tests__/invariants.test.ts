@@ -4,9 +4,11 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { weekdayCounts } from "../../calendar";
 import { compile, simulate, recalc } from "../simulate";
 import { MONTHS } from "../types";
 import {
+  FIXTURE_YEAR,
   makeDef,
   makeInput,
   makePosition,
@@ -105,6 +107,99 @@ describe("conservation invariants", () => {
           `seed ${seed} ${position.id as string}`
         ).toBeLessThan(1e-9 * Math.max(magnitude, 1));
       }
+    }
+  });
+
+  it("collapsed multipliers book only in chosen active months, conserving the total", () => {
+    // Twin scenarios off the same seed: the RNG streams are identical, so the
+    // only difference is collapseMonths on def-thirteenth/def-fourteenth.
+    for (const seed of [1, 42, 2024]) {
+      const collapsedInput = randomScenario(seed, 12);
+      const spreadInput = randomScenario(seed, 12);
+      for (const def of spreadInput.definitions) delete def.collapseMonths;
+
+      const a = compile(collapsedInput);
+      const b = compile(spreadInput);
+      if (!("plan" in a) || !("plan" in b)) throw new Error("compile failed");
+      const collapsedSim = simulate(a.plan);
+      const spreadSim = simulate(b.plan);
+
+      for (const position of collapsedInput.positions) {
+        for (const defIdStr of ["def-thirteenth", "def-fourteenth"]) {
+          const def = collapsedInput.definitions.find(
+            (d) => (d.id as string) === defIdStr
+          )!;
+          const chosen = def.collapseMonths!;
+          const collapsed = collapsedSim
+            .positionLines(position.id)
+            .find((l) => (l.component.id as string) === defIdStr)!.months;
+          const spread = spreadSim
+            .positionLines(position.id)
+            .find((l) => (l.component.id as string) === defIdStr)!.months;
+
+          const anyChosenActive = chosen.some(
+            (month) => position.seasonality[month - 1] > 0
+          );
+          for (let m = 0; m < MONTHS; m++) {
+            const chosenActive =
+              chosen.includes(m + 1) && position.seasonality[m] > 0;
+            if (!chosenActive) {
+              expect(
+                collapsed[m],
+                `seed ${seed} ${position.id as string} ${defIdStr} month ${m + 1}`
+              ).toBe(0);
+            }
+          }
+          const label = `seed ${seed} ${position.id as string} ${defIdStr}`;
+          if (anyChosenActive) {
+            // Conservation: collapse moves the year's money, never resizes it.
+            expect(sum(collapsed), label).toBeCloseTo(sum(spread), 8);
+          } else {
+            expect(sum(collapsed), label).toBe(0);
+          }
+        }
+      }
+    }
+  });
+
+  it("WEEKDAY_COUNT books the per-occurrence value once per masked weekday", () => {
+    // Deliberately NOT in the yearly-conservation test above: the spread is
+    // per-occurrence, so its yearly total follows the calendar, not the input.
+    const mask = (1 << 1) | (1 << 5); // Mon + Fri
+    const input = makeInput({
+      definitions: [
+        makeDef({ id: "base", kind: "BASE_SALARY" }),
+        makeDef({ id: "weekdays", spreadMethod: "WEEKDAY_COUNT", weekdayMask: mask }),
+        makeDef({ id: "nodays", spreadMethod: "WEEKDAY_COUNT", weekdayMask: 0 }),
+      ],
+      positions: [
+        makePosition({
+          id: "p1",
+          // December inactive — the occurrence count must be gated by
+          // seasonality like every other spread.
+          seasonality: [...new Array(MONTHS - 1).fill(1), 0],
+        }),
+      ],
+      componentValues: [
+        makeValue("p1", "weekdays", { yearlyValue: 123.45 }),
+        makeValue("p1", "nodays", { yearlyValue: 999 }),
+      ],
+    });
+
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p1"));
+    const line = (id: string) =>
+      lines.find((entry) => (entry.component.id as string) === id)!.months;
+
+    const counts = weekdayCounts(FIXTURE_YEAR, mask);
+    for (let m = 0; m < MONTHS - 1; m++) {
+      expect(line("weekdays")[m], `month ${m + 1}`).toBeCloseTo(123.45 * counts[m], 8);
+    }
+    expect(line("weekdays")[MONTHS - 1], "inactive December").toBe(0);
+    // An empty mask reads as a zero line (missing = zero), never an error.
+    for (let m = 0; m < MONTHS; m++) {
+      expect(line("nodays")[m], `empty mask month ${m + 1}`).toBe(0);
     }
   });
 

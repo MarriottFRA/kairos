@@ -24,7 +24,10 @@ import { getUserSettings, setUserSettings } from "../../local_db";
 import {
   BstPushConfig,
   DEFAULT_BST_PUSH_CONFIG,
+  GUARD_MODES,
+  GuardMode,
   normalizeClearPrefixes,
+  normalizeGuardMode,
   normalizeMonthPlan,
 } from "../../shared/bstPush/ipc";
 
@@ -32,6 +35,8 @@ const PREFIX_KEY = "bstPushClearPrefixes";
 const MONTHS_KEY = "bstPushMonthPlan";
 const BACKUP_KEY = "bstPushBackup";
 const SKIP_UNUSED_KEY = "bstPushSkipUnusedCombos";
+const ALLOCATION_KEY = "bstPushAllocationRows";
+const PROTECTED_KEY = "bstPushProtectedCells";
 
 export async function readBstPushConfig(): Promise<BstPushConfig> {
   try {
@@ -50,6 +55,11 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
           ? [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes]
           : normalizeClearPrefixes(settings[PREFIX_KEY] ?? []),
       months: normalizeMonthPlan(settings[MONTHS_KEY]),
+      // Absent lands on "skip" — a deliberate behavior change for existing
+      // installs: guarding the BST's allocation rows and locked cells is the
+      // safe footing, and overwriting them becomes the explicit choice.
+      allocationRows: normalizeGuardMode(settings[ALLOCATION_KEY]),
+      protectedCells: normalizeGuardMode(settings[PROTECTED_KEY]),
       backup:
         typeof backup === "boolean" ? backup : DEFAULT_BST_PUSH_CONFIG.backup,
       skipUnusedCombos:
@@ -62,6 +72,8 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
     return {
       clearPrefixes: [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes],
       months: [...DEFAULT_BST_PUSH_CONFIG.months],
+      allocationRows: DEFAULT_BST_PUSH_CONFIG.allocationRows,
+      protectedCells: DEFAULT_BST_PUSH_CONFIG.protectedCells,
       backup: DEFAULT_BST_PUSH_CONFIG.backup,
       skipUnusedCombos: DEFAULT_BST_PUSH_CONFIG.skipUnusedCombos,
     };
@@ -82,6 +94,12 @@ export async function writeBstPushConfig(raw: unknown): Promise<BstPushConfig> {
   }
   if (patch.months !== undefined) {
     updates[MONTHS_KEY] = normalizeMonthPlan(patch.months);
+  }
+  if (GUARD_MODES.includes(patch.allocationRows as GuardMode)) {
+    updates[ALLOCATION_KEY] = normalizeGuardMode(patch.allocationRows);
+  }
+  if (GUARD_MODES.includes(patch.protectedCells as GuardMode)) {
+    updates[PROTECTED_KEY] = normalizeGuardMode(patch.protectedCells);
   }
   if (typeof patch.backup === "boolean") {
     updates[BACKUP_KEY] = patch.backup;

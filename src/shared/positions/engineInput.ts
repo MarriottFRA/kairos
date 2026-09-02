@@ -15,6 +15,7 @@ import {
   baseSalaryDefId,
   blockCostDefId,
   holidayAccrualDefId,
+  positionCountDefId,
   systemStatDefId,
   vacationCostDefId,
   type BlockDto,
@@ -42,6 +43,7 @@ import { ACCOUNT_FIELD_KEYS } from "./fields";
 import {
   POSITION_COUNT_ACCOUNT,
   headcountAccountForJobType,
+  positionCountAccountForJobType,
 } from "./systemAccounts";
 
 /**
@@ -610,6 +612,11 @@ export interface PositionAccounts {
    *  (distinct from the pinned position-count head, which always posts to
    *  POSITION_COUNT_ACCOUNT whatever this says). */
   headcount?: string;
+  /** The account the pinned position-count head posts for this row — derived
+   *  from the Classification like `headcount`: POSITION_COUNT_ACCOUNT for every
+   *  grade except Buyout Labour, which books no heads ("" = calculate, don't
+   *  post). Undefined means "the pinned default", i.e. no override at all. */
+  positionCount?: string;
   /** Hours worked stat. */
   hours?: string;
   /** Vacation accrual movement. */
@@ -645,6 +652,7 @@ export function readPositionAccounts(
   return {
     salary: accountValue(source, ACCOUNT_FIELD_KEYS.salary),
     headcount: headcountAccountForJobType(jobTypeCode),
+    positionCount: positionCountAccountForJobType(jobTypeCode),
     hours: accountValue(source, ACCOUNT_FIELD_KEYS.hours),
     accrual: accountValue(source, ACCOUNT_FIELD_KEYS.accrual),
     benefits: accountValue(source, ACCOUNT_FIELD_KEYS.benefits),
@@ -679,30 +687,52 @@ export function applyPositionAccounts(
 ): ComponentValue[] {
   if (accountsByPosition.size === 0) return componentValues;
 
-  // defId → the patch that def needs. `rate` is only for the vacation-cost head.
+  // defId → the patch that def needs. `rate` is only for the vacation-cost
+  // head; `mustEmit` only for the pinned position-count head.
   const patchFor = (
     accounts: PositionAccounts
-  ): Array<{ defId: string; accountCode: string; rate?: number }> => [
-    { defId: baseSalaryDefId(ou), accountCode: accounts.salary ?? "" },
-    {
-      defId: systemStatDefId(ou, "HEADCOUNT"),
-      // The pinned position-count head already books every head to
-      // POSITION_COUNT_ACCOUNT. Letting the per-row headcount pick the SAME
-      // account would intern both lines onto one dept|account key, and the
-      // outputs read SUMS lines sharing a key — reporting double the heads.
-      // Drop the override instead, so this line simply does not post.
-      accountCode:
-        (accounts.headcount ?? "").trim().toUpperCase() === POSITION_COUNT_ACCOUNT
-          ? ""
-          : accounts.headcount ?? "",
-    },
-    { defId: systemStatDefId(ou, "HOURS"), accountCode: accounts.hours ?? "" },
-    { defId: holidayAccrualDefId(ou), accountCode: accounts.accrual ?? "" },
-    // rate 1 = "100% of the vacation series", i.e. the leave actually taken.
-    // Unconditional: the line must compute even with no account, so that a
-    // block using it as a base sees the same number the persisted run does.
-    { defId: vacationCostDefId(ou), accountCode: accounts.benefits ?? "", rate: 1 },
-  ];
+  ): Array<{ defId: string; accountCode: string; rate?: number; mustEmit?: boolean }> => {
+    const patches: Array<{
+      defId: string;
+      accountCode: string;
+      rate?: number;
+      mustEmit?: boolean;
+    }> = [
+      { defId: baseSalaryDefId(ou), accountCode: accounts.salary ?? "" },
+      {
+        defId: systemStatDefId(ou, "HEADCOUNT"),
+        // The pinned position-count head already books every head to
+        // POSITION_COUNT_ACCOUNT. Letting the per-row headcount pick the SAME
+        // account would intern both lines onto one dept|account key, and the
+        // outputs read SUMS lines sharing a key — reporting double the heads.
+        // Drop the override instead, so this line simply does not post.
+        accountCode:
+          (accounts.headcount ?? "").trim().toUpperCase() === POSITION_COUNT_ACCOUNT
+            ? ""
+            : accounts.headcount ?? "",
+      },
+      { defId: systemStatDefId(ou, "HOURS"), accountCode: accounts.hours ?? "" },
+      { defId: holidayAccrualDefId(ou), accountCode: accounts.accrual ?? "" },
+      // rate 1 = "100% of the vacation series", i.e. the leave actually taken.
+      // Unconditional: the line must compute even with no account, so that a
+      // block using it as a base sees the same number the persisted run does.
+      { defId: vacationCostDefId(ou), accountCode: accounts.benefits ?? "", rate: 1 },
+    ];
+    // The pinned position-count head is the INVERSE of the heads above: its
+    // definition already carries POSITION_COUNT_ACCOUNT, so the pinned default
+    // needs no row — but a Classification that books no heads (Buyout Labour)
+    // needs its blank emitted as an explicit override, because here blank is
+    // not the definition's fallback, it is the suppression.
+    const positionCount = (accounts.positionCount ?? POSITION_COUNT_ACCOUNT).trim();
+    if (positionCount.toUpperCase() !== POSITION_COUNT_ACCOUNT) {
+      patches.push({
+        defId: positionCountDefId(ou),
+        accountCode: positionCount,
+        mustEmit: true,
+      });
+    }
+    return patches;
+  };
 
   const out: ComponentValue[] = [];
   const merged = new Set<string>();
@@ -727,8 +757,10 @@ export function applyPositionAccounts(
       // A blank account with nothing else to carry needs no row at all: the
       // compiler falls back to the definition's own account, which for every
       // head here is equally blank. Skipping keeps ~4 objects per position out of
-      // the plan in the common "no accounts picked yet" case.
-      if (!patch.accountCode && patch.rate === undefined) continue;
+      // the plan in the common "no accounts picked yet" case. `mustEmit` marks
+      // the one head where blank must NOT fall through — the position-count
+      // def's own account is the pinned one, so its blank IS the override.
+      if (!patch.accountCode && patch.rate === undefined && !patch.mustEmit) continue;
       out.push({
         positionId: positionId as ComponentValue["positionId"],
         componentDefId: patch.defId as ComponentDefId,

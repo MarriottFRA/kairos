@@ -5,11 +5,14 @@
  * engine: a description, department, a cost account + a stats account, an optional
  * rate, and 12 months of Stats + Amount. "Stats" are operational units (hours,
  * covers…). When a row has a rate the monthly Amount is derived (stats * rate) and
- * locked; otherwise it's typed directly. Rows persist to the encrypted secure
- * store. The inline spread columns + "Apply spread" fill all 12 months from a base
- * value (flat or days-in-month, with an optional % increase — Amount only — from a
- * chosen month) so the user doesn't retype 12 times — fill-once, cells stay
- * editable afterwards.
+ * locked; otherwise it's typed directly. A row can likewise link its Stats to a
+ * KPI driver (KPI ÷ Per × Units): the Stats cells then derive from the driver's
+ * cached series and lock, so a fresh budget pull flows straight through — the
+ * derivation happens at render, nothing is re-filled. Rows persist to the
+ * encrypted secure store. The inline spread columns + "Apply spread" fill all 12
+ * months from a base value (flat or days-in-month, with an optional % increase —
+ * Amount only — from a chosen month) so the user doesn't retype 12 times —
+ * fill-once, cells stay editable afterwards.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,6 +47,8 @@ import {
   loadAccounts,
   loadDepartments,
 } from "../../services/mappingTablesService";
+import { listKpiDrivers } from "../../services/kpiDriversService";
+import { KpiDriverWithSeries } from "../../shared/kpiDrivers/ipc";
 import { AccountOption, DepartmentOption } from "../../shared/mappingTables/types";
 import { usePlanScope } from "../../hooks/usePlanScope";
 import { departmentPickList } from "../../shared/positions/departmentPickList";
@@ -52,8 +57,11 @@ import ManualInputGrid from "../../components/manualInput/ManualInputGrid";
 import { ManualViewMode } from "../../components/manualInput/columns";
 import {
   applySpread,
+  bakeDerivedStats,
   emptyGridRow,
+  isKpiStatsDriven,
   ManualGridRow,
+  ManualStatsResolver,
   toGridRow,
   toInput,
 } from "../../components/manualInput/rowModel";
@@ -71,6 +79,7 @@ export default function ManualInput() {
   const [rows, setRows] = useState<ManualGridRow[]>([]);
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const [kpiDrivers, setKpiDrivers] = useState<KpiDriverWithSeries[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<ManualViewMode>("both");
   const [loading, setLoading] = useState(false);
@@ -113,6 +122,47 @@ export default function ManualInput() {
       cancelled = true;
     };
   }, []);
+
+  // The hotel's KPI drivers + cached series, for the Stats-from-KPI columns.
+  // Best-effort like the other reference data: with none loaded the picker is
+  // just empty and driven rows fall back to their last saved Stats.
+  useEffect(() => {
+    if (!ou) {
+      setKpiDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    listKpiDrivers(ou)
+      .then((result) => {
+        if (!cancelled) setKpiDrivers(result);
+      })
+      .catch(() => {
+        if (!cancelled) setKpiDrivers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ou]);
+
+  // The derived-Stats resolver + picker options the grid columns read.
+  const kpiDriverById = useMemo(() => {
+    const map = new Map<string, KpiDriverWithSeries>();
+    for (const entry of kpiDrivers) map.set(String(entry.driver.id), entry);
+    return map;
+  }, [kpiDrivers]);
+  const resolveKpiSeries = useCallback<ManualStatsResolver>(
+    // Unknown driver -> null -> the row falls back to its stored snapshot.
+    (driverId) => kpiDriverById.get(driverId)?.series ?? null,
+    [kpiDriverById]
+  );
+  const kpiDriverOptions = useMemo(
+    () =>
+      kpiDrivers.map((entry) => ({
+        id: String(entry.driver.id),
+        label: entry.driver.label,
+      })),
+    [kpiDrivers]
+  );
 
   // ── Resolve the planning scenario (same healing as the Results page) ──
   // Manual rows post into that scenario's results, so the page has to know
@@ -248,9 +298,18 @@ export default function ManualInput() {
         next.departmentCode = deptByName.get(String(newRow.department))?.code ?? "";
       }
       if ((next.rate as unknown) === "") next.rate = null;
+      if ((next.statsKpiDivisor as unknown) === "") next.statsKpiDivisor = null;
+      if ((next.statsKpiFactor as unknown) === "") next.statsKpiFactor = null;
+      // Removing the KPI link keeps the numbers: the last derived Stats are
+      // baked into the (about-to-unlock) stat cells so the row saves what it
+      // was showing a moment ago instead of resurfacing a stale snapshot. Per
+      // and Units stay, so re-linking restores the rule.
+      if (isKpiStatsDriven(oldRow) && !isKpiStatsDriven(next)) {
+        return bakeDerivedStats(oldRow, next, resolveKpiSeries);
+      }
       return next;
     },
-    [departments, deptByName]
+    [departments, deptByName, resolveKpiSeries]
   );
 
   /**
@@ -517,6 +576,8 @@ export default function ManualInput() {
             departmentPicks={departmentPicks}
             accounts={accounts}
             viewMode={viewMode}
+            kpiDrivers={kpiDriverOptions}
+            resolveKpiSeries={resolveKpiSeries}
             apiRef={apiRef}
             loading={loading}
             writePolicy={planScope.writePolicy}

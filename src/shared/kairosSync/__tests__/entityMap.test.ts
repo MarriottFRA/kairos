@@ -116,6 +116,9 @@ const SAMPLES: Record<PublishedEntityType, Row> = {
     cost_account: "A6300",
     stats_account: "A9300",
     rate: 22.5,
+    stats_kpi_driver_id: "018f-kpi-driver",
+    stats_kpi_divisor: 50000,
+    stats_kpi_factor: 20,
     stats_json: "[10,10,10,10,10,10,10,10,10,10,10,10]",
     amounts_json: "[225,225,225,225,225,225,225,225,225,225,225,225]",
     spread_mode: "flat",
@@ -310,5 +313,23 @@ describe("deletion and JSON columns", () => {
     });
     expect(typed.rate).toBeNull();
     expect(ENTITY_SPECS.manual_input_row.fromPayload(typed).rate).toBeNull();
+  });
+
+  it("keeps a null KPI driver id null on a manual input row", () => {
+    // Same mode switch one level up: NULL driver id means the stats were
+    // typed; anything else flips the row to derived-from-KPI on arrival.
+    const typed = ENTITY_SPECS.manual_input_row.toPayload({
+      ...SAMPLES.manual_input_row,
+      stats_kpi_driver_id: null,
+      stats_kpi_divisor: null,
+      stats_kpi_factor: null,
+    });
+    expect(typed.statsKpiDriverId).toBeNull();
+    expect(typed.statsKpiDivisor).toBeNull();
+    expect(typed.statsKpiFactor).toBeNull();
+    const row = ENTITY_SPECS.manual_input_row.fromPayload(typed);
+    expect(row.stats_kpi_driver_id).toBeNull();
+    expect(row.stats_kpi_divisor).toBeNull();
+    expect(row.stats_kpi_factor).toBeNull();
   });
 });

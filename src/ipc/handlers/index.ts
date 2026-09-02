@@ -16,6 +16,7 @@ export * from "./oracleImport";
 export * from "./kpiDrivers";
 export * from "./manualInput";
 export * from "./blocks";
+export * from "./hotelCopy";
 export * from "./hotelClusters";
 export * from "./socialSecurity";
 export * from "./allocations";

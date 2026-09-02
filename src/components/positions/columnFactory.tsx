@@ -45,6 +45,7 @@ import {
   FieldCatalog,
   FieldDef,
   fieldLabel,
+  HEADCOUNT_STATS_ACCOUNT_KEY,
   HOTEL_CLUSTER_KEY,
   HOTEL_CLUSTER_MULT_KEY,
   HOTEL_CLUSTER_NAME_SNAPSHOT_KEY,
@@ -72,7 +73,10 @@ import {
   COMPUTES,
   PositionRow,
 } from "../../shared/positions/rowModel";
-import { headcountAccountForJobType } from "../../shared/positions/systemAccounts";
+import {
+  headcountAccountForJobType,
+  positionCountAccountForJobType,
+} from "../../shared/positions/systemAccounts";
 import { rowDepartmentWritable } from "../../shared/positions/writeScope";
 import type { DepartmentWritePolicy } from "../../shared/kairosSync/writePolicy";
 import { DepartmentPickList } from "../../shared/positions/departmentPickList";
@@ -1084,9 +1088,11 @@ function buildColumn(
   // entry — those return numbers, and these are codes. Both render read-only and
   // muted like any derived cell, so they read as "the system decided this":
   //
-  //  • HC Stats — the account the permanent position-count head always books to.
-  //    A constant, carried on the field's defaultValue. It tells the user where
-  //    the A972540 rows in Results come from.
+  //  • HC Stats — the account the permanent position-count head books to. The
+  //    pinned A972540 for every grade except Buyout Labour, whose Count is
+  //    bought-in labour, not heads — its cell shows blank and the head posts
+  //    nothing (the same rule the engine applies via applyPositionAccounts).
+  //    It tells the user where the A972540 rows in Results come from.
   //  • Headcount — fixed by the row's Classification (v26). Blank for a grade
   //    that books no headcount account, and an empty cell posts no line, which
   //    is the same contract a blank pick always had.
@@ -1095,7 +1101,9 @@ function buildColumn(
     const derive =
       def.key === ACCOUNT_FIELD_KEYS.headcount
         ? (row: PositionRow) => headcountAccountForJobType(row?.jobTypeCode)
-        : () => fixed;
+        : def.key === HEADCOUNT_STATS_ACCOUNT_KEY
+          ? (row: PositionRow) => positionCountAccountForJobType(row?.jobTypeCode)
+          : () => fixed;
     column.editable = false;
     column.valueGetter = (_value: unknown, row: PositionRow) => derive(row);
     column.cellClassName = "pos-cell--derived";

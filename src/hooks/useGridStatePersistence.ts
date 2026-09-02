@@ -1,10 +1,10 @@
 /**
  * useGridStatePersistence — save/restore the user's grid layout.
  * -----------------------------------------------------------
- * Restores the exported DataGrid state (column order/width/visibility, density)
- * from the settings store before the grid mounts, and persists it (debounced
- * 1 s) whenever the user rearranges the grid. Row data and preference-panel
- * state are stripped before saving.
+ * Restores the exported DataGrid state (column order/width/visibility, pinned
+ * columns, density, aggregation) from the settings store before the grid
+ * mounts, and persists it (debounced 1 s) whenever the user rearranges the
+ * grid. Row data and preference-panel state are stripped before saving.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -20,7 +20,9 @@ const LAYOUT_EVENTS = [
   "columnOrderChange",
   "columnWidthChange",
   "columnVisibilityModelChange",
+  "pinnedColumnsChange",
   "densityChange",
+  "aggregationModelChange",
 ] as const;
 
 export function useGridStatePersistence(

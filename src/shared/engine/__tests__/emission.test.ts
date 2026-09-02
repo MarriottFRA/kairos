@@ -313,6 +313,52 @@ describe("instruction emission", () => {
   });
 });
 
+describe("COLLAPSE_LINE emission", () => {
+  const collapseDef = (collapseMonths?: number[]) =>
+    makeDef({ id: "pct", spreadMethod: "PERCENT_OF", ...(collapseMonths ? { collapseMonths } : {}) });
+
+  it("appends the post-op with the compile-resolved weights, right after the spread", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), collapseDef([6, 12])],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [makeValue("p1", "pct", { rate: 1 / 12 })],
+      })
+    );
+    const decoded = decode(plan, 0);
+    const at = decoded.findIndex((instr) => instr.name === "PCT_OF_ACC");
+    expect(decoded[at + 1]).toMatchObject({
+      name: "COLLAPSE_LINE",
+      outLine: lineOf(plan, 0, "pct"),
+      params: [0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0.5],
+    });
+  });
+
+  it("gates the weights on the position's active months at compile time", () => {
+    const seasonality = [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1]; // June off
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), collapseDef([6, 12])],
+        positions: [makePosition({ id: "p1", seasonality })],
+        componentValues: [makeValue("p1", "pct", { rate: 1 / 12 })],
+      })
+    );
+    const collapse = decode(plan, 0).find((instr) => instr.name === "COLLAPSE_LINE");
+    expect(collapse?.params).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+  });
+
+  it("emits nothing extra when the def carries no collapseMonths", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), collapseDef()],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [makeValue("p1", "pct", { rate: 1 / 12 })],
+      })
+    );
+    expect(decode(plan, 0).some((instr) => instr.name === "COLLAPSE_LINE")).toBe(false);
+  });
+});
+
 // Keep the Op import meaningful: the decode helper relies on OP_NAMES covering
 // every opcode — fail loudly here if someone adds an op without a name.
 describe("opcode table", () => {

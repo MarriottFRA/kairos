@@ -99,10 +99,9 @@ import {
 import { readScopeWidened } from "../../shared/kairosSync/scopeWidening";
 import {
   NO_DEPARTMENT_WRITE,
-  UNRESTRICTED_WRITE,
-  allowOnly,
   departmentWritePolicy,
   enumeratedWritableDepartments,
+  headFallbackWritePolicy,
   holdsAnyDepartment,
 } from "../../shared/kairosSync/writePolicy";
 
@@ -280,12 +279,18 @@ function writeScopeFor(planId: string, head?: PlanHead | null): WriteScope {
       // departments that already have rows, and withholding a brand-new one
       // would keep it from ever gaining any.
       departmentWritePolicy(ownership)
-    : // Never asked. The head's department list is the read scope, which is the
-      // best available guess and errs wide — the server still resolves authority
-      // per row, so the cost is a rejection rather than a lost write.
-      head?.scopeKind === "PARTIAL"
-      ? allowOnly(head.departments)
-      : UNRESTRICTED_WRITE;
+    : // Never asked. The head's department list is the read scope — the best
+      // available guess, erring wide for a genuine writer — but only an owner
+      // may fall through to an open ceiling: a FULL-scope DELEGATE reads
+      // everything precisely when they were granted everything, and if that
+      // grant is `canEdit: false` an open ceiling would skip the read-only
+      // refusal and filter nothing. `scopeDepartments` backstops a head the
+      // probe could not fetch; heads and pulls both store the read scope there.
+      headFallbackWritePolicy(
+        relation,
+        head?.scopeKind ?? state?.scopeKind ?? null,
+        head?.departments ?? state?.scopeDepartments ?? null
+      );
 
   return {
     /**

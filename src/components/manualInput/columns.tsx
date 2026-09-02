@@ -14,6 +14,7 @@
 import Box from "@mui/material/Box";
 import Tooltip from "@mui/material/Tooltip";
 import CalculateOutlinedIcon from "@mui/icons-material/CalculateOutlined";
+import InsightsOutlinedIcon from "@mui/icons-material/InsightsOutlined";
 import type {
   GridColDef,
   GridColumnGroupingModel,
@@ -31,9 +32,12 @@ import {
 import {
   amountForMonth,
   amountKey,
+  statForMonth,
   statsKey,
+  isKpiStatsDriven,
   isRateDriven,
   ManualGridRow,
+  ManualStatsResolver,
   totalAmount,
   totalStats,
 } from "./rowModel";
@@ -56,6 +60,10 @@ export interface ManualColumnsContext {
   accountFilter?: AccountFilter | null;
   /** Stats-only / Amount-only / both monthly cells. Defaults to "both". */
   viewMode?: ManualViewMode;
+  /** The hotel's KPI drivers for the Stats-from-KPI picker; omit for none. */
+  kpiDrivers?: Array<{ id: string; label: string }>;
+  /** Cached series for a driver id — lets the month cells show derived Stats. */
+  resolveKpiSeries?: ManualStatsResolver;
 }
 
 const MONTH_SELECT_OPTIONS = [
@@ -117,19 +125,31 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
       headerName: "Description",
       width: 220,
       editable: true,
-      // A rate-driven row derives its monthly Amount (stats*rate), so its Amount
-      // cells are locked — flag it at the row start so the greyed cells read as
-      // intentional, not disabled.
+      // A derived side means locked cells — flag it at the row start so the
+      // greyed cells read as intentional, not disabled: the calculator icon for
+      // a rate-driven Amount (stats*rate), the insights icon for KPI-driven
+      // Stats (KPI ÷ Per × Units).
       renderCell: (params) => {
         const text = String(params.value ?? "");
-        if (!params.row || !isRateDriven(params.row)) return text;
+        const rateDriven = params.row ? isRateDriven(params.row) : false;
+        const kpiDriven = params.row ? isKpiStatsDriven(params.row) : false;
+        if (!rateDriven && !kpiDriven) return text;
         return (
           <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, width: "100%" }}>
-            <Tooltip title="Rate-driven: monthly Amount = Stats × Rate">
-              <CalculateOutlinedIcon
-                sx={{ fontSize: 16, color: "primary.main", flexShrink: 0 }}
-              />
-            </Tooltip>
+            {kpiDriven && (
+              <Tooltip title="KPI-driven: monthly Stats = KPI ÷ Per × Units">
+                <InsightsOutlinedIcon
+                  sx={{ fontSize: 16, color: "primary.main", flexShrink: 0 }}
+                />
+              </Tooltip>
+            )}
+            {rateDriven && (
+              <Tooltip title="Rate-driven: monthly Amount = Stats × Rate">
+                <CalculateOutlinedIcon
+                  sx={{ fontSize: 16, color: "primary.main", flexShrink: 0 }}
+                />
+              </Tooltip>
+            )}
             <Box
               component="span"
               sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
@@ -201,6 +221,76 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
 
   const grouping: GridColumnGroupingModel = [];
 
+  // Stats-from-KPI setup — a KPI driver reference plus the per-row rule
+  // ("20 hours per 50,000 of revenue" => Units 20, Per 50000). Monthly Stats
+  // are then DERIVED from the driver's cached series and re-resolve on every
+  // render/recalc, so a fresh budget pull flows through without touching the
+  // row — nothing is baked in while the driver is set. Note the driver's own
+  // multiplier is already inside its cached series, so Per/Units apply to the
+  // final KPI figure.
+  const kpiOptions = [
+    { value: "", label: "—" },
+    ...(ctx.kpiDrivers ?? []).map((driver) => ({
+      value: driver.id,
+      label: driver.label,
+    })),
+  ];
+  const kpiLabelById = new Map(
+    (ctx.kpiDrivers ?? []).map((driver) => [driver.id, driver.label])
+  );
+  const kpiChildren: { field: string }[] = [];
+  columns.push({
+    field: "statsKpiDriverId",
+    headerName: "KPI Driver",
+    description:
+      "Derive the monthly Stats from this KPI's series. Department-mode drivers need the row's Dept Code inside their scope; explicit drivers apply everywhere.",
+    width: 180,
+    editable: true,
+    type: "singleSelect",
+    valueOptions: kpiOptions,
+    renderEditCell: (params) => (
+      <SelectEditCell {...params} options={kpiOptions} />
+    ),
+    renderCell: (params) => {
+      const id = String(params.value ?? "");
+      if (!id) return "—";
+      const label = kpiLabelById.get(id);
+      if (label !== undefined) return label;
+      // The referenced driver no longer exists (deleted, or not yet synced to
+      // this machine) — the row shows its last saved Stats until re-linked.
+      return (
+        <Tooltip title="This KPI driver no longer exists — showing the last saved Stats.">
+          <Box component="span" sx={{ color: "warning.main" }}>
+            (missing driver)
+          </Box>
+        </Tooltip>
+      );
+    },
+  });
+  kpiChildren.push({ field: "statsKpiDriverId" });
+
+  columns.push({
+    ...numericBase("statsKpiDivisor", "Per", 110),
+    description: 'The "per" amount of the KPI — the 50,000 in "20 hours per 50,000".',
+    editable: true,
+    valueParser: numericOrNull,
+  });
+  kpiChildren.push({ field: "statsKpiDivisor" });
+
+  columns.push({
+    ...numericBase("statsKpiFactor", "Units", 100),
+    description: 'Units produced per "Per" of KPI — the 20 in "20 hours per 50,000".',
+    editable: true,
+    valueParser: numericOrNull,
+  });
+  kpiChildren.push({ field: "statsKpiFactor" });
+
+  grouping.push({
+    groupId: "kpi_stats",
+    headerName: "Stats from KPI (KPI ÷ Per × Units) →",
+    children: kpiChildren,
+  });
+
   // Spread setup — sits with the identity block, ahead of the 12 months, so the
   // whole authoring zone reads left-to-right (describe → dept → account → rate →
   // how to spread) and the months fill out to the right of it. Editable, so the
@@ -223,8 +313,13 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
 
   columns.push({
     ...numericBase("spreadBaseStats", "Stats Base", 110),
+    // Stats are derived (KPI ÷ Per × Units) for a KPI-driven row, so its Stats
+    // base is meaningless there — greyed + locked by the grid's isCellEditable,
+    // matching the monthly Stats cells.
     editable: true,
     valueParser: numericOrNull,
+    cellClassName: (params) =>
+      params.row && isKpiStatsDriven(params.row) ? "pos-cell--derived" : "",
   });
   spreadChildren.push({ field: "spreadBaseStats" });
 
@@ -295,7 +390,11 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
     if (showStats) {
       columns.push({
         ...numericBase(statField, "Stats", 88),
-        editable: true,
+        editable: true, // functional lock is the grid's isCellEditable (KPI-driven)
+        valueGetter: (_value, row) =>
+          row ? statForMonth(row, m, ctx.resolveKpiSeries) : 0,
+        cellClassName: (params) =>
+          params.row && isKpiStatsDriven(params.row) ? "pos-cell--derived" : "",
       });
       children.push({ field: statField });
     }
@@ -303,7 +402,8 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
       columns.push({
         ...numericBase(amtField, "Amt", 96),
         editable: true, // functional lock is the grid's isCellEditable (rate-driven)
-        valueGetter: (_value, row) => (row ? amountForMonth(row, m) : 0),
+        valueGetter: (_value, row) =>
+          row ? amountForMonth(row, m, ctx.resolveKpiSeries) : 0,
         cellClassName: (params) =>
           params.row && isRateDriven(params.row)
             ? "pos-cell--num pos-cell--derived"
@@ -324,14 +424,16 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
   if (showStats) {
     columns.push({
       ...numericBase("totalStats", "Total Stats", 120),
-      valueGetter: (_value, row) => (row ? totalStats(row) : 0),
+      valueGetter: (_value, row) =>
+        row ? totalStats(row, ctx.resolveKpiSeries) : 0,
       cellClassName: "pos-cell--num pos-cell--derived",
     });
   }
   if (showAmount) {
     columns.push({
       ...numericBase("totalAmount", "Total Amount", 130),
-      valueGetter: (_value, row) => (row ? totalAmount(row) : 0),
+      valueGetter: (_value, row) =>
+        row ? totalAmount(row, ctx.resolveKpiSeries) : 0,
       cellClassName: "pos-cell--num pos-cell--derived",
     });
   }
@@ -346,4 +448,13 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
  */
 export function isRateLockedField(field: string): boolean {
   return field === "spreadBaseAmount" || /^amt_\d+$/.test(field);
+}
+
+/**
+ * Whether a field is locked while the row is KPI-driven: the 12 derived monthly
+ * Stats cells (KPI ÷ Per × Units) and the Stats base that would overwrite their
+ * baked snapshot. Enforced the same way, in the grid's isCellEditable.
+ */
+export function isKpiLockedField(field: string): boolean {
+  return field === "spreadBaseStats" || /^stat_\d+$/.test(field);
 }

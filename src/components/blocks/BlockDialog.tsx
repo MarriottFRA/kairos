@@ -99,6 +99,13 @@ import {
 import { JOB_TYPE_OPTIONS } from "../../shared/positions/fieldSeed";
 import type { FieldCatalog } from "../../shared/positions/fields";
 import {
+  formatMonthRanges,
+  isWeekendDay,
+  toggleWeekendDay,
+  WEEKDAY_LABELS,
+  WEEKDAY_ORDER,
+} from "../../shared/calendar";
+import {
   RateRuleTerm,
   RateRulesConfig,
   operatorNeedsValue,
@@ -151,9 +158,13 @@ const NEW_RULE_TERM = (): RateRuleTerm => ({
 /** The outcome select's sentinel for "type a number" (vs a block id). */
 const NUMBER_OUTCOME = "__number__";
 
-/** COUNT_RATE spread options, grouped for the dropdown's subheaders. */
-const SPREAD_GROUPS: Record<"byTime" | "byCurve", readonly BlockSpread[]> = {
+/** Block spread options, grouped for the dropdown's subheaders. */
+const SPREAD_GROUPS: Record<
+  "byTime" | "byWeekday" | "byCurve",
+  readonly BlockSpread[]
+> = {
   byTime: ["ACTIVE_MONTHS", "DAYS"],
+  byWeekday: ["WEEKDAYS"],
   byCurve: [
     "WEIGHTED_BASE",
     "VACATION_PATTERN",
@@ -161,6 +172,30 @@ const SPREAD_GROUPS: Record<"byTime" | "byCurve", readonly BlockSpread[]> = {
     "WEIGHTED_HOURS_PAID",
     "WEIGHTED_FTE",
   ],
+};
+
+/**
+ * FLAT_MONTHLY hint overrides. Load-bearing copy: for a fixed block the spread
+ * choice changes what the typed amount MEANS (per month / a yearly total / per
+ * occurrence), so each hint must say the unit out loud. COUNT_RATE keeps the
+ * generic BLOCK_SPREAD_META wording, whose figures are always yearly.
+ */
+const FLAT_MONTHLY_SPREAD_HINTS: Partial<Record<BlockSpread, string>> = {
+  ACTIVE_MONTHS:
+    "The amount is booked each month the position is active — amount PER MONTH, the classic fixed block.",
+  DAYS: "The amount becomes a YEARLY total, spread by working days — longer months carry more.",
+  VACATION_PATTERN:
+    "The amount becomes a YEARLY total, following the position's vacation weights.",
+  WEEKDAYS:
+    "The amount is booked once PER SELECTED WEEKDAY — a month with five Fridays books five times the amount.",
+  WEIGHTED_BASE:
+    "The amount becomes a YEARLY total, spread like the monthly base-salary curve.",
+  WEIGHTED_HOURS_WORKED:
+    "The amount becomes a YEARLY total, spread like hours actually at work.",
+  WEIGHTED_HOURS_PAID:
+    "The amount becomes a YEARLY total, spread like hours paid, vacation included.",
+  WEIGHTED_FTE:
+    "The amount becomes a YEARLY total, spread like the full-time-equivalent curve.",
 };
 
 const TYPE_TILES: Array<{
@@ -317,6 +352,7 @@ const STAT_LABELS: Record<
 const SALARY_BASES: Array<{ base: BlockBaseRef; label: string }> = [
   { base: { kind: "BASE_SALARY" }, label: "Basic salary (gross)" },
   { base: { kind: "VACATION" }, label: "Vacation cost" },
+  { base: { kind: "ACCRUAL" }, label: "Vacation accrual" },
 ];
 
 const DAY_HOUR_BASES: Array<{ base: BlockBaseRef; label: string }> = [
@@ -356,6 +392,8 @@ function describeBase(base: BlockBaseRef | undefined, names: BaseNames): string 
       return "Basic salary";
     case "VACATION":
       return "Vacation cost";
+    case "ACCRUAL":
+      return "Vacation accrual";
     case "CALENDAR":
       return CALENDAR_LABELS[base.series];
     case "SERVICE":
@@ -905,7 +943,13 @@ export default function BlockDialog({
   >([]);
   const [otherwiseRate, setOtherwiseRate] = useState("0");
   const [otherwiseBlockId, setOtherwiseBlockId] = useState<string | undefined>(undefined);
+  // MULTIPLIER timing: spread with the base as usual, or land the whole
+  // yearly figure in chosen months (13th-month salary).
+  const [collapseMode, setCollapseMode] = useState<"SPREAD" | "MONTHS">("SPREAD");
+  const [collapseMonths, setCollapseMonths] = useState<number[]>([]);
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
+  // WEEKDAYS spread only: 7-bit Sunday-first mask (calendar.ts convention).
+  const [weekdayMask, setWeekdayMask] = useState(0);
   const [increaseAware, setIncreaseAware] = useState(false);
   // Where the cost books. The control is MULTIPLIER-only, but the STATE is
   // seeded and submitted for every type: a FIXED block created by an importer
@@ -951,12 +995,15 @@ export default function BlockDialog({
     );
     setOtherwiseRate(String(block?.rateRules?.otherwise ?? 0));
     setOtherwiseBlockId(block?.rateRules?.otherwiseBlockId);
+    setCollapseMode(block?.collapseMonths?.length ? "MONTHS" : "SPREAD");
+    setCollapseMonths(block?.collapseMonths ?? []);
     setUseRowRate(block?.useRowRate ?? true);
     setRatioNoHeadcount(
       block?.ratioNoHeadcount ??
         (block?.base?.kind === "COMBINE" && block.base.op === "DIV")
     );
     setSpread(block?.spread ?? "ACTIVE_MONTHS");
+    setWeekdayMask(block?.weekdayMask ?? 0);
     setIncreaseAware(block?.increaseAware ?? false);
     setDepartmentMode(block?.departmentMode ?? "POSITION");
     setFixedDepartment(block?.fixedDepartment ?? "");
@@ -1085,11 +1132,20 @@ export default function BlockDialog({
                 (Array.isArray(term.value) && term.value.length === 0))
           )
       ));
+  // "Lands in chosen months" with nothing chosen books nowhere at all.
+  const collapseError =
+    type === "MULTIPLIER" && collapseMode === "MONTHS" && collapseMonths.length === 0;
+  // Which types the spread choice applies to (and submits for).
+  const spreadActive = type === "COUNT_RATE" || type === "FLAT_MONTHLY";
+  // "On chosen weekdays" with no day chosen books nowhere at all.
+  const weekdayError = spreadActive && spread === "WEEKDAYS" && weekdayMask === 0;
   const valid =
     !!type &&
     !labelError &&
     !baseError &&
     !rulesError &&
+    !collapseError &&
+    !weekdayError &&
     !poolAmountError &&
     !poolKpiError &&
     !poolWeightError &&
@@ -1132,7 +1188,12 @@ export default function BlockDialog({
             } satisfies RateRulesConfig,
           }
         : {}),
-      spread: type === "COUNT_RATE" ? spread : undefined,
+      // Omitted entirely in SPREAD mode so the stored config stays minimal.
+      ...(type === "MULTIPLIER" && collapseMode === "MONTHS"
+        ? { collapseMonths: [...collapseMonths].sort((a, b) => a - b) }
+        : {}),
+      spread: spreadActive ? spread : undefined,
+      weekdayMask: spreadActive && spread === "WEEKDAYS" ? weekdayMask : undefined,
       // A pooled block's share IS the pot; a merit increase would inflate it.
       increaseAware:
         type === "MULTIPLIER" || isPool ? undefined : increaseAware,
@@ -1769,29 +1830,128 @@ export default function BlockDialog({
               </Stack>
             )}
 
-            {type === "COUNT_RATE" && (
-              <TextField
-                select
-                label="Spread the year's figures"
-                value={spread}
-                onChange={(event) => setSpread(event.target.value as BlockSpread)}
-                size="small"
-                fullWidth
-                helperText={BLOCK_SPREAD_META[spread].hint}
-              >
-                <ListSubheader>By time</ListSubheader>
-                {SPREAD_GROUPS.byTime.map((option) => (
-                  <MenuItem key={option} value={option}>
-                    {BLOCK_SPREAD_META[option].label}
-                  </MenuItem>
-                ))}
-                <ListSubheader>By a curve</ListSubheader>
-                {SPREAD_GROUPS.byCurve.map((option) => (
-                  <MenuItem key={option} value={option}>
-                    {BLOCK_SPREAD_META[option].label}
-                  </MenuItem>
-                ))}
-              </TextField>
+            {type === "MULTIPLIER" && (
+              <Stack spacing={1}>
+                <Typography variant="subtitle2">When it lands</Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={collapseMode}
+                  onChange={(_event, next: "SPREAD" | "MONTHS" | null) =>
+                    next && setCollapseMode(next)
+                  }
+                >
+                  <ToggleButton value="SPREAD">Spreads with the base</ToggleButton>
+                  <ToggleButton value="MONTHS">Lands in chosen months</ToggleButton>
+                </ToggleButtonGroup>
+                {collapseMode === "MONTHS" && (
+                  <ToggleButtonGroup
+                    size="small"
+                    value={collapseMonths}
+                    onChange={(_event, next: number[]) => setCollapseMonths(next)}
+                    disabled={saving}
+                    sx={{ flexWrap: "wrap" }}
+                  >
+                    {MONTH_LABELS.map((monthLabel, m) => (
+                      <ToggleButton key={monthLabel} value={m + 1} sx={{ px: 1.25 }}>
+                        {monthLabel}
+                      </ToggleButton>
+                    ))}
+                  </ToggleButtonGroup>
+                )}
+                <Typography
+                  variant="caption"
+                  color={collapseError ? "error" : "text.secondary"}
+                >
+                  {collapseMode === "SPREAD"
+                    ? "The result follows the base's own months — a bigger base month means a bigger figure."
+                    : collapseError
+                      ? "Choose at least one month."
+                      : `The year's whole figure is booked in ${formatMonthRanges(
+                          collapseMonths.map((month) => month - 1)
+                        )}${collapseMonths.length > 1 ? ", split evenly" : ""} — the 13th-month shape. A chosen month a row isn't active in gets nothing; if none are active the cost is dropped.`}
+                </Typography>
+              </Stack>
+            )}
+
+            {spreadActive && (
+              <Stack spacing={1}>
+                <TextField
+                  select
+                  label={
+                    type === "FLAT_MONTHLY"
+                      ? "How the amount is applied"
+                      : "Spread the year's figures"
+                  }
+                  value={spread}
+                  onChange={(event) => setSpread(event.target.value as BlockSpread)}
+                  size="small"
+                  fullWidth
+                  helperText={
+                    (type === "FLAT_MONTHLY"
+                      ? FLAT_MONTHLY_SPREAD_HINTS[spread]
+                      : undefined) ?? BLOCK_SPREAD_META[spread].hint
+                  }
+                >
+                  <ListSubheader>By time</ListSubheader>
+                  {SPREAD_GROUPS.byTime.map((option) => (
+                    <MenuItem key={option} value={option}>
+                      {BLOCK_SPREAD_META[option].label}
+                    </MenuItem>
+                  ))}
+                  <ListSubheader>By weekday</ListSubheader>
+                  {SPREAD_GROUPS.byWeekday.map((option) => (
+                    <MenuItem key={option} value={option}>
+                      {BLOCK_SPREAD_META[option].label}
+                    </MenuItem>
+                  ))}
+                  <ListSubheader>By a curve</ListSubheader>
+                  {SPREAD_GROUPS.byCurve.map((option) => (
+                    <MenuItem key={option} value={option}>
+                      {BLOCK_SPREAD_META[option].label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+                {spread === "WEEKDAYS" && (
+                  <>
+                    <ToggleButtonGroup
+                      size="small"
+                      disabled={saving}
+                      sx={{ flexWrap: "wrap" }}
+                    >
+                      {WEEKDAY_ORDER.map((day) => {
+                        const dayLabel = WEEKDAY_LABELS[day];
+                        return (
+                          <ToggleButton
+                            key={dayLabel}
+                            value={day}
+                            aria-label={dayLabel}
+                            selected={isWeekendDay(weekdayMask, day)}
+                            onClick={() =>
+                              setWeekdayMask((mask) => toggleWeekendDay(mask, day))
+                            }
+                            sx={{ px: 1.25 }}
+                          >
+                            {dayLabel}
+                          </ToggleButton>
+                        );
+                      })}
+                    </ToggleButtonGroup>
+                    <Typography
+                      variant="caption"
+                      color={weekdayError ? "error" : "text.secondary"}
+                    >
+                      {weekdayError
+                        ? "Choose at least one weekday."
+                        : `Booked once per selected day — Fridays alone means 4× in a 4-Friday month, 5× in a 5-Friday one. ${
+                            type === "FLAT_MONTHLY"
+                              ? "The amount is the cost of one occurrence."
+                              : "Count × rate is the cost of one occurrence."
+                          }`}
+                    </Typography>
+                  </>
+                )}
+              </Stack>
             )}
 
             {isPool && (
