@@ -1,7 +1,9 @@
 /**
  * ManualInputGrid — the DataGridPremium for hand-entered cost lines.
  *
- * Columns/groups come from buildManualColumns. Cell edits and clipboard pastes
+ * Columns/groups come from buildManualColumns, including its two tinted,
+ * collapsible setup bands (Drivers, Spread) — this file owns their colours, the
+ * builder owns which column is in which. Cell edits and clipboard pastes
  * both flow through processRowUpdate (owned by the page, which persists per row).
  * Amount cells are locked (non-editable) while a row is rate-driven — that closes
  * typing AND paste in one place, via isCellEditable. Row-selection checkboxes
@@ -17,6 +19,7 @@
 
 import { useCallback, useMemo } from "react";
 import Box from "@mui/material/Box";
+import { alpha } from "@mui/material/styles";
 import {
   DataGridPremium,
   GridCellParams,
@@ -87,6 +90,12 @@ export interface ManualInputGridProps {
   /** Called with the current selection as a flat id array. */
   onSelectionChange: (ids: string[]) => void;
 }
+
+// Translucent tints are painted as background-image gradients rather than
+// background-color so they composite over the grid's own opaque header and
+// pinned-cell backgrounds instead of replacing them — the same reason the
+// positions grid does it, explained at length there.
+const tint = (color: string) => `linear-gradient(${color}, ${color})`;
 
 export default function ManualInputGrid({
   rows,
@@ -227,6 +236,25 @@ export default function ManualInputGrid({
           "& .MuiDataGrid-columnHeaderTitle": { fontWeight: 600 },
           "& .pos-cell--derived": { color: "text.disabled" },
           "& .manual-row--locked": { color: "text.disabled" },
+          // The two setup bands. One hue each, strong on the band header and
+          // faint on the columns it spans — that pairing is what ties the two
+          // header rows together and separates the authoring zone from the
+          // identity columns on its left and the months on its right.
+          "& .man-band": { justifyContent: "center" },
+          "& .man-band--kpi": {
+            backgroundImage: (theme) => tint(alpha(theme.palette.info.main, 0.24)),
+          },
+          "& .man-col--kpi": {
+            backgroundImage: (theme) => tint(alpha(theme.palette.info.main, 0.07)),
+          },
+          "& .man-band--spread": {
+            backgroundImage: (theme) =>
+              tint(alpha(theme.palette.secondary.main, 0.22)),
+          },
+          "& .man-col--spread": {
+            backgroundImage: (theme) =>
+              tint(alpha(theme.palette.secondary.main, 0.06)),
+          },
         }}
       />
       {/* Cleared of the footer, which prints the row count. */}

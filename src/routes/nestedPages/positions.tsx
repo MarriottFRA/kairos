@@ -77,6 +77,7 @@ import {
   applyBlockPreset as applyBlockPresetService,
   deleteBlock as deleteBlockService,
   listBlocks,
+  reorderBlocks as reorderBlocksService,
   restoreBlock as restoreBlockService,
   saveBlock as saveBlockService,
 } from "../../services/blocksService";
@@ -145,6 +146,7 @@ import PositionsToolbar, {
 import AddFieldDialog from "../../components/positions/AddFieldDialog";
 import RemoveFieldDialog from "../../components/positions/RemoveFieldDialog";
 import ManageColumnsDialog from "../../components/positions/ManageColumnsDialog";
+import ReorderBlocksDialog from "../../components/positions/ReorderBlocksDialog";
 import CopyScenarioDialog, {
   HotelSourceOption,
 } from "../../components/positions/CopyScenarioDialog";
@@ -362,6 +364,9 @@ export default function Positions() {
   >(null);
   const [blockBusy, setBlockBusy] = useState(false);
   const [undoBlock, setUndoBlock] = useState<BlockDto | null>(null);
+  /** The block-order dialog. Its draft order lives inside it — this is only
+   *  open/closed, so dragging a row costs this page nothing. */
+  const [reorderOpen, setReorderOpen] = useState(false);
   /** The NI/SS configurator: closed (null), editing a block, or adding a new
    *  scheme (block: null). Opened from an SS block's cog or the block palette.
    *  `preset` is set only when the Ready-made tab picked a country scheme — it
@@ -463,7 +468,7 @@ export default function Positions() {
   const defaultsRef = useRef<PositionDefaults | null>(null);
   const [fullTime, setFullTime] = useState<FullTimeReference | null>(null);
 
-  const restoredState = useGridStatePersistence(
+  const { restoredState, persistLayout } = useGridStatePersistence(
     apiRef,
     !!catalog && !loading && !!scenario
   );
@@ -1798,6 +1803,37 @@ export default function Positions() {
     [selectedHotelOu]
   );
 
+  // A new display order. Only sort_order moves — no definition is recompiled
+  // into a different shape — but the refreshed model rebuilds the grid's
+  // columns and re-runs the live sim once, which is what makes this a
+  // save-on-close dialog rather than a per-drag write.
+  const handleReorderBlocks = useCallback(
+    (orderedIds: string[]) => {
+      if (!selectedHotelOu) return;
+      setBlockBusy(true);
+      void (async () => {
+        try {
+          await queueRef.current?.flushNow();
+          const response = await reorderBlocksService(selectedHotelOu, orderedIds);
+          setBlocksModel(response);
+          setReorderOpen(false);
+          // The grid rebuilds its column order from the new columns prop
+          // WITHOUT raising columnOrderChange, so nothing would re-save the
+          // layout and the older saved one would put the bands back on the next
+          // mount. The persist is debounced, so it exports after this render.
+          persistLayout();
+          setToast("Block order saved");
+        } catch (err) {
+          console.error("Failed to reorder blocks:", err);
+          setError(err instanceof Error ? err.message : "Could not save that order");
+        } finally {
+          setBlockBusy(false);
+        }
+      })();
+    },
+    [selectedHotelOu, persistLayout]
+  );
+
   const handleDeleteBlock = useCallback(
     (block: BlockDto) => {
       if (!selectedHotelOu) return;
@@ -2016,6 +2052,8 @@ export default function Positions() {
           canAddPositions={addRefusal === null}
           addBlockedReason={addRefusal}
           onAddBlock={() => setBlockDialog({ mode: "create" })}
+          onReorderBlocks={() => setReorderOpen(true)}
+          blockCount={blocks.length}
           onToggleMask={() => setMasked((value) => !value)}
           onToggleGroup={() => setGroupByDept((value) => !value)}
           onToggleInactive={() => setShowInactive((value) => !value)}
@@ -2152,6 +2190,14 @@ export default function Positions() {
         onRestore={handleRestoreFromManage}
         onPurge={handlePurgeFromManage}
         onClose={() => setManageOpen(false)}
+      />
+
+      <ReorderBlocksDialog
+        open={reorderOpen}
+        blocks={blocks}
+        busy={blockBusy}
+        onSave={handleReorderBlocks}
+        onClose={() => setReorderOpen(false)}
       />
 
       <BlockDialog

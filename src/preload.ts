@@ -21,6 +21,7 @@ const ALLOWED_CHANNEL_PREFIXES = [
   "manualInput:",
   "blocks:",
   "hotelClusters:",
+  "hotelCopy:",
   "socialSecurity:",
   "allocations:",
   "kairosSync:",

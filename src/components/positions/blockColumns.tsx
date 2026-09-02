@@ -672,6 +672,12 @@ export function buildBlockGroupingEntries(
       ...blockInputSlots(block).map((slot) => ({
         field: blockFieldKey(block.costDefId, slot),
       })),
+      // The rules-driven rate stands in for the editable rate column, which
+      // blockInputSlots has dropped — without it here the column falls outside
+      // the band and loses the block's tint and label.
+      ...(block.blockType === "MULTIPLIER" && block.rateRules
+        ? [{ field: blockRuleRateKey(block) }]
+        : []),
       ...(!block.accountLocked ? [{ field: blockAccountKey(block.costDefId) }] : []),
       ...(block.blockType === "COUNT_RATE" && !block.statsAccountLocked
         ? [{ field: blockStatsAccountKey(block.costDefId) }]

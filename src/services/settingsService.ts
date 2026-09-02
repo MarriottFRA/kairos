@@ -66,6 +66,9 @@ export const SETTINGS_KEYS = {
   TERMS_ACCEPTED_VERSION: 'termsAcceptedVersion',
   TERMS_ACCEPTED_BY: 'termsAcceptedBy',
   TERMS_ACCEPTED_AT: 'termsAcceptedAt',
+  // Highest "what's new" note the user has opened (see shared/updates/releases).
+  // 0 means none — the bell shows its dot until a newer note has been read.
+  UPDATES_SEEN_ID: 'updatesSeenId',
 } as const;
 
 export type SettingsKey = typeof SETTINGS_KEYS[keyof typeof SETTINGS_KEYS];
@@ -116,6 +119,7 @@ export interface AppSettings {
   [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: string;
   [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: string;
   [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: string;
+  [SETTINGS_KEYS.UPDATES_SEEN_ID]: number;
 }
 
 // Default values for all settings
@@ -169,6 +173,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   [SETTINGS_KEYS.TERMS_ACCEPTED_VERSION]: "",
   [SETTINGS_KEYS.TERMS_ACCEPTED_BY]: "",
   [SETTINGS_KEYS.TERMS_ACCEPTED_AT]: "",
+  [SETTINGS_KEYS.UPDATES_SEEN_ID]: 0,
 };
 
 // Type-safe partial settings for updates

@@ -53,6 +53,7 @@ import { alpha } from "@mui/material/styles";
 import Stack from "@mui/material/Stack";
 import Chip from "@mui/material/Chip";
 import ThemeToggle from "./customComponents/themeToggle";
+import WhatsNewBell from "../components/common/WhatsNewBell";
 import { useSettingsStore } from "../store/settings";
 import PlanningContextPicker from "../components/positions/PlanningContextPicker";
 import { contextChipSx } from "../components/ContextChip";
@@ -541,6 +542,9 @@ const handleSignOut = useCallback(async () => {
                 holds as you step across screens — the Positions grid and the
                 report packs all read the same pair. */}
             <PlanningContextPicker />
+
+            {/* What's new (global) */}
+            <WhatsNewBell />
 
             {/* Theme toggle (global) */}
             <ThemeToggle />

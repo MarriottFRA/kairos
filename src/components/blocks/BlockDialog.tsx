@@ -1869,7 +1869,7 @@ export default function BlockDialog({
                       ? "Choose at least one month."
                       : `The year's whole figure is booked in ${formatMonthRanges(
                           collapseMonths.map((month) => month - 1)
-                        )}${collapseMonths.length > 1 ? ", split evenly" : ""} — the 13th-month shape. A chosen month a row isn't active in gets nothing; if none are active the cost is dropped.`}
+                        )}${collapseMonths.length > 1 ? ", split evenly" : ""}.`}
                 </Typography>
               </Stack>
             )}

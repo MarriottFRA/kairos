@@ -15,6 +15,7 @@ import FilterAltOutlinedIcon from "@mui/icons-material/FilterAltOutlined";
 import HistoryToggleOffIcon from "@mui/icons-material/HistoryToggleOff";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
+import SwapHorizOutlinedIcon from "@mui/icons-material/SwapHorizOutlined";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import WorkspacesIcon from "@mui/icons-material/Workspaces";
@@ -76,6 +77,11 @@ export interface PositionsToolbarProps {
   /** The sentence for the tooltip when `canAddPositions` is false. */
   addBlockedReason?: string | null;
   onAddBlock: () => void;
+  /** Open the block-order dialog. Reached from "Add block"'s arrow, because a
+   *  band's own cog is already spoken for by its configuration. */
+  onReorderBlocks: () => void;
+  /** How many blocks this hotel has — one block has no order to change. */
+  blockCount: number;
   onToggleMask: () => void;
   onToggleGroup: () => void;
   onToggleInactive: () => void;
@@ -172,6 +178,8 @@ export default function PositionsToolbar({
   canAddPositions = true,
   addBlockedReason = null,
   onAddBlock,
+  onReorderBlocks,
+  blockCount,
   onToggleMask,
   onToggleGroup,
   onToggleInactive,
@@ -187,6 +195,7 @@ export default function PositionsToolbar({
   // Both menus and the custom-count prompt are the toolbar's own business —
   // the page above it only ever hears the resulting intent.
   const [addAnchor, setAddAnchor] = useState<HTMLElement | null>(null);
+  const [blockAnchor, setBlockAnchor] = useState<HTMLElement | null>(null);
   const [bulkAnchor, setBulkAnchor] = useState<HTMLElement | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
   const [customCount, setCustomCount] = useState("10");
@@ -318,19 +327,63 @@ export default function PositionsToolbar({
         </DialogActions>
       </Dialog>
 
-      <Tooltip title="Add a calculation block — a new set of columns that generates costs or statistics for every position">
+      {/* Same split-button idiom as "Add position" above — the tooltip wraps the
+          whole group, which is what keeps ButtonGroup's own edge styling: the
+          bare click adds a block, the arrow holds what you do to the ones that
+          are already there. */}
+      <Tooltip title="Add a calculation block — a new set of columns that generates costs or statistics for every position. The arrow reorders the blocks you have.">
         <span>
-          <Button
+          <ButtonGroup
             variant="outlined"
-            startIcon={<DashboardCustomizeOutlinedIcon />}
-            onClick={onAddBlock}
-            disabled={disabled}
-            sx={{ height: CONTROL_HEIGHT, px: 2 }}
+            disableElevation
+            sx={{ height: CONTROL_HEIGHT }}
           >
-            Add block
-          </Button>
+            <Button
+              startIcon={<DashboardCustomizeOutlinedIcon />}
+              onClick={onAddBlock}
+              disabled={disabled}
+              sx={{ px: 2 }}
+            >
+              Add block
+            </Button>
+            <Button
+              size="small"
+              aria-label="More block options"
+              onClick={(event) => setBlockAnchor(event.currentTarget)}
+              disabled={disabled}
+              sx={{ px: 0.5, minWidth: 32 }}
+            >
+              <ArrowDropDownIcon />
+            </Button>
+          </ButtonGroup>
         </span>
       </Tooltip>
+
+      <Menu
+        anchorEl={blockAnchor}
+        open={!!blockAnchor}
+        onClose={() => setBlockAnchor(null)}
+      >
+        <MenuItem
+          disabled={blockCount < 2}
+          onClick={() => {
+            setBlockAnchor(null);
+            onReorderBlocks();
+          }}
+        >
+          <ListItemIcon>
+            <SwapHorizOutlinedIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText
+            primary="Reorder blocks…"
+            secondary={
+              blockCount < 2
+                ? "Needs at least two blocks"
+                : "Change where each block's columns sit"
+            }
+          />
+        </MenuItem>
+      </Menu>
 
       <Tooltip
         title={

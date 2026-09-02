@@ -70,7 +70,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 type SecureDb = InstanceType<typeof Database>;
 

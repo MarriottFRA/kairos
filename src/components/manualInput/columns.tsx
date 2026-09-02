@@ -1,20 +1,41 @@
 /**
  * Column + grouping builders for the Manual Input grid.
  *
- * Identity columns (pinned left) + 12 month groups, each wrapping a Stats and an
- * Amount cell, + yearly totals + the inline spread-config columns (Mode, a Stats
- * base and an Amount base, Increase % / Month). "Stats" are operational units
- * (hours, covers…); the row carries both a Cost Account (dollars) and a Stats
- * Account. Amount is a derived, read-only cell when the row has a rate
+ * Identity columns (pinned left) + two setup bands + 12 month groups, each
+ * wrapping a Stats and an Amount cell, + yearly totals. "Stats" are operational
+ * units (hours, covers…); the row carries both a Cost Account (dollars) and a
+ * Stats Account. Amount is a derived, read-only cell when the row has a rate
  * (stats * rate); otherwise it is typed directly. Departments/accounts get
  * type-ahead editors when the mapping tables are synced, else they degrade to
  * free text.
+ *
+ * The two setup bands are the authoring zone, and each is tinted and collapsible
+ * so it reads as one block rather than a run of loose columns:
+ *
+ *   Drivers — KPI Driver / Per / Units / Rate: how the row DERIVES. The two
+ *             rules compose (Stats = KPI ÷ Per × Units, then Amount = Stats ×
+ *             Rate), which is why Rate sits here and no longer back with the
+ *             accounts, where it read as an unrelated scalar.
+ *   Spread  — Mode / bases / Increase %: how a base FILLS the 12 months.
+ *
+ * Collapsing is layout, not data: the chevron on a band header drives the grid's
+ * own columnVisibilityModel (see BandHeader), the way the positions grid folds a
+ * month family away, and the band's first column stays visible as the anchor
+ * that carries the chevron back.
  */
 
 import Box from "@mui/material/Box";
+import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import CalculateOutlinedIcon from "@mui/icons-material/CalculateOutlined";
 import InsightsOutlinedIcon from "@mui/icons-material/InsightsOutlined";
+import KeyboardDoubleArrowLeftIcon from "@mui/icons-material/KeyboardDoubleArrowLeft";
+import KeyboardDoubleArrowRightIcon from "@mui/icons-material/KeyboardDoubleArrowRight";
+import {
+  gridColumnVisibilityModelSelector,
+  useGridApiContext,
+  useGridSelector,
+} from "@mui/x-data-grid-premium";
 import type {
   GridColDef,
   GridColumnGroupingModel,
@@ -107,6 +128,154 @@ function numericBase(field: string, headerName: string, width: number): GridColD
     sortable: false,
     valueFormatter: (value) => formatNumber(value),
   };
+}
+
+//------------------------------------------------------------------------------
+//--- The two setup bands ------------------------------------------------------
+
+/**
+ * The band a column belongs to. The class goes on the header AND the cells (see
+ * withBandClass), so the tint runs the full height of the block — the same trick
+ * the positions grid uses for its sections, and what makes Rate read as part of
+ * the derivation rather than as one more identity field.
+ */
+const BAND_KPI = "man-col--kpi";
+const BAND_SPREAD = "man-col--spread";
+
+const BAND_BY_FIELD: Record<string, string> = {
+  statsKpiDriverId: BAND_KPI,
+  statsKpiDivisor: BAND_KPI,
+  statsKpiFactor: BAND_KPI,
+  rate: BAND_KPI,
+  spreadMode: BAND_SPREAD,
+  spreadBaseStats: BAND_SPREAD,
+  spreadBaseAmount: BAND_SPREAD,
+  increasePct: BAND_SPREAD,
+  increaseMonth: BAND_SPREAD,
+};
+
+/**
+ * What each band folds away — deliberately NOT the band's first column.
+ *
+ * A group whose every child is hidden loses its header, and the header is where
+ * the chevron lives, so folding everything would leave no way back short of the
+ * column menu. The anchor column is also the one worth keeping visible: which
+ * KPI drives the row, and whether a spread is configured at all.
+ */
+const KPI_COLLAPSIBLE_FIELDS = ["statsKpiDivisor", "statsKpiFactor", "rate"];
+const SPREAD_COLLAPSIBLE_FIELDS = [
+  "spreadBaseStats",
+  "spreadBaseAmount",
+  "increasePct",
+  "increaseMonth",
+];
+
+/** Paint a column with its band, keeping whatever cell classes it computes. */
+function withBandClass(
+  column: GridColDef<ManualGridRow>
+): GridColDef<ManualGridRow> {
+  const band = BAND_BY_FIELD[column.field];
+  if (!band) return column;
+  const existing = column.cellClassName;
+  return {
+    ...column,
+    headerClassName: band,
+    // The derived-cell greys are per-row and the band tint is per-column, so
+    // both have to survive — overwriting here would un-grey the locked Stats
+    // and Amount bases the moment they were tinted.
+    cellClassName:
+      typeof existing === "function"
+        ? (params) => [existing(params), band].filter(Boolean).join(" ")
+        : [existing, band].filter(Boolean).join(" "),
+  };
+}
+
+/**
+ * A band's group header: the chevron that folds the band away, plus its label.
+ *
+ * Collapsing drives the grid's own columnVisibilityModel, and the expanded state
+ * is READ BACK off that same model rather than remembered here — so unhiding one
+ * column from the column menu flips the chevron too, because it describes the
+ * grid rather than replaying a click. The label shortens when collapsed, since
+ * the band is one column wide by then and the long form would only ellipsize.
+ */
+function BandHeader({
+  label,
+  shortLabel,
+  fields,
+}: {
+  label: string;
+  shortLabel: string;
+  fields: string[];
+}) {
+  const apiRef = useGridApiContext();
+  const visibility = useGridSelector(apiRef, gridColumnVisibilityModelSelector);
+  // The model only carries explicit entries — an absent key is visible.
+  const expanded = fields.some((field) => visibility[field] !== false);
+  const title = expanded
+    ? `Hide the ${shortLabel} setup columns`
+    : `Show the ${shortLabel} setup columns`;
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 0.75,
+        width: "100%",
+        minWidth: 0,
+      }}
+    >
+      <Tooltip title={title}>
+        <IconButton
+          size="small"
+          aria-label={title}
+          aria-expanded={expanded}
+          // The header cell owns click (group selection) and mousedown (reorder
+          // drag); without both stopped, folding the band also drags it.
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            apiRef.current.setColumnVisibilityModel({
+              ...visibility,
+              ...Object.fromEntries(fields.map((field) => [field, !expanded])),
+            });
+          }}
+          sx={{
+            flexShrink: 0,
+            width: 20,
+            height: 20,
+            color: "text.secondary",
+            border: (theme) => `1px solid ${theme.palette.divider}`,
+            borderRadius: 0.75,
+            bgcolor: "background.paper",
+          }}
+        >
+          {expanded ? (
+            <KeyboardDoubleArrowLeftIcon sx={{ fontSize: 13 }} />
+          ) : (
+            <KeyboardDoubleArrowRightIcon sx={{ fontSize: 13 }} />
+          )}
+        </IconButton>
+      </Tooltip>
+      <Box
+        component="span"
+        sx={{
+          minWidth: 0,
+          fontWeight: 700,
+          fontSize: "0.6875rem",
+          letterSpacing: "0.09em",
+          textTransform: "uppercase",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {expanded ? label : shortLabel}
+      </Box>
+    </Box>
+  );
 }
 
 export function buildManualColumns(ctx: ManualColumnsContext): {
@@ -212,22 +381,23 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
           )
         : undefined,
     },
-    {
-      ...numericBase("rate", "Rate", 110),
-      editable: true,
-      valueParser: numericOrNull,
-    },
   ];
 
   const grouping: GridColumnGroupingModel = [];
 
-  // Stats-from-KPI setup — a KPI driver reference plus the per-row rule
-  // ("20 hours per 50,000 of revenue" => Units 20, Per 50000). Monthly Stats
-  // are then DERIVED from the driver's cached series and re-resolve on every
-  // render/recalc, so a fresh budget pull flows through without touching the
-  // row — nothing is baked in while the driver is set. Note the driver's own
-  // multiplier is already inside its cached series, so Per/Units apply to the
-  // final KPI figure.
+  // The Drivers band — a KPI driver reference plus the per-row rule ("20 hours
+  // per 50,000 of revenue" => Units 20, Per 50000), then the Rate that turns
+  // those units into money. Monthly Stats are DERIVED from the driver's cached
+  // series and re-resolve on every render/recalc, so a fresh budget pull flows
+  // through without touching the row — nothing is baked in while the driver is
+  // set. Note the driver's own multiplier is already inside its cached series,
+  // so Per/Units apply to the final KPI figure.
+  //
+  // Rate closes the chain: Stats = KPI ÷ Per × Units, then Amount = Stats ×
+  // Rate. It is the same column it always was — same field, same lock
+  // (isRateLockedField), same rule in shared/manualInput/rowMath.ts — moved next
+  // to the driver it multiplies, because over with the accounts it read as an
+  // unrelated scalar and hid the fact that the two rules compose.
   const kpiOptions = [
     { value: "", label: "—" },
     ...(ctx.kpiDrivers ?? []).map((driver) => ({
@@ -285,9 +455,26 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
   });
   kpiChildren.push({ field: "statsKpiFactor" });
 
+  columns.push({
+    ...numericBase("rate", "Rate", 110),
+    description:
+      "Cost per unit — the monthly Amount becomes Stats × Rate, derived and locked. Leave blank to type the Amounts by hand.",
+    editable: true,
+    valueParser: numericOrNull,
+  });
+  kpiChildren.push({ field: "rate" });
+
   grouping.push({
     groupId: "kpi_stats",
-    headerName: "Stats from KPI (KPI ÷ Per × Units) →",
+    headerName: "Drivers",
+    headerClassName: "man-band man-band--kpi",
+    renderHeaderGroup: () => (
+      <BandHeader
+        label="Drivers — Stats = KPI ÷ Per × Units, Amount = Stats × Rate"
+        shortLabel="Drivers"
+        fields={KPI_COLLAPSIBLE_FIELDS}
+      />
+    ),
     children: kpiChildren,
   });
 
@@ -376,7 +563,15 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
 
   grouping.push({
     groupId: "spread_config",
-    headerName: "Spread (fill 12 months) →",
+    headerName: "Spread",
+    headerClassName: "man-band man-band--spread",
+    renderHeaderGroup: () => (
+      <BandHeader
+        label="Spread — fill 12 months from a base"
+        shortLabel="Spread"
+        fields={SPREAD_COLLAPSIBLE_FIELDS}
+      />
+    ),
     children: spreadChildren,
   });
 
@@ -438,7 +633,10 @@ export function buildManualColumns(ctx: ManualColumnsContext): {
     });
   }
 
-  return { columns, grouping };
+  // The band tints are applied here rather than at each push: one list of which
+  // column belongs to which band, instead of the same class threaded through
+  // nine definitions that already carry cell classes of their own.
+  return { columns: columns.map(withBandClass), grouping };
 }
 
 /**

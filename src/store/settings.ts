@@ -46,6 +46,8 @@ type SettingsState = {
   planningScenarioId: string;
   /** Render the administrator surface. A preference, not a permission. */
   adminToolsEnabled: boolean;
+  /** Highest "what's new" note opened. Drives the app bar bell's unread dot. */
+  updatesSeenId: number;
 
   // Loading state
   loading: boolean;
@@ -95,6 +97,7 @@ type SettingsState = {
   setBudgetYear: (year: number) => Promise<void>;
   setPlanningScenarioId: (scenarioId: string) => Promise<void>;
   setAdminToolsEnabled: (enabled: boolean) => Promise<void>;
+  setUpdatesSeenId: (id: number) => Promise<void>;
   updateMultipleSettings: (settings: Partial<AppSettings>) => Promise<void>;
 
   // Load and save
@@ -146,6 +149,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   budgetYear: new Date().getFullYear(),
   planningScenarioId: "",
   adminToolsEnabled: false,
+  updatesSeenId: 0,
   loading: false,
   initialized: false,
 
@@ -612,6 +616,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  setUpdatesSeenId: async (id) => {
+    const previous = get().updatesSeenId;
+    // Only ever moves forward: an older note being opened must not un-read a
+    // newer one the user has already seen.
+    if (id <= previous) return;
+    set({ updatesSeenId: id });
+    try {
+      await settingsService.setSetting(SETTINGS_KEYS.UPDATES_SEEN_ID, id);
+    } catch (error) {
+      console.error("Failed to save updates-seen setting:", error);
+      set({ updatesSeenId: previous });
+    }
+  },
+
   // Update multiple settings at once
   updateMultipleSettings: async (settings) => {
     // Store previous state for rollback
@@ -719,6 +737,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         budgetYear: settings[SETTINGS_KEYS.BUDGET_YEAR],
         planningScenarioId: settings[SETTINGS_KEYS.PLANNING_SCENARIO_ID],
         adminToolsEnabled: settings[SETTINGS_KEYS.ADMIN_TOOLS_ENABLED],
+        updatesSeenId: settings[SETTINGS_KEYS.UPDATES_SEEN_ID],
         initialized: true,
       });
 
@@ -829,3 +848,4 @@ export const useIncludeBanquetingBreakdown = () => useSettingsStore((s) => s.inc
 export const useBudgetYear = () => useSettingsStore((s) => s.budgetYear);
 export const usePlanningScenarioId = () => useSettingsStore((s) => s.planningScenarioId);
 export const useAdminToolsEnabled = () => useSettingsStore((s) => s.adminToolsEnabled);
+export const useUpdatesSeenId = () => useSettingsStore((s) => s.updatesSeenId);
