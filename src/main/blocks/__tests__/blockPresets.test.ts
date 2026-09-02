@@ -1,14 +1,14 @@
-/**
+﻿/**
  * Block preset application tests.
  *
- * The interesting part of a preset is not that it saves blocks — saveBlock is
- * covered elsewhere — but that a MULTI-step preset wires its later steps to the
+ * The interesting part of a preset is not that it saves blocks â€” saveBlock is
+ * covered elsewhere â€” but that a MULTI-step preset wires its later steps to the
  * ids of its earlier ones, and that applying the same preset twice produces two
  * independent graphs rather than a second copy pointing at the first. Both are
  * silent failures: the wrong wiring still compiles, still simulates, and just
  * prices the wrong thing.
  *
- * The Overtime preset is the one that exercises all of it — three blocks, two
+ * The Overtime preset is the one that exercises all of it â€” three blocks, two
  * COMBINE bases, one of each countExempt polarity.
  */
 
@@ -49,7 +49,7 @@ function defById(id: string) {
   return found;
 }
 
-describe("applyBlockPreset — pension", () => {
+describe("applyBlockPreset â€” pension", () => {
   it("creates one multiplier on basic salary with the seeded account", () => {
     const ids = applyBlockPreset(db, OU, "pension", NOW);
 
@@ -62,7 +62,7 @@ describe("applyBlockPreset — pension", () => {
   });
 });
 
-describe("applyBlockPreset — overtime", () => {
+describe("applyBlockPreset â€” overtime", () => {
   it("creates the three blocks in order", () => {
     const ids = applyBlockPreset(db, OU, "overtime", NOW);
 
@@ -102,7 +102,7 @@ describe("applyBlockPreset — overtime", () => {
     });
   });
 
-  it("derives the rate from salary ÷ hours paid and exempts it from headcount", () => {
+  it("derives the rate from salary Ã· hours paid and exempts it from headcount", () => {
     applyBlockPreset(db, OU, "overtime", NOW);
 
     const rate = blockByLabel("Overtime Hourly Rate");
@@ -142,7 +142,7 @@ describe("applyBlockPreset — overtime", () => {
   });
 });
 
-describe("applyBlockPreset — applying twice", () => {
+describe("applyBlockPreset â€” applying twice", () => {
   it("suffixes the colliding labels", () => {
     applyBlockPreset(db, OU, "overtime", NOW);
     applyBlockPreset(db, OU, "overtime", NOW);
@@ -175,7 +175,7 @@ describe("applyBlockPreset — applying twice", () => {
   });
 });
 
-describe("applyBlockPreset — failure", () => {
+describe("applyBlockPreset â€” failure", () => {
   it("rejects an unknown preset without writing anything", () => {
     expect(() => applyBlockPreset(db, OU, "not-a-preset", NOW)).toThrow(
       /Unknown preset/
@@ -190,7 +190,7 @@ describe("applyBlockPreset — failure", () => {
  * against stored JSON alone. One position, no seasonality, no merit: a clean
  * arithmetic target.
  */
-describe("applyBlockPreset — overtime, simulated", () => {
+describe("applyBlockPreset â€” overtime, simulated", () => {
   const MONTHLY_SALARY = 3000;
   const YEARLY_HOURS = 2000;
   const VACATION_DAYS = 20;
@@ -218,6 +218,7 @@ describe("applyBlockPreset — overtime, simulated", () => {
         deletedAt: null,
       },
       calendar: {
+        year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
         holidayDays: new Float64Array(12),
@@ -288,7 +289,7 @@ describe("applyBlockPreset — overtime, simulated", () => {
     };
   }
 
-  it("prices overtime at premium × salary ÷ hours paid × hours", () => {
+  it("prices overtime at premium Ã— salary Ã· hours paid Ã— hours", () => {
     const { rate, cost } = simulateOvertime(1);
 
     const expectedRate = (PREMIUM * (MONTHLY_SALARY * 12)) / HOURS_PAID;
@@ -309,7 +310,7 @@ describe("applyBlockPreset — overtime, simulated", () => {
 
   it("applies a merit increase ONCE, through the rate leg", () => {
     // This is the reason Overtime Hours ships with merit off. With it on, the
-    // hours would be uplifted too and December would land at 1.1² — a 21%
+    // hours would be uplifted too and December would land at 1.1Â² â€” a 21%
     // rise nobody asked for, invisible in any total.
     const { cost } = simulateOvertime(1, { pct: 0.1, month: 7 });
 

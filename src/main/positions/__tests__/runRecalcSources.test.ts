@@ -23,6 +23,7 @@ import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { saveAllocation } from "../../allocations/repo";
 import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
 import { saveRow as saveManualRow } from "../../manualInput/repo";
+import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
 import { resolveOuScope } from "../ouScope";
 import { batchWrite } from "../positionsRepo";
 import { runRecalc } from "../runRecalc";
@@ -63,6 +64,7 @@ beforeEach(() => {
   applyStructureColumns(structureDb);
   applyHotelClustersV13(structureDb);
   structureDb.exec(ALLOCATIONS_SQL);
+  structureDb.exec(KPI_DRIVERS_SQL);
 
   valuesDb = new Database(":memory:");
   valuesDb.exec(POSITIONS_VALUE_TABLES_SQL);
@@ -123,6 +125,9 @@ function addManualRow() {
     costAccount: MANUAL_COST_ACCOUNT,
     statsAccount: "",
     rate: null,
+    statsKpiDriverId: null,
+    statsKpiDivisor: null,
+    statsKpiFactor: null,
     stats: new Array(12).fill(0),
     amounts: new Array(12).fill(250),
     spreadMode: null,
@@ -134,6 +139,57 @@ function addManualRow() {
     createdBy: null,
     now: NOW,
   });
+}
+
+const MANUAL_STATS_ACCOUNT = "A988150";
+
+/** A manual row whose hours come from kpi-1: 20 units per 50,000, priced at 15.5. */
+function addKpiManualRow() {
+  saveManualRow(valuesDb, {
+    id: "man-kpi",
+    ou: SCOPE.ou,
+    scenarioId,
+    description: "Banqueting casuals",
+    department: "Banqueting",
+    departmentCode: "D0410",
+    costAccount: MANUAL_COST_ACCOUNT,
+    statsAccount: MANUAL_STATS_ACCOUNT,
+    rate: 15.5,
+    statsKpiDriverId: "kpi-1",
+    statsKpiDivisor: 50000,
+    statsKpiFactor: 20,
+    stats: new Array(12).fill(5), // the stored snapshot — distinct from anything derived
+    amounts: new Array(12).fill(0),
+    spreadMode: null,
+    spreadBaseStats: null,
+    spreadBaseAmount: null,
+    increasePct: 0,
+    increaseMonth: 13,
+    sortOrder: 0,
+    createdBy: null,
+    now: NOW,
+  });
+}
+
+function addKpiDriver(deptMode: "EXPLICIT" | "POSITION" = "EXPLICIT") {
+  structureDb
+    .prepare(
+      `INSERT INTO kpi_drivers (id, ou, label, dept_mode, updated_at)
+       VALUES ('kpi-1', ?, 'Banqueting Revenue', ?, ?)`
+    )
+    .run(SCOPE.ou, deptMode, NOW);
+}
+
+function writeKpiSeries(deptKey: string, value: number) {
+  const stmt = structureDb.prepare(
+    `INSERT INTO kpi_driver_values (driver_id, ou, dept_key, period, value, computed_at)
+     VALUES ('kpi-1', ?, ?, ?, ?, ?)
+     ON CONFLICT (driver_id, ou, dept_key, period) DO UPDATE SET
+       value = excluded.value, computed_at = excluded.computed_at`
+  );
+  for (let period = 1; period <= 12; period++) {
+    stmt.run(SCOPE.ou, deptKey, period, value, NOW);
+  }
 }
 
 function addAllocation() {
@@ -324,5 +380,62 @@ describe("runRecalc assembles every source", () => {
     // Re-read without recalculating: the stored run is now out of date.
     const { readOutputs } = await import("../outputsRepo");
     expect(readOutputs(structureDb, valuesDb, SCOPE, scenarioId).stale).toBe(true);
+  });
+});
+
+describe("KPI-driven manual stats", () => {
+  it("derives hours from the driver's series and prices them through the rate", async () => {
+    addKpiDriver();
+    writeKpiSeries("*", 100000);
+    addKpiManualRow();
+    const outputs = await recalc();
+    // 100,000 / 50,000 × 20 = 40 hours a month on the stats side…
+    const hours = rowFor(outputs, "D0410", MANUAL_STATS_ACCOUNT)!;
+    expect(hours.months).toEqual(new Array(12).fill(40));
+    expect(hours.sources).toEqual(["MANUAL"]);
+    // …and 40 × 15.5 on the cost side — the existing rate rule, fed the
+    // derived stats, with no engine involvement.
+    const cost = rowFor(outputs, "D0410", MANUAL_COST_ACCOUNT)!;
+    expect(cost.months).toEqual(new Array(12).fill(620));
+    expect(cost.sources).toEqual(["MANUAL"]);
+  });
+
+  it("follows a rewritten series on the next recalc — the budget-pull path", async () => {
+    addKpiDriver();
+    writeKpiSeries("*", 100000);
+    addKpiManualRow();
+    await recalc();
+
+    // A fresh budget pull rewrites the cache (recomputeAllForOu); the row
+    // itself is untouched, yet the next run must carry the new revenue.
+    writeKpiSeries("*", 150000);
+    const outputs = await recalc();
+    expect(rowFor(outputs, "D0410", MANUAL_STATS_ACCOUNT)!.months).toEqual(
+      new Array(12).fill(60)
+    );
+    expect(rowFor(outputs, "D0410", MANUAL_COST_ACCOUNT)!.months).toEqual(
+      new Array(12).fill(930)
+    );
+  });
+
+  it("falls back to the stored snapshot when the driver no longer exists", async () => {
+    addKpiManualRow(); // references kpi-1, which was never created
+    const outputs = await recalc();
+    expect(rowFor(outputs, "D0410", MANUAL_STATS_ACCOUNT)!.months).toEqual(
+      new Array(12).fill(5)
+    );
+    expect(rowFor(outputs, "D0410", MANUAL_COST_ACCOUNT)!.months).toEqual(
+      new Array(12).fill(77.5) // 5 × 15.5 — the snapshot priced through the rate
+    );
+  });
+
+  it("resolves a POSITION-mode driver to zeros when no series matches the department", async () => {
+    addKpiDriver("POSITION");
+    writeKpiSeries("D0500", 100000); // another department's series only
+    addKpiManualRow(); // departmentCode D0410
+    const outputs = await recalc();
+    expect(rowFor(outputs, "D0410", MANUAL_STATS_ACCOUNT)!.months).toEqual(
+      new Array(12).fill(0)
+    );
   });
 });

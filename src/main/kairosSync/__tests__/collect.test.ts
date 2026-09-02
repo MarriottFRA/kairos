@@ -420,6 +420,43 @@ describe("filterToWriteScope", () => {
 
     expect(publishable.map((e) => e.entityId)).toEqual(["fb"]);
   });
+
+  it("withholds everything from a read-only full-scope delegate", () => {
+    // The `canEdit: false` shape: they hold EVERY department, readable, none
+    // writable. FULL scope must not read as an open ceiling — this is the
+    // delegation that made "all departments, read only" editable.
+    const ownership: DepartmentOwnership = {
+      planId: PLAN,
+      planVersion: 1,
+      authzVersion: 1,
+      me: { relation: "DELEGATE" as const, scopeKind: "FULL" as const },
+      structureEditableByMe: false,
+      departments: [
+        {
+          code: "D0410",
+          readable: true,
+          writable: false,
+          reason: "NOT_IN_WRITE_SCOPE",
+          assignedTo: [],
+        },
+        {
+          code: "D0610",
+          readable: true,
+          writable: false,
+          reason: "NOT_IN_WRITE_SCOPE",
+          assignedTo: [],
+        },
+      ],
+    };
+
+    const { publishable, withheld } = filterToWriteScope(entities, {
+      canWriteStructure: false,
+      departmentPolicy: departmentWritePolicy(ownership),
+    });
+
+    expect(publishable).toHaveLength(0);
+    expect(withheld).toHaveLength(4);
+  });
 });
 
 describe("toCommitEntities", () => {

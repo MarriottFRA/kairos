@@ -9,8 +9,8 @@
  *     the stats account);
  *   - a MULTIPLIER block's base compiles to the engine BaseSelector (legacy
  *     base_selector_kind/component_base_refs for BASE_SALARY/BLOCK bases,
- *     base_ref JSON for the extended STAT/CALENDAR/VACATION kinds, and the
- *     kpi_driver_id path for KPI bases).
+ *     base_ref JSON for the extended STAT/CALENDAR/SERVICE/VACATION kinds, and
+ *     the kpi_driver_id path for KPI bases).
  *
  * Every function takes the Database handle explicitly (vitest runs these
  * against in-memory databases) and an OuScope — scope.ou is the only OU ever
@@ -78,7 +78,13 @@ interface StoredConfig {
   /** MULTIPLIER only — see BlockInput.rateRules. Stored normalized; absent
    *  when the block uses the per-row rate column. */
   rateRules?: RateRulesConfig;
+  /** MULTIPLIER only — land the whole yearly result in these months (1-based,
+   *  sorted). Absent = spread with the base. See BlockInput.collapseMonths. */
+  collapseMonths?: number[];
   spread: BlockSpread;
+  /** WEEKDAYS spread only — 7-bit Sunday-first weekday mask (the
+   *  CalendarYear.weekendMask convention). Absent for every other spread. */
+  weekdayMask?: number;
   increaseAware: boolean;
   departmentMode: BlockDepartmentMode;
   fixedDepartment?: string;
@@ -134,6 +140,28 @@ function normCodeList(raw: unknown): string[] {
   ];
 }
 
+/** 7-bit Sunday-first weekday mask (the CalendarYear.weekendMask convention;
+ *  `1 << 5` = Fridays). Junk parses to 0 — an empty selection, which
+ *  validateInput refuses to save. */
+function normWeekdayMask(raw: unknown): number {
+  const value = Math.trunc(Number(raw));
+  return Number.isFinite(value) && value > 0 ? value & 127 : 0;
+}
+
+/** Integer months 1-12, de-duplicated and sorted; undefined when nothing
+ *  usable remains — the def spreads with its base, the pre-field behaviour. */
+function normCollapseMonths(raw: unknown): number[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const months = [
+    ...new Set(
+      raw.filter(
+        (month) => Number.isInteger(month) && month >= 1 && month <= 12
+      ) as number[]
+    ),
+  ].sort((a, b) => a - b);
+  return months.length > 0 ? months : undefined;
+}
+
 interface BlockRow {
   id: string;
   ou: string;
@@ -164,6 +192,9 @@ function rowToDto(row: BlockRow): BlockDto {
     ...(blockType === "MULTIPLIER" && config.rateRules
       ? { rateRules: normalizeRateRules(config.rateRules) }
       : {}),
+    ...(blockType === "MULTIPLIER" && normCollapseMonths(config.collapseMonths)
+      ? { collapseMonths: normCollapseMonths(config.collapseMonths) }
+      : {}),
     // Only meaningful for a compound base; defaults keep every existing block
     // (which has no COMBINE base) reading exactly as before.
     useRowRate: config.useRowRate ?? true,
@@ -171,6 +202,9 @@ function rowToDto(row: BlockRow): BlockDto {
       config.ratioNoHeadcount ??
       (config.base?.kind === "COMBINE" && config.base.op === "DIV"),
     spread: config.spread ?? "ACTIVE_MONTHS",
+    ...(config.spread === "WEEKDAYS" && normWeekdayMask(config.weekdayMask) > 0
+      ? { weekdayMask: normWeekdayMask(config.weekdayMask) }
+      : {}),
     increaseAware: config.increaseAware ?? false,
     departmentMode: config.departmentMode ?? "POSITION",
     fixedDepartment: config.fixedDepartment,
@@ -492,6 +526,22 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
     validateRateRules(db, scope, input.id, input.rateRules, input.base);
   }
 
+  if (input.collapseMonths !== undefined && input.blockType !== "MULTIPLIER") {
+    throw new Error("Only a Multiplier block can land its result in chosen months.");
+  }
+  if (input.blockType === "MULTIPLIER" && input.collapseMonths !== undefined) {
+    if (
+      input.collapseMonths.some(
+        (month) => !Number.isInteger(month) || month < 1 || month > 12
+      )
+    ) {
+      throw new Error("Months must be between January and December.");
+    }
+    if (!normCollapseMonths(input.collapseMonths)) {
+      throw new Error("Choose at least one month for the amount to land in.");
+    }
+  }
+
   if (input.blockType === "POOL_SPREAD") {
     const source = input.poolSource ?? "KPI";
     if (source === "KPI" && !String(input.poolKpiDriverId ?? "").trim()) {
@@ -534,6 +584,9 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
   ) {
     throw new Error(`Unknown spread choice: ${input.spread}`);
   }
+  if (input.spread === "WEEKDAYS" && normWeekdayMask(input.weekdayMask) === 0) {
+    throw new Error("Pick at least one weekday.");
+  }
   if (input.departmentMode === "FIXED" && !String(input.fixedDepartment ?? "").trim()) {
     throw new Error("Choose the department the block should book to.");
   }
@@ -565,6 +618,10 @@ interface DefRow {
   increaseAware: boolean;
   /** Ratio blocks opt out of the engine's headcount post-pass. */
   countExempt: boolean;
+  /** MULTIPLIER only — land the yearly result in these months (1-based). */
+  collapseMonths: number[] | null;
+  /** WEEKDAY_COUNT only — the 7-bit Sunday-first weekday mask. */
+  weekdayMask: number | null;
 }
 
 /**
@@ -592,6 +649,11 @@ function toEngineSelector(base: BlockBaseRef, ou: string): BaseSelector {
       return {
         kind: "COMPONENTS",
         componentIds: [systemStatDefId(ou, base.stat)] as ComponentDefId[],
+      };
+    case "ACCRUAL":
+      return {
+        kind: "COMPONENTS",
+        componentIds: [holidayAccrualDefId(ou)] as ComponentDefId[],
       };
     case "CALENDAR":
       return { kind: "CALENDAR", series: base.series };
@@ -627,6 +689,9 @@ function collectBlockBaseRefIds(base: BlockBaseRef, ou: string): string[] {
       case "STAT":
         out.push(systemStatDefId(ou, node.stat));
         break;
+      case "ACCRUAL":
+        out.push(holidayAccrualDefId(ou));
+        break;
       case "COMBINE":
         walk(node.left);
         walk(node.right);
@@ -650,6 +715,9 @@ function seedHeadsForBase(
     switch (node.kind) {
       case "STAT":
         ensureSystemStatDef(db, scope, node.stat, opts);
+        break;
+      case "ACCRUAL":
+        ensureHolidayAccrualDef(db, scope, opts);
         break;
       case "COMPOSITE":
         // Only a composite refs base salary BY ID; a bare BASE_SALARY base (top
@@ -681,6 +749,8 @@ export function compileBlockDefs(
     kpiDriverId: null as string | null,
     ssSchemeId: null as string | null,
     countExempt: false,
+    collapseMonths: null as number[] | null,
+    weekdayMask: null as number | null,
   };
 
   switch (input.blockType) {
@@ -716,6 +786,9 @@ export function compileBlockDefs(
         accountCode: input.accountCode ?? "",
         // PERCENT_OF inherits any merit increase through its base series.
         increaseAware: false,
+        // Set before the base-kind branches so it rides every one of them —
+        // the engine applies it as a line post-op, KPI/DIRECT_ABS included.
+        collapseMonths: normCollapseMonths(input.collapseMonths) ?? null,
       };
       if (base.kind === "KPI") {
         // The engine-load path resolves kpi_driver_id → DIRECT_ABS monthly
@@ -744,6 +817,11 @@ export function compileBlockDefs(
         // the existing COMPONENTS selector.
         def.baseSelectorKind = "COMPONENTS";
         def.baseRefDefIds = [systemStatDefId(ou, base.stat)];
+      } else if (base.kind === "ACCRUAL") {
+        // The vacation-accrual movement is an ordinary engine line too — the
+        // seeded Vacation Accrual head, referenced by id exactly like STAT.
+        def.baseSelectorKind = "COMPONENTS";
+        def.baseRefDefIds = [holidayAccrualDefId(ou)];
       } else if (base.kind === "COMBINE") {
         // Compound: lower both sides to engine selectors and carry the whole
         // tree as base_ref JSON — base_selector_kind's CHECK cannot be widened
@@ -771,23 +849,16 @@ export function compileBlockDefs(
       return [def];
     }
     case "FLAT_MONTHLY": {
-      return [
-        {
-          ...common,
-          id: blockCostDefId(blockId),
-          spreadMethod: "FLAT_MONTHLY",
-          label: input.label,
-          accountCode: input.accountCode ?? "",
-          increaseAware: input.increaseAware ?? false,
-        },
-      ];
-    }
-    case "COUNT_RATE": {
+      // The spread decides what the single "amount" MEANS (unit follows the
+      // spread): ACTIVE_MONTHS keeps the engine's FLAT_MONTHLY method — the
+      // amount per MONTH, today's behaviour exactly, which is why it stays the
+      // default. Any other choice books the amount as a yearly total (the
+      // mapped method) or per occurrence (WEEKDAYS). No value plumbing moves:
+      // the grid's amount already lands in the yearlyValue slot every one of
+      // these methods reads.
       const spread = input.spread ?? "ACTIVE_MONTHS";
-      const method = SPREAD_TO_METHOD[spread];
-      // WEIGHTED_BY_BASE distributes over whatever its base selector resolves
-      // to; the WEIGHTED_* stat spreads just point it at a stat line instead of
-      // the default base-salary curve (seeded on save).
+      const method =
+        spread === "ACTIVE_MONTHS" ? "FLAT_MONTHLY" : SPREAD_TO_METHOD[spread];
       const statBase = SPREAD_TO_STAT_BASE[spread];
       const weighting: Partial<DefRow> = statBase
         ? {
@@ -804,6 +875,39 @@ export function compileBlockDefs(
           label: input.label,
           accountCode: input.accountCode ?? "",
           increaseAware: input.increaseAware ?? false,
+          weekdayMask:
+            spread === "WEEKDAYS" ? normWeekdayMask(input.weekdayMask) || null : null,
+        },
+      ];
+    }
+    case "COUNT_RATE": {
+      const spread = input.spread ?? "ACTIVE_MONTHS";
+      const method = SPREAD_TO_METHOD[spread];
+      // WEIGHTED_BY_BASE distributes over whatever its base selector resolves
+      // to; the WEIGHTED_* stat spreads just point it at a stat line instead of
+      // the default base-salary curve (seeded on save).
+      const statBase = SPREAD_TO_STAT_BASE[spread];
+      const weighting: Partial<DefRow> = statBase
+        ? {
+            baseSelectorKind: "COMPONENTS",
+            baseRefDefIds: [systemStatDefId(ou, statBase)],
+          }
+        : {};
+      // On both defs: the loader writes cost yearlyValue = qty × rate and stat
+      // yearlyValue = qty, so a shared WEEKDAY_COUNT gives cost = qty × rate ×
+      // count[m] and stat = qty × count[m] with no resolver change.
+      const weekdayMask =
+        spread === "WEEKDAYS" ? normWeekdayMask(input.weekdayMask) || null : null;
+      return [
+        {
+          ...common,
+          ...weighting,
+          id: blockCostDefId(blockId),
+          spreadMethod: method,
+          label: input.label,
+          accountCode: input.accountCode ?? "",
+          increaseAware: input.increaseAware ?? false,
+          weekdayMask,
         },
         {
           ...common,
@@ -814,6 +918,7 @@ export function compileBlockDefs(
           accountCode: input.statsAccountCode ?? "",
           // Counts are quantities, never merit-increased.
           increaseAware: false,
+          weekdayMask,
         },
       ];
     }
@@ -901,7 +1006,17 @@ export function saveBlock(
     ...(input.blockType === "MULTIPLIER" && input.rateRules
       ? { rateRules: normalizeRateRules(input.rateRules) }
       : {}),
+    // Normalized for the same reason; absent when the block spreads as usual.
+    ...(input.blockType === "MULTIPLIER" && normCollapseMonths(input.collapseMonths)
+      ? { collapseMonths: normCollapseMonths(input.collapseMonths) }
+      : {}),
     spread: input.spread ?? "ACTIVE_MONTHS",
+    // Dropped unless the spread is WEEKDAYS, so a stale mask can never ride
+    // along on a block whose spread has since changed (the fixedDepartment
+    // discipline below).
+    ...(input.spread === "WEEKDAYS"
+      ? { weekdayMask: normWeekdayMask(input.weekdayMask) }
+      : {}),
     increaseAware: input.increaseAware ?? false,
     departmentMode: input.departmentMode ?? "POSITION",
     // Dropped unless FIXED, so a stale code can never ride along on a block
@@ -933,7 +1048,7 @@ export function saveBlock(
       // built. Walks COMBINE sides too.
       seedHeadsForBase(db, scope, input.base, opts);
     }
-    if (input.blockType === "COUNT_RATE") {
+    if (input.blockType === "COUNT_RATE" || input.blockType === "FLAT_MONTHLY") {
       // A "spread like hours / like FTE" block weights by a stat line, so that
       // head must exist before the defs referencing it are written.
       const statBase = SPREAD_TO_STAT_BASE[input.spread ?? "ACTIVE_MONTHS"];
@@ -968,8 +1083,8 @@ export function saveBlock(
            id, ou, kind, spread_method, stat_kind, label, account_code,
            department_mode, fixed_department, increase_aware, sort_order,
            base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
-           count_exempt, updated_at, deleted_at
-         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           count_exempt, collapse_months, weekday_mask, updated_at, deleted_at
+         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
            spread_method = excluded.spread_method,
            label = excluded.label,
@@ -983,6 +1098,8 @@ export function saveBlock(
            kpi_driver_id = excluded.kpi_driver_id,
            base_ref = excluded.base_ref,
            count_exempt = excluded.count_exempt,
+           collapse_months = excluded.collapse_months,
+           weekday_mask = excluded.weekday_mask,
            updated_at = excluded.updated_at,
            deleted_at = NULL
          WHERE cost_component_definitions.ou = excluded.ou`
@@ -1008,6 +1125,8 @@ export function saveBlock(
         id,
         def.baseRefJson,
         def.countExempt ? 1 : 0,
+        def.collapseMonths ? JSON.stringify(def.collapseMonths) : null,
+        def.weekdayMask,
         opts.now
       );
 

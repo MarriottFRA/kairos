@@ -6,7 +6,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
-import { MANUAL_INPUT_TABLES_SQL } from "../schema";
+import { MANUAL_INPUT_TABLES_SQL, applyManualInputKpiStats } from "../schema";
 import {
   deleteRows,
   healBlankRowIds,
@@ -41,6 +41,9 @@ function baseRow(overrides: Record<string, unknown> = {}) {
     costAccount: "A5001",
     statsAccount: "A9001",
     rate: null as number | null,
+    statsKpiDriverId: null as string | null,
+    statsKpiDivisor: null as number | null,
+    statsKpiFactor: null as number | null,
     stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     amounts: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
     spreadMode: null as SpreadMode | null,
@@ -88,6 +91,33 @@ describe("manual-input repo", () => {
     expect(row.spreadBaseAmount).toBe(1200);
     expect(row.increasePct).toBeCloseTo(0.05);
     expect(row.increaseMonth).toBe(6);
+  });
+
+  it("persists the KPI-stats rule and round-trips null as null", () => {
+    saveRow(
+      db,
+      baseRow({
+        statsKpiDriverId: "kpi-1",
+        statsKpiDivisor: 50000,
+        statsKpiFactor: 20,
+      })
+    );
+    const [row] = listRows(db, OU_A, SCEN);
+    expect(row.statsKpiDriverId).toBe("kpi-1");
+    expect(row.statsKpiDivisor).toBe(50000);
+    expect(row.statsKpiFactor).toBe(20);
+
+    // Null is the mode switch (stats typed) — it must survive an update.
+    saveRow(db, baseRow());
+    const [cleared] = listRows(db, OU_A, SCEN);
+    expect(cleared.statsKpiDriverId).toBeNull();
+    expect(cleared.statsKpiDivisor).toBeNull();
+    expect(cleared.statsKpiFactor).toBeNull();
+  });
+
+  it("normalizes a blank KPI driver id to NULL", () => {
+    saveRow(db, baseRow({ statsKpiDriverId: "   " }));
+    expect(listRows(db, OU_A, SCEN)[0].statsKpiDriverId).toBeNull();
   });
 
   it("normalizes short/ragged month vectors to length 12", () => {
@@ -165,5 +195,71 @@ describe("manual-input repo", () => {
     saveRow(db, baseRow({ id: "a" }));
     healBlankRowIds(db, OU_A, () => "minted-1");
     expect(listRows(db, OU_A, SCEN).map((r) => r.id)).toEqual(["a"]);
+  });
+});
+
+describe("applyManualInputKpiStats (secure v6)", () => {
+  // The table as it stood before v6 — no stats_kpi_* columns.
+  const PRE_V6_DDL = `
+    CREATE TABLE IF NOT EXISTS manual_input_rows (
+        id                 TEXT PRIMARY KEY,
+        ou                 TEXT NOT NULL,
+        scenario_id        TEXT NOT NULL DEFAULT '',
+        description        TEXT NOT NULL DEFAULT '',
+        department         TEXT NOT NULL DEFAULT '',
+        department_code    TEXT NOT NULL DEFAULT '',
+        cost_account       TEXT NOT NULL DEFAULT '',
+        stats_account      TEXT NOT NULL DEFAULT '',
+        rate               REAL,
+        stats_json         TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
+        amounts_json       TEXT NOT NULL DEFAULT '[0,0,0,0,0,0,0,0,0,0,0,0]',
+        spread_mode        TEXT,
+        spread_base_stats  REAL,
+        spread_base_amount REAL,
+        increase_pct       REAL NOT NULL DEFAULT 0,
+        increase_month     INTEGER NOT NULL DEFAULT 13 CHECK (increase_month BETWEEN 1 AND 13),
+        sort_order         INTEGER NOT NULL DEFAULT 0,
+        created_by         TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL,
+        deleted_at         TEXT
+    );
+  `;
+
+  it("adds the three columns to a pre-v6 store, idempotently", () => {
+    const legacy: Db = new Database(":memory:");
+    legacy.exec(PRE_V6_DDL);
+    legacy
+      .prepare(
+        `INSERT INTO manual_input_rows (id, ou, scenario_id, created_at, updated_at)
+         VALUES ('old-1', ?, ?, ?, ?)`
+      )
+      .run(OU_A, SCEN, NOW, NOW);
+
+    applyManualInputKpiStats(legacy);
+    applyManualInputKpiStats(legacy); // second run must be a no-op, not an error
+
+    // The pre-existing row survives with the feature off…
+    const [oldRow] = listRows(legacy, OU_A, SCEN);
+    expect(oldRow.statsKpiDriverId).toBeNull();
+    // …and the upgraded table takes the full new shape.
+    saveRow(
+      legacy,
+      baseRow({
+        id: "new-1",
+        statsKpiDriverId: "kpi-1",
+        statsKpiDivisor: 50000,
+        statsKpiFactor: 20,
+      })
+    );
+    const saved = listRows(legacy, OU_A, SCEN).find((r) => r.id === "new-1")!;
+    expect(saved.statsKpiDriverId).toBe("kpi-1");
+    expect(saved.statsKpiDivisor).toBe(50000);
+    expect(saved.statsKpiFactor).toBe(20);
+  });
+
+  it("is a no-op before the table exists", () => {
+    const empty: Db = new Database(":memory:");
+    expect(() => applyManualInputKpiStats(empty)).not.toThrow();
   });
 });

@@ -618,3 +618,103 @@ describe("golden master 6 — hotel-cluster weight", () => {
     }
   });
 });
+
+describe("golden master — 13th/14th-period salary (collapseMonths)", () => {
+  // SALARIED → 30/360 basis: gross = 1200 every ACTIVE month, so the yearly
+  // base is 14400 for a full year and 6000 for a January–May position.
+  const definitions = [
+    makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+    // 1/12 of the yearly base, all in June.
+    makeDef({ id: "thirteenth", spreadMethod: "PERCENT_OF", accountCode: "628900", collapseMonths: [6] }),
+    // 2/12 of the yearly base, split evenly June + December.
+    makeDef({ id: "fourteenth", spreadMethod: "PERCENT_OF", accountCode: "628950", collapseMonths: [6, 12] }),
+    // 1/12 of the yearly base, March or December — the proration shape.
+    makeDef({ id: "prorated", spreadMethod: "PERCENT_OF", accountCode: "628960", collapseMonths: [3, 12] }),
+  ];
+  const values = (id: string) => [
+    makeValue(id, "thirteenth", { rate: 1 / 12 }),
+    makeValue(id, "fourteenth", { rate: 2 / 12 }),
+    makeValue(id, "prorated", { rate: 1 / 12 }),
+  ];
+  const zeros = new Array(MONTHS).fill(0);
+  const only = (entries: Array<[number, number]>) => {
+    const out = [...zeros];
+    for (const [month, value] of entries) out[month - 1] = value;
+    return out;
+  };
+
+  it("books the collapsed figures for a full-year position", () => {
+    const input = makeInput({
+      definitions,
+      positions: [makePosition({ id: "p1", monthlyBaseSalary: 1200 })],
+      componentValues: values("p1"),
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p1"));
+
+    // 1/12 × 14400 = 1200, all in June.
+    expectMonths(months(lines, "thirteenth"), only([[6, 1200]]));
+    // 2/12 × 14400 = 2400, split evenly: 1200 in June, 1200 in December.
+    expectMonths(months(lines, "fourteenth"), only([[6, 1200], [12, 1200]]));
+    // Both chosen months active: 1/12 × 14400 = 1200, 600 each March/December.
+    expectMonths(months(lines, "prorated"), only([[3, 600], [12, 600]]));
+  });
+
+  it("prorates through the base and drops inactive chosen months for a leaver", () => {
+    const input = makeInput({
+      definitions,
+      positions: [
+        makePosition({
+          id: "p2",
+          monthlyBaseSalary: 1200,
+          seasonality: [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], // leaves after May
+        }),
+      ],
+      componentValues: values("p2"),
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p2"));
+
+    // June is inactive and the only chosen month: the cost is dropped.
+    expectMonths(months(lines, "thirteenth"), zeros);
+    // June AND December inactive: dropped too.
+    expectMonths(months(lines, "fourteenth"), zeros);
+    // December inactive, March active: the whole prorated figure lands in
+    // March — 1/12 × (1200 × 5 active months) = 500.
+    expectMonths(months(lines, "prorated"), only([[3, 500]]));
+  });
+});
+
+describe("golden master — WEEKDAY_COUNT, per-occurrence weekday spread", () => {
+  // FIXTURE_YEAR 2027 begins on a Friday, so the year holds 53 of them.
+  // Hand-counted Fridays per month: Jan 5 (1, 8, 15, 22, 29), Feb 4, Mar 4,
+  // Apr 5, May 4, Jun 4, Jul 5, Aug 4, Sep 4, Oct 5, Nov 4, Dec 5 (3, 10, 17,
+  // 24, 31). The line books the per-occurrence amount once per Friday: a
+  // 5-Friday month carries 500, a 4-Friday month 400 — the yearly total
+  // (5300) follows the calendar rather than any entered figure.
+  it("books amount × Friday-count each month", () => {
+    const input = makeInput({
+      definitions: [
+        makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+        makeDef({
+          id: "music",
+          spreadMethod: "WEEKDAY_COUNT",
+          weekdayMask: 1 << 5, // Fridays (Sunday-first bit order)
+          accountCode: "628970",
+        }),
+      ],
+      positions: [makePosition({ id: "p1", monthlyBaseSalary: 1200 })],
+      componentValues: [makeValue("p1", "music", { yearlyValue: 100 })],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const lines = simulate(compiled.plan).positionLines(posId("p1"));
+
+    expectMonths(
+      months(lines, "music"),
+      [500, 400, 400, 500, 400, 400, 500, 400, 400, 500, 400, 500]
+    );
+  });
+});

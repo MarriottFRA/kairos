@@ -43,6 +43,12 @@ import { DEFAULT_WEEKLY_HOURS } from "../../shared/positionDefaults";
 import { listAllocations } from "../allocations/repo";
 import { aggregateDepartmentMetrics } from "../../shared/allocations/compute";
 import { listRows as listManualRows } from "../manualInput/repo";
+import { getSeries } from "../kpiDrivers/repo";
+import type { KpiDriverId } from "../../shared/kpiDrivers/ipc";
+import {
+  ManualKpiSeriesSlice,
+  resolveManualRowStats,
+} from "../../shared/manualInput/rowMath";
 import { loadScenarioValues } from "./positionsRepo";
 import { compile, simulate } from "../../shared/engine/simulate";
 import type { OutputsResponse } from "../../shared/positions/ipc";
@@ -129,8 +135,30 @@ export async function runRecalc(
   // for its in-memory aggregate); this is the projection step that was missing.
   const buyoutLines = projectBuyoutLines(input.buyouts);
 
+  // KPI-driven manual rows derive their stats here, from the same cached
+  // series the engine's KPI blocks read — the caches live in the plaintext
+  // store, the rows in the encrypted one, so this orchestrator (holding both
+  // handles) is where they meet. An empty cache (driver deleted — deleteDriver
+  // drops its values — or the budget never pulled on this machine) resolves to
+  // null and the row falls back to its stored snapshot. Lazy on purpose: the
+  // KPI table is only touched when a driven row actually asks, so a scenario
+  // without the feature (or a minimal test database without the table) never
+  // pays for it.
+  const kpiSeriesCache = new Map<string, ManualKpiSeriesSlice[] | null>();
+  const kpiLookup = (driverId: string): ManualKpiSeriesSlice[] | null => {
+    let slices = kpiSeriesCache.get(driverId);
+    if (slices === undefined) {
+      const series = getSeries(localDb, scope.ou, driverId as KpiDriverId);
+      slices = series.length > 0 ? series : null;
+      kpiSeriesCache.set(driverId, slices);
+    }
+    return slices;
+  };
   const manualLines = projectManualLines(
-    listManualRows(secureDb, scope.ou, scenarioId)
+    resolveManualRowStats(
+      listManualRows(secureDb, scope.ou, scenarioId),
+      kpiLookup
+    )
   );
 
   // Allocations spread over the SAME department metrics the Allocations page

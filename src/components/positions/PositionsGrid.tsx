@@ -8,16 +8,19 @@
  * closes typing AND paste in one place.
  */
 
-import { memo, useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import CircularProgress from "@mui/material/CircularProgress";
 import Tooltip from "@mui/material/Tooltip";
 import Box from "@mui/material/Box";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
+import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
+import Typography from "@mui/material/Typography";
 import { alpha, SxProps, Theme } from "@mui/material/styles";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlined";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlined";
@@ -66,6 +69,10 @@ import CellSelectionStats, {
   CELL_SELECTION_PERF_SX,
 } from "../common/CellSelectionStats";
 import { makeCellRangePasteSplitter } from "../common/cellRangePaste";
+import {
+  copyGridSelectionToClipboard,
+  pasteClipboardIntoGrid,
+} from "../common/gridClipboardActions";
 import {
   buildColumnGroupingModel,
   buildColumns,
@@ -126,6 +133,14 @@ function rowClassNameFor(
   };
 }
 
+// Translucent tints below are painted as background-image gradients rather
+// than background-color so they composite over MUI's opaque pinned-cell and
+// pinned-header backgrounds: a pinned column keeps its tint without letting
+// the content scrolling beneath ghost through the frozen block. (A tint set
+// as background-color at this specificity would replace the opaque pinned
+// base, because sx rules inject after the grid's root styles.)
+const tint = (color: string) => `linear-gradient(${color}, ${color})`;
+
 const GRID_SX: SxProps<Theme> = {
   borderRadius: 2,
   // Why the grid is permanently unselectable: a performance fix every
@@ -160,7 +175,7 @@ const GRID_SX: SxProps<Theme> = {
   },
   "& .pos-cell--derived": { color: "text.secondary" },
   "& .pos-cell--warn": {
-    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.25),
+    backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.25)),
     fontWeight: 700,
   },
   // Retained but not budgeted — visibly out of the plan without being
@@ -187,6 +202,17 @@ const GRID_SX: SxProps<Theme> = {
       bgcolor: (theme) => alpha(theme.palette.warning.main, 0.16),
     },
   },
+  // Pinned cells are opaque (they must hide what scrolls beneath), which also
+  // hides the row-status tints painted on the row element behind them — so
+  // those two tints are re-applied to pinned cells directly.
+  "& .pos-row--locked .MuiDataGrid-cell--pinnedLeft, & .pos-row--locked .MuiDataGrid-cell--pinnedRight":
+    {
+      backgroundImage: (theme) => tint(alpha(theme.palette.text.disabled, 0.06)),
+    },
+  "& .pos-row--needsDepartment .MuiDataGrid-cell--pinnedLeft, & .pos-row--needsDepartment .MuiDataGrid-cell--pinnedRight":
+    {
+      backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.1)),
+    },
   "& .pos-cell--masked": {
     fontFamily: "'IBM Plex Mono', monospace",
     color: "text.disabled",
@@ -195,57 +221,57 @@ const GRID_SX: SxProps<Theme> = {
   // Section tints — one hue per section, strong on the banner and faint
   // on the columns it spans, which is what ties the two rows together.
   "& .pos-band--pii": {
-    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.22),
+    backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.22)),
   },
   "& .pos-col--pii": {
-    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.07),
+    backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.07)),
   },
   // Employee is PII's sibling band — same hue, half the strength, so the
   // two read as related without the identity block losing its emphasis.
   "& .pos-band--employee": {
-    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.11),
+    backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.11)),
   },
   "& .pos-col--employee": {
-    bgcolor: (theme) => alpha(theme.palette.warning.main, 0.035),
+    backgroundImage: (theme) => tint(alpha(theme.palette.warning.main, 0.035)),
   },
   "& .pos-band--contract": {
-    bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.22),
+    backgroundImage: (theme) => tint(alpha(theme.palette.secondary.main, 0.22)),
   },
   "& .pos-col--contract": {
-    bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.06),
+    backgroundImage: (theme) => tint(alpha(theme.palette.secondary.main, 0.06)),
   },
   "& .pos-band--seasonality": {
-    bgcolor: (theme) => alpha(theme.palette.info.main, 0.22),
+    backgroundImage: (theme) => tint(alpha(theme.palette.info.main, 0.22)),
   },
   "& .pos-col--seasonality": {
-    bgcolor: (theme) => alpha(theme.palette.info.main, 0.06),
+    backgroundImage: (theme) => tint(alpha(theme.palette.info.main, 0.06)),
   },
   "& .pos-band--basicSalary": {
-    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.22),
+    backgroundImage: (theme) => tint(alpha(theme.palette.primary.main, 0.22)),
   },
   "& .pos-col--basicSalary": {
-    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.06),
+    backgroundImage: (theme) => tint(alpha(theme.palette.primary.main, 0.06)),
   },
   "& .pos-band--vacation": {
-    bgcolor: (theme) => alpha(theme.palette.success.main, 0.22),
+    backgroundImage: (theme) => tint(alpha(theme.palette.success.main, 0.22)),
   },
   "& .pos-col--vacation": {
-    bgcolor: (theme) => alpha(theme.palette.success.main, 0.06),
+    backgroundImage: (theme) => tint(alpha(theme.palette.success.main, 0.06)),
   },
   // Blocks get their own hue outside the section palette (violet), so
   // user-defined calculation bands read as such at a glance.
   "& .pos-band--blocks": {
-    bgcolor: alpha("#7e57c2", 0.24),
+    backgroundImage: tint(alpha("#7e57c2", 0.24)),
   },
   "& .pos-col--blocks": {
-    bgcolor: alpha("#7e57c2", 0.07),
+    backgroundImage: tint(alpha("#7e57c2", 0.07)),
   },
   // Editable cells read as inputs (same affordance as the calendar grid).
   "& .MuiDataGrid-cell--editable": {
-    bgcolor: (theme) => alpha(theme.palette.primary.main, 0.04),
+    backgroundImage: (theme) => tint(alpha(theme.palette.primary.main, 0.04)),
     cursor: "text",
     "&:hover": {
-      bgcolor: (theme) => alpha(theme.palette.primary.main, 0.1),
+      backgroundImage: (theme) => tint(alpha(theme.palette.primary.main, 0.1)),
     },
   },
   "& .MuiDataGrid-cell:focus-within": { outlineOffset: -2 },
@@ -651,10 +677,11 @@ function PositionsGrid({
           columnMenuSelectColumnItem: SelectColumnMenuItem,
           columnMenuUserItem: RemoveColumnMenuItem,
         }}
-        // MUI's own items claim 10 (Sort), 20 (Filter) and 30 (Columns) — ours
-        // sit between and after rather than colliding with Filter for a slot.
+        // MUI's own items claim 10 (Sort), 15 (Pin), 20 (Filter), 23
+        // (Aggregation), 27 (Grouping) and 28 (Manage) — ours sit between
+        // Pin and Filter, and after everything, rather than colliding.
         slotProps={{
-          columnMenuSelectColumnItem: { displayOrder: 15, onSelectColumn },
+          columnMenuSelectColumnItem: { displayOrder: 17, onSelectColumn },
           columnMenuUserItem: { displayOrder: 40, removableKeys, onRemoveField },
         }}
       />
@@ -1035,6 +1062,66 @@ function PositionsGrid({
     [apiRef]
   );
 
+  // ── Right-click Copy / Paste ──
+  // Chording Ctrl+C/Ctrl+V is not comfortable for everyone, so both clipboard
+  // actions are also on the cell's context menu. The menu re-enters MUI's own
+  // keyboard pipeline (see gridClipboardActions), so a menu Copy/Paste and a
+  // keyboard one are indistinguishable: same range serializer, same Excel-
+  // shaped splitter, and every write still passes isCellEditable +
+  // processRowUpdate — pasting onto a masked or locked cell stays a no-op.
+  //
+  // The menu lives on the wrapper Box, outside the grid: opening it re-renders
+  // the wrapper only, and every prop handed to DataGridPremium keeps its
+  // identity, so the grid's own memo skips the render entirely.
+  const [cellMenu, setCellMenu] = useState<{
+    position: { top: number; left: number };
+    id: GridRowId;
+    field: string;
+  } | null>(null);
+
+  const closeCellMenu = useCallback(() => setCellMenu(null), []);
+
+  const handleGridContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      const target = event.target as HTMLElement;
+      const cellEl = target.closest<HTMLElement>(".MuiDataGrid-cell[data-field]");
+      const field = cellEl?.dataset.field;
+      const id = cellEl?.closest<HTMLElement>("[data-id]")?.dataset.id;
+      // Headers, the gutter columns and empty space keep the default menu.
+      if (!cellEl || !field || id === undefined || !isDataColumn(field)) return;
+      // Group headers and the aggregation footer are cells too, but not ones
+      // a clipboard action can mean anything on.
+      if (apiRef.current?.getRowNode(id)?.type !== "leaf") return;
+      event.preventDefault();
+      // Excel's convention: right-click inside the selected range acts on the
+      // range; outside it, the selection moves to the clicked cell first — so
+      // "Paste" always lands where the user just pointed.
+      if (!apiRef.current?.isCellSelected(id, field)) {
+        apiRef.current?.selectCellRange({ id, field }, { id, field });
+        apiRef.current?.setCellFocus(id, field);
+      }
+      setCellMenu({
+        position: { top: event.clientY - 4, left: event.clientX + 2 },
+        id,
+        field,
+      });
+    },
+    [apiRef]
+  );
+
+  const handleMenuCopy = useCallback(() => {
+    closeCellMenu();
+    copyGridSelectionToClipboard(apiRef);
+  }, [apiRef, closeCellMenu]);
+
+  const handleMenuPaste = useCallback(() => {
+    const menu = cellMenu;
+    closeCellMenu();
+    // Fire-and-forget: the paste helper resolves after the clipboard read, by
+    // which point the menu has closed and returned focus to the grid.
+    if (menu) void pasteClipboardIntoGrid(apiRef, menu);
+  }, [apiRef, cellMenu, closeCellMenu]);
+
   // ── Undo/redo (Ctrl+Z / Ctrl+Y) ──
   // The grid's built-in history (MUI v9, on by default) answers the shortcut,
   // but its handlers restore rows with apiRef.updateRows — the DISPLAY cache —
@@ -1145,10 +1232,6 @@ function PositionsGrid({
     // Deliberately computed once per mount: the grid only reads initialState
     // on mount, so later changes to restoredState must not retrigger this.
     const merged = restoredState ? { ...defaults, ...restoredState } : defaults;
-    // Pinning is off (see disableColumnPinning), but layouts saved while the
-    // gutter and identity block were frozen still carry the band — dropped here
-    // so the next save writes it out of the stored layout for good.
-    delete (merged as Record<string, unknown>).pinnedColumns;
     // A restored `columns` replaces the defaults wholesale, so the collapse
     // default and the summary column's slot are re-applied over it here.
     let healed = healCollapsedFamilies(merged, monthKeys);
@@ -1165,7 +1248,10 @@ function PositionsGrid({
   // positioned. It adds a DOM node and nothing else: no state, no prop on the
   // grid, and the pill re-renders on its own without involving either.
   return (
-    <Box sx={{ position: "relative", height: "100%", width: "100%" }}>
+    <Box
+      sx={{ position: "relative", height: "100%", width: "100%" }}
+      onContextMenu={handleGridContextMenu}
+    >
       <DataGridPremium
         apiRef={apiRef}
         rows={gridRows}
@@ -1176,11 +1262,6 @@ function PositionsGrid({
         rowGroupingModel={rowGroupingModel}
         cellSelection
         checkboxSelection
-        // No frozen columns: a pinned band renders as its own grid section on
-        // every scroll and buys little at this width. Off wholesale rather than
-        // merely unpinned, so the column menu stops offering it and no saved
-        // layout can quietly bring the split back.
-        disableColumnPinning
         // Clicking a cell must not clear a selection the user built to act on.
         disableRowSelectionOnClick
         onRowSelectionModelChange={handleSelectionChange}
@@ -1207,6 +1288,32 @@ function PositionsGrid({
       />
       {/* Cleared of the footer, which prints the row and selected-row counts. */}
       <CellSelectionStats apiRef={apiRef} bottom={56} />
+      <Menu
+        open={cellMenu !== null}
+        onClose={closeCellMenu}
+        anchorReference="anchorPosition"
+        anchorPosition={cellMenu?.position}
+      >
+        <MenuItem onClick={handleMenuCopy}>
+          <ListItemIcon>
+            <ContentCopyIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Copy</ListItemText>
+          {/* The hint teaches the shortcut without requiring it. */}
+          <Typography variant="body2" color="text.secondary" sx={{ ml: 3 }}>
+            Ctrl+C
+          </Typography>
+        </MenuItem>
+        <MenuItem onClick={handleMenuPaste}>
+          <ListItemIcon>
+            <ContentPasteIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Paste</ListItemText>
+          <Typography variant="body2" color="text.secondary" sx={{ ml: 3 }}>
+            Ctrl+V
+          </Typography>
+        </MenuItem>
+      </Menu>
     </Box>
   );
 }

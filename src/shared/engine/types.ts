@@ -74,6 +74,11 @@ export interface SyncMeta {
  *  VACATION_WEIGHTED      yearly value distributed by the position's vacation
  *                         monthly weights (normalized), × seasonality[m].
  *                         Lowered to DIRECT at compile.
+ *  WEEKDAY_COUNT          per-occurrence: the value is booked once for each
+ *                         day of the month falling on a weekday in the def's
+ *                         weekdayMask (a 5-Friday month books 5×), ×
+ *                         seasonality[m]. The yearly total follows the
+ *                         calendar. Lowered to DIRECT at compile.
  *  REVENUE_WEIGHTED       reserved — rejected by the compiler until revenue
  *                         data exists in the app
  */
@@ -87,6 +92,7 @@ export type SpreadMethod =
   | "QTY_TIMES_RATE"
   | "FLAT_MONTHLY"
   | "VACATION_WEIGHTED"
+  | "WEEKDAY_COUNT"
   | "REVENUE_WEIGHTED";
 
 /**
@@ -269,6 +275,27 @@ export interface CostComponentDefinition extends SyncMeta {
    */
   countExempt?: boolean;
   /**
+   * Land the line's WHOLE yearly result in these months (1-based) instead of
+   * leaving it spread as computed — the 13th/14th-period-salary shape. The
+   * line is calculated exactly as usual first, then redistributed: an even
+   * split over the chosen months the position is ACTIVE in (seasonality > 0);
+   * a chosen-but-inactive month gets nothing, and if NO chosen month is
+   * active the cost is dropped entirely (the standing invariant: a position
+   * not in the plan for a month costs nothing that month). Absent = today's
+   * behaviour, untouched. Spread-method-agnostic (a line post-op), though
+   * currently only MULTIPLIER blocks set it (PERCENT_OF and the KPI
+   * DIRECT_ABS lowering). See collapseWeights / Op.COLLAPSE_LINE.
+   */
+  collapseMonths?: number[];
+  /**
+   * Which weekdays a WEEKDAY_COUNT spread books on — a 7-bit mask in the
+   * Sunday-first bit order of CalendarYear.weekendMask (bit 0 = Sunday …
+   * bit 6 = Saturday; `1 << 5` = Fridays). Required when spreadMethod ===
+   * "WEEKDAY_COUNT"; absent/0 yields a zero line (the blocks layer refuses to
+   * save an empty mask, so the engine just follows the missing-=-zero rule).
+   */
+  weekdayMask?: number;
+  /**
    * When set, this SPREAD def is KPI-driven: at engine load the KPI's
    * precalculated series (× the per-position multiplier in ComponentValue.rate)
    * is resolved into monthlyValues and the def is rewritten to spreadMethod
@@ -381,6 +408,37 @@ export function serviceSeries(
     out[m] = running;
   }
   return out;
+}
+
+/**
+ * CostComponentDefinition.collapseMonths resolved to twelve redistribution
+ * weights for one position: an even 1/k split over the chosen months that are
+ * active (seasonality > 0). A chosen-but-inactive month weighs 0, and when no
+ * chosen month is active every weight is 0 — the cost is DROPPED, keeping the
+ * invariant that an inactive month costs nothing (the base sum is already
+ * prorated, so this only decides where the prorated amount may land). That
+ * drop-vs-shift policy lives HERE and nowhere else.
+ *
+ * Shared by the compiler and the reference implementation for the same reason
+ * bankHolidayCoefficient is: the parity test between them only means something
+ * if they compute this the same way, once.
+ */
+export function collapseWeights(
+  months: readonly number[],
+  seasonality: readonly number[]
+): number[] {
+  const w = new Array<number>(MONTHS).fill(0);
+  let k = 0;
+  for (const month of months) {
+    const m = month - 1;
+    if (m >= 0 && m < MONTHS && seasonality[m] > 0 && w[m] === 0) {
+      w[m] = 1;
+      k++;
+    }
+  }
+  if (k === 0) return w;
+  for (let m = 0; m < MONTHS; m++) if (w[m] !== 0) w[m] = 1 / k;
+  return w;
 }
 
 export interface SsBracket {
@@ -571,6 +629,10 @@ export interface Scenario extends SyncMeta {
 /** Day counts per month for the two spread bases. Built from the app's
  *  calendar tables by calendarContext.ts. */
 export interface CalendarContext {
+  /** The plan year the day counts describe. WEEKDAY_COUNT resolves its
+   *  per-month occurrence counts from it; the compiler and reference.ts both
+   *  read THIS field (never Scenario.year) so the two cannot disagree. */
+  year: number;
   /** Weighted/real productive days per month (hourly-staff basis, and the
    *  basis for the HOURS stat regardless of pay type). */
   realDays: Float64Array;

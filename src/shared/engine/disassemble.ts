@@ -135,6 +135,9 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
       case Op.COMBINE_ACC:
         detail = `rate=${fmt(pool[pp])} op=${COMBINE_OPS[pool[pp + 1]] ?? pool[pp + 1]}`;
         break;
+      case Op.COLLAPSE_LINE:
+        detail = `weights=${fmtVector(pool, pp, MONTHS)}`;
+        break;
     }
 
     rows.push(

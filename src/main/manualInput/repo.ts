@@ -30,6 +30,9 @@ interface DbRow {
   cost_account: string;
   stats_account: string;
   rate: number | null;
+  stats_kpi_driver_id: string | null;
+  stats_kpi_divisor: number | null;
+  stats_kpi_factor: number | null;
   stats_json: string;
   amounts_json: string;
   spread_mode: string | null;
@@ -68,6 +71,9 @@ function toRow(row: DbRow): ManualInputRow {
     costAccount: row.cost_account,
     statsAccount: row.stats_account,
     rate: row.rate ?? null,
+    statsKpiDriverId: row.stats_kpi_driver_id ?? null,
+    statsKpiDivisor: row.stats_kpi_divisor ?? null,
+    statsKpiFactor: row.stats_kpi_factor ?? null,
     stats: parseVector(row.stats_json),
     amounts: parseVector(row.amounts_json),
     spreadMode: (row.spread_mode as SpreadMode | null) ?? null,
@@ -200,6 +206,9 @@ export function saveRow(
     costAccount: string;
     statsAccount: string;
     rate: number | null;
+    statsKpiDriverId: string | null;
+    statsKpiDivisor: number | null;
+    statsKpiFactor: number | null;
     stats: number[];
     amounts: number[];
     spreadMode: SpreadMode | null;
@@ -217,6 +226,9 @@ export function saveRow(
     row.rate === null || row.rate === undefined || !Number.isFinite(Number(row.rate))
       ? null
       : Number(row.rate);
+  const statsKpiDriverId = String(row.statsKpiDriverId ?? "").trim() || null;
+  const statsKpiDivisor = toBaseOrNull(row.statsKpiDivisor);
+  const statsKpiFactor = toBaseOrNull(row.statsKpiFactor);
   const spreadBaseStats = toBaseOrNull(row.spreadBaseStats);
   const spreadBaseAmount = toBaseOrNull(row.spreadBaseAmount);
   const increaseMonth =
@@ -229,9 +241,10 @@ export function saveRow(
   const upsert = db.prepare(`
     INSERT INTO manual_input_rows
       (id, ou, scenario_id, description, department, department_code, cost_account, stats_account, rate,
+       stats_kpi_driver_id, stats_kpi_divisor, stats_kpi_factor,
        stats_json, amounts_json, spread_mode, spread_base_stats, spread_base_amount,
        increase_pct, increase_month, sort_order, created_by, created_at, updated_at, deleted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     ON CONFLICT(id) DO UPDATE SET
       scenario_id        = excluded.scenario_id,
       description        = excluded.description,
@@ -240,6 +253,9 @@ export function saveRow(
       cost_account       = excluded.cost_account,
       stats_account      = excluded.stats_account,
       rate               = excluded.rate,
+      stats_kpi_driver_id = excluded.stats_kpi_driver_id,
+      stats_kpi_divisor  = excluded.stats_kpi_divisor,
+      stats_kpi_factor   = excluded.stats_kpi_factor,
       stats_json         = excluded.stats_json,
       amounts_json       = excluded.amounts_json,
       spread_mode        = excluded.spread_mode,
@@ -262,6 +278,9 @@ export function saveRow(
       String(row.costAccount ?? ""),
       String(row.statsAccount ?? ""),
       rate,
+      statsKpiDriverId,
+      statsKpiDivisor,
+      statsKpiFactor,
       JSON.stringify(normalizeMonthVector(row.stats)),
       JSON.stringify(normalizeMonthVector(row.amounts)),
       normSpreadMode(row.spreadMode),

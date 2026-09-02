@@ -269,10 +269,12 @@ export const DEPARTMENT_CODE_KEY = "departmentCode";
  * See engineInput.readPositionAccounts / applyPositionAccounts.
  */
 /**
- * The read-only "HC Stats" column: displays POSITION_COUNT_ACCOUNT, the account
- * the permanent position-count head always books to. COMPUTED and never stored —
- * the value is a constant, surfaced so the pinned account is discoverable from
- * the grid instead of only appearing, unexplained, in Results.
+ * The read-only "HC Stats" column: displays the account the permanent
+ * position-count head books for the row — POSITION_COUNT_ACCOUNT for every
+ * Classification except Buyout Labour, which books no heads and shows blank
+ * (see systemAccounts.positionCountAccountForJobType). COMPUTED and never
+ * stored, surfaced so the pinned account is discoverable from the grid instead
+ * of only appearing, unexplained, in Results.
  */
 export const HEADCOUNT_STATS_ACCOUNT_KEY = "headcountStatsAccount";
 

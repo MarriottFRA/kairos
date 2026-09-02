@@ -45,17 +45,22 @@ export const BLOCK_TYPES: readonly BlockType[] = [
 export const USER_ADDABLE_BLOCK_TYPES: readonly BlockType[] = BLOCK_TYPES;
 
 /**
- * How a COUNT_RATE block distributes its yearly figures across months.
+ * How a COUNT_RATE or FLAT_MONTHLY block distributes its figures across months.
  *
  * The WEIGHTED_* family all compile to the engine's WEIGHTED_BY_BASE, which
  * distributes a yearly figure over whatever its base selector resolves to — so
  * "spread like hours" is that method pointed at the system hours stat, and
  * needs no engine work. See SPREAD_TO_STAT_BASE.
+ *
+ * For a FLAT_MONTHLY block the choice also decides what the single "amount"
+ * MEANS: per month for ACTIVE_MONTHS (the default — today's behaviour), a
+ * yearly total for the other spreads, per occurrence for WEEKDAYS.
  */
 export type BlockSpread =
   | "ACTIVE_MONTHS" // evenly over the position's working months
   | "DAYS" // proportional to working days per month
   | "VACATION_PATTERN" // following the position's vacation weights
+  | "WEEKDAYS" // per occurrence: once for each selected weekday in the month
   | "WEIGHTED_BASE" // proportional to the monthly base-salary curve
   | "WEIGHTED_HOURS_WORKED" // proportional to the hours-worked curve
   | "WEIGHTED_HOURS_PAID" // proportional to the hours-paid curve
@@ -110,6 +115,13 @@ export type BlockBaseRef =
    */
   | { kind: "SERVICE"; mode: "MONTH" | "TOTAL" }
   | { kind: "VACATION" }
+  /**
+   * The seeded Vacation Accrual head (sys-accrual:<ou>), referenced by id via
+   * the COMPONENTS selector exactly like STAT — the accrual movement is an
+   * ordinary engine line, not a scratch series. Note the line nets to zero
+   * over the year by construction, so a multiplier on it does too.
+   */
+  | { kind: "ACCRUAL" }
   /**
    * The compound block: two bases and an operation between them, so the
    * "multiplier" can be another block rather than a typed number. COMPOSITE
@@ -264,8 +276,20 @@ export interface BlockInput {
    *  rate column (which the grid then shows read-only). See
    *  shared/blocks/rateRules.ts for the config shape and evaluation contract. */
   rateRules?: RateRulesConfig;
-  /** COUNT_RATE only; defaults to ACTIVE_MONTHS. */
+  /** MULTIPLIER only: land the block's WHOLE yearly result in these months
+   *  (1-based) instead of spreading with the base — the 13th/14th-period
+   *  salary shape. Split evenly across the chosen months a position is active
+   *  in; a chosen month the position is inactive in gets nothing, and when
+   *  none is active the cost is dropped. Absent = spread with the base. */
+  collapseMonths?: number[];
+  /** COUNT_RATE and FLAT_MONTHLY; defaults to ACTIVE_MONTHS. For FLAT_MONTHLY
+   *  the choice also decides the amount's unit — see BlockSpread. */
   spread?: BlockSpread;
+  /** WEEKDAYS spread only: which weekdays the value books on, as a 7-bit mask
+   *  in the Sunday-first bit order of CalendarYear.weekendMask (bit 0 =
+   *  Sunday … bit 6 = Saturday; `1 << 5` = Fridays). At least one bit is
+   *  required when spread === "WEEKDAYS". */
+  weekdayMask?: number;
   /** Apply the merit increase from the position's increase month onward. */
   increaseAware?: boolean;
   /** Where the cost line books. See BlockDto for the semantics; PER_ROW is
@@ -309,7 +333,12 @@ export interface BlockDto {
    *  rate from these rules at input-build time (applyRateRules) and the grid's
    *  rate column becomes the read-only derived display. */
   rateRules?: RateRulesConfig;
+  /** MULTIPLIER only — see BlockInput. Def-level: the grid's per-row columns
+   *  are unchanged (blockInputSlots does not read this). */
+  collapseMonths?: number[];
   spread: BlockSpread;
+  /** WEEKDAYS spread only — see BlockInput.weekdayMask. */
+  weekdayMask?: number;
   increaseAware: boolean;
   departmentMode: BlockDepartmentMode;
   /** FIXED only: the department code every row books to. */
@@ -415,6 +444,7 @@ export const SPREAD_TO_METHOD: Record<BlockSpread, SpreadMethod> = {
   ACTIVE_MONTHS: "FLAT_PER_ACTIVE_MONTH",
   DAYS: "FLAT_PER_DAY",
   VACATION_PATTERN: "VACATION_WEIGHTED",
+  WEEKDAYS: "WEEKDAY_COUNT",
   WEIGHTED_BASE: "WEIGHTED_BY_BASE",
   WEIGHTED_HOURS_WORKED: "WEIGHTED_BY_BASE",
   WEIGHTED_HOURS_PAID: "WEIGHTED_BY_BASE",
@@ -435,7 +465,9 @@ export const SPREAD_TO_STAT_BASE: Partial<
   WEIGHTED_FTE: "FTE",
 };
 
-/** Dropdown labels + hints for the COUNT_RATE spread choice. */
+/** Dropdown labels + hints for the block spread choice (COUNT_RATE wording;
+ *  the dialog overrides some hints for FLAT_MONTHLY, whose amount changes
+ *  unit with the choice). */
 export const BLOCK_SPREAD_META: Record<
   BlockSpread,
   { label: string; hint: string }
@@ -451,6 +483,10 @@ export const BLOCK_SPREAD_META: Record<
   VACATION_PATTERN: {
     label: "Like vacation",
     hint: "Following the position's vacation weights.",
+  },
+  WEEKDAYS: {
+    label: "On chosen weekdays",
+    hint: "Booked once for each selected weekday in the month — a month with five Fridays books five times.",
   },
   WEIGHTED_BASE: {
     label: "Like salary",

@@ -27,6 +27,7 @@
 
 import * as XLSX from "xlsx";
 import { normalizeOu } from "../positions/ouScope";
+import { PUSH_MONTHS } from "../../shared/bstPush/ipc";
 
 /** A row is addressable iff column B is a `dddd-dddddd` combo. */
 const COMBO_RE = /^\d{4}-\d{6}$/;
@@ -44,8 +45,28 @@ export interface ComboLocation {
   row: number;
   /** Column A's description, for the report. */
   description: string | null;
+  /** Column C's text — where the BST labels its allocation rows. */
+  columnC: string | null;
+  /** True when column C marks this row as an allocation. */
+  isAllocation: boolean;
+  /**
+   * Jan..Dec: the month cell is locked under sheet protection. SheetJS cannot
+   * see protection, so this starts all-false and is filled in afterwards by
+   * readProtection's `annotateProtection`.
+   */
+  lockedMonths: boolean[];
   /** True when this combo appears on more than one row of the sheet. */
   duplicate: boolean;
+}
+
+/**
+ * True for the column C labels the BST puts on allocation rows: "Allocated
+ * from 0120-759101", "Alloc from 0090", "Allocation from 0363", … A bare
+ * substring test on purpose — every observed spelling contains it, and the
+ * preview badges each match so a false positive is visible before it matters.
+ */
+export function isAllocationLabel(text: string | null): boolean {
+  return text != null && /allo/i.test(text);
 }
 
 export interface BstTarget {
@@ -115,6 +136,11 @@ function indexSheet(ws: XLSX.WorkSheet, sheet: string): ComboLocation[] {
     const descCell = ws[XLSX.utils.encode_cell({ r, c: 0 })] as
       | XLSX.CellObject
       | undefined;
+    const labelCell = ws[XLSX.utils.encode_cell({ r, c: 2 })] as
+      | XLSX.CellObject
+      | undefined;
+    const columnC =
+      typeof labelCell?.v === "string" ? labelCell.v.trim() || null : null;
 
     occurrences.set(value, (occurrences.get(value) ?? 0) + 1);
     found.push({
@@ -123,6 +149,9 @@ function indexSheet(ws: XLSX.WorkSheet, sheet: string): ComboLocation[] {
       row: r + 1,
       description:
         typeof descCell?.v === "string" ? descCell.v.trim() || null : null,
+      columnC,
+      isAllocation: isAllocationLabel(columnC),
+      lockedMonths: Array.from({ length: PUSH_MONTHS }, () => false),
       duplicate: false,
     });
   }

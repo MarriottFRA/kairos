@@ -101,6 +101,7 @@ export default function ClearRulesCard({
           <Typography variant="caption" sx={{ color: "text.secondary" }}>
             Accounts a <strong>Replace</strong> or <strong>Clear</strong> month zeroes first.
             Matching {totalClearedRows.toLocaleString()} row(s) in this file.
+            Allocation rows and locked cells follow the push settings below.
           </Typography>
         </Box>
         <Stack direction="row" spacing={0.75}>

@@ -1,10 +1,11 @@
 /**
  * Saved-layout repairs for the Positions grid.
  * -----------------------------------------------------------
- * The grid's layout (column order, widths, visibility) is exported and stored
- * per user, then handed back as `initialState` on the next mount. That snapshot
- * is by definition older than the code reading it, so a layout saved before a
- * column existed has to be repaired rather than trusted or thrown away.
+ * The grid's layout (column order, widths, visibility, pinned columns) is
+ * exported and stored per user, then handed back as `initialState` on the
+ * next mount. That snapshot is by definition older than the code reading it,
+ * so a layout saved before a column existed has to be repaired rather than
+ * trusted or thrown away.
  *
  * Every function here is a DEFAULT, not a reset: it only fills in what the saved
  * state is silent about, so a deliberate arrangement always survives. Kept free

@@ -481,7 +481,7 @@ export function getComponentDefinitions(
     `SELECT id, ou, kind, spread_method, stat_kind, label, account_code,
             department_mode, fixed_department, increase_aware, sort_order,
             base_selector_kind, ss_scheme_id, kpi_driver_id, base_ref,
-            count_exempt, updated_at
+            count_exempt, collapse_months, weekday_mask, updated_at
        FROM cost_component_definitions
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY sort_order, id`
@@ -520,6 +520,7 @@ export function getComponentDefinitions(
       if (
         parsed.kind === "CALENDAR" ||
         parsed.kind === "VACATION" ||
+        parsed.kind === "SERVICE" ||
         parsed.kind === "COMBINE"
       ) {
         baseSelector = parsed as BaseSelector;
@@ -542,10 +543,41 @@ export function getComponentDefinitions(
       ssSchemeId: (row.ss_scheme_id as SsSchemeId) ?? undefined,
       kpiDriverId: (row.kpi_driver_id as string) ?? undefined,
       countExempt: row.count_exempt === 1,
+      collapseMonths: parseCollapseMonths(row.collapse_months),
+      // Normalize-on-read like collapse_months: junk or an empty mask reads as
+      // undefined, which the engine treats as a zero line.
+      weekdayMask:
+        Number.isInteger(row.weekday_mask) && (row.weekday_mask as number) > 0
+          ? (row.weekday_mask as number) & 127
+          : undefined,
       updatedAt: row.updated_at as string,
       deletedAt: null,
     };
   });
+}
+
+/**
+ * Parse cost_component_definitions.collapse_months (JSON array of 1-based
+ * months), tolerating malformed data: anything but integers 1-12 is dropped,
+ * duplicates folded, and an empty result reads as undefined — the def spreads
+ * with its base, the pre-column behaviour.
+ */
+function parseCollapseMonths(raw: unknown): number[] | undefined {
+  if (typeof raw !== "string" || !raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return undefined;
+    const months = [
+      ...new Set(
+        parsed.filter(
+          (month) => Number.isInteger(month) && month >= 1 && month <= 12
+        ) as number[]
+      ),
+    ].sort((a, b) => a - b);
+    return months.length > 0 ? months : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Parse the ss_schemes.base_component_ids JSON, tolerating malformed data. */

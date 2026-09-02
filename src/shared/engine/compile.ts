@@ -13,6 +13,7 @@
  * always produce an identical plan and therefore bit-identical results.
  */
 
+import { weekdayCounts } from "../calendar";
 import {
   FLAG_INCREASE_AWARE,
   LINE_NONE,
@@ -23,6 +24,7 @@ import {
   bankHolidayCoefficient,
   BaseSelector,
   CALENDAR_SERIES_ARG,
+  collapseWeights,
   COMBINE_OPS,
   CompileError,
   ComponentDefId,
@@ -93,12 +95,16 @@ export type CompileResult = { plan: CompiledPlan } | { errors: CompileError[] };
 
 // STAT lines (hours worked, headcount, FTE) are ordinary lines in the value
 // matrix, so ACC_ADD_LINE can feed them to a % base like any spread — they
-// power "multiplier of hours" blocks.
+// power "multiplier of hours" blocks. HOLIDAY_ACCRUAL is a line too, topo-
+// ordered after BASE_SALARY, so a % base may include it — social charges on
+// the accrual movement. Its yearly sum is zero by construction, and so is any
+// multiple of it. BANK_HOLIDAY stays out.
 const BASE_REFERENCEABLE = new Set([
   "BASE_SALARY",
   "SPREAD",
   "SOCIAL_SECURITY",
   "STAT",
+  "HOLIDAY_ACCRUAL",
 ]);
 
 function compareDefs(a: CostComponentDefinition, b: CostComponentDefinition): number {
@@ -857,6 +863,17 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
   const positions = planPositions(input);
   const buyouts = input.buyouts.filter((row) => row.deletedAt === null);
 
+  // WEEKDAY_COUNT occurrence counts, once per def rather than per position ×
+  // def — the counts are calendar-wide (countWeekendDays walks every day of
+  // the year), and pack-time is the right home: packPlan re-runs on every
+  // edit, so calendar-derived params never go stale under the structure cache
+  // (structureKey deliberately excludes the calendar).
+  const weekdayVecByDef = componentDefs.map((def) =>
+    def.kind === "SPREAD" && def.spreadMethod === "WEEKDAY_COUNT"
+      ? weekdayCounts(input.calendar.year, def.weekdayMask ?? 0)
+      : null
+  );
+
   // Values, dense by line — see the note in compileStructure. Rebuilt here
   // rather than carried on the structure: these ARE the edited numbers.
   const cellValue = new Array<ComponentValue | undefined>(positionCount * defCount).fill(
@@ -1184,6 +1201,21 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
               }
               break;
             }
+            case "WEEKDAY_COUNT": {
+              // Per-occurrence value × the month's masked-weekday count,
+              // lowered to DIRECT (which applies seasonality + increase).
+              // Counts precomputed per def in weekdayVecByDef above.
+              const perOccurrence = value?.yearlyValue ?? 0;
+              const counts = weekdayVecByDef[di]!;
+              const at = emitter.emitInto(Op.DIRECT, line, increaseFlag, MONTHS);
+              // emitInto zero-fills, so the "no value" case needs no else.
+              if (perOccurrence !== 0) {
+                for (let m = 0; m < MONTHS; m++) {
+                  emitter.paramPool[at + m] = perOccurrence * counts[m];
+                }
+              }
+              break;
+            }
             case "DIRECT_ABS": {
               // Absolute pass-through for KPI-driven blocks: the loader has
               // already folded the KPI series × per-position multiplier into
@@ -1193,6 +1225,16 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
               for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = monthly[m] ?? 0;
               break;
             }
+          }
+          // Land the whole yearly result in the def's chosen months (13th-month
+          // shape): a post-op over the line just written, so it covers every
+          // lowering above without touching any of them. Emitted even when the
+          // weights are all zero — the post-op IS what drops the cost when no
+          // chosen month is active (see collapseWeights).
+          if (def.collapseMonths && def.collapseMonths.length > 0) {
+            const w = collapseWeights(def.collapseMonths, position.seasonality);
+            const at = emitter.emitInto(Op.COLLAPSE_LINE, line, 0, MONTHS);
+            for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = w[m];
           }
           break;
         }

@@ -11,6 +11,7 @@ import {
   buildDefaultCalendar,
   calendarTotals,
   DEFAULT_WEEKEND_MASK,
+  weekdayCounts,
 } from "../../calendar";
 import {
   buildDefaultPositionDefaults,
@@ -145,6 +146,18 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   const multBlockId = saveBlock(
     structureDb, SCOPE,
     { blockType: "MULTIPLIER", label: "Uniform Levy", accountCode: "514000", accountLocked: true, base: { kind: "BLOCK", blockId: flatId } },
+    NOW
+  );
+  // Lands in chosen months (the 13th-month shape). May is chosen on purpose:
+  // pos-1 is dark in May, so its whole figure must shift to December, while
+  // full-year pos-2 splits May/December evenly — the compile-time weight gate
+  // has to agree between the two paths per position, not just per block.
+  const multCollapseId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Thirteenth Salary", accountCode: "519500",
+      accountLocked: true, base: { kind: "BASE_SALARY" }, collapseMonths: [5, 12],
+    },
     NOW
   );
   const multHoursId = saveBlock(
@@ -309,6 +322,27 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     },
     NOW
   );
+  // Weekday cadence on both spread-consuming types: a fixed block booked every
+  // Friday and a count×rate booked Mon+Fri. The mask travels def column →
+  // loader on the main path and block config → live defs on the renderer one,
+  // so a divergence in either pipe fails the bit-parity below.
+  const flatWeekdayId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "FLAT_MONTHLY", label: "Live Music", accountCode: "628970",
+      accountLocked: true, spread: "WEEKDAYS", weekdayMask: 1 << 5, increaseAware: true,
+    },
+    NOW
+  );
+  const countWeekdayId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "COUNT_RATE", label: "Weekly Deep Clean", accountCode: "628980",
+      accountLocked: true, statsAccountCode: "988300", statsAccountLocked: true,
+      spread: "WEEKDAYS", weekdayMask: (1 << 1) | (1 << 5),
+    },
+    NOW
+  );
   const customId = saveBlock(
     structureDb, SCOPE,
     { blockType: "CUSTOM_MONTHLY", label: "Seasonal", accountCode: "518000", accountLocked: true, increaseAware: true },
@@ -398,6 +432,8 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       componentValuePatches: [
         { positionId: "pos-1", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 120 } },
         { positionId: "pos-1", componentDefId: `${multSalaryId}:cost`, fields: { rate: 0.05 } },
+        { positionId: "pos-1", componentDefId: `${multCollapseId}:cost`, fields: { rate: 1 / 12 } },
+        { positionId: "pos-2", componentDefId: `${multCollapseId}:cost`, fields: { rate: 1 / 12 } },
         { positionId: "pos-1", componentDefId: `${multBlockId}:cost`, fields: { rate: 1.5 } },
         { positionId: "pos-1", componentDefId: `${multHoursId}:cost`, fields: { rate: 0.75 } },
         { positionId: "pos-1", componentDefId: `${multDaysId}:cost`, fields: { rate: 12.25 } },
@@ -427,6 +463,10 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         { positionId: "pos-2", componentDefId: `${flatId}:cost`, fields: { yearlyValue: 85 } },
         { positionId: "pos-2", componentDefId: `${multSalaryId}:cost`, fields: { rate: 0.08 } },
         { positionId: "pos-2", componentDefId: `${countRateId}:cost`, fields: { qty: 22, unitRate: 4 } },
+        // Per-occurrence weekday values: pos-1 is seasonal (dark May) so the
+        // seasonality gate on the occurrence counts is live on this run too.
+        { positionId: "pos-1", componentDefId: `${flatWeekdayId}:cost`, fields: { yearlyValue: 250 } },
+        { positionId: "pos-2", componentDefId: `${countWeekdayId}:cost`, fields: { qty: 3, unitRate: 45 } },
         // The pool share weight rides the rate slot: pos-2 takes a double share
         // of the service charge, pos-1 is deliberately out (no row at all).
         { positionId: "pos-2", componentDefId: `${poolManualId}:cost`, fields: { rate: 2 } },
@@ -511,8 +551,25 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 18 blocks + 1 dual stat line, × 2 positions.
-  expect(comparedLines).toBe(38);
+  // 21 blocks + 2 dual stat lines, × 2 positions.
+  expect(comparedLines).toBe(46);
+
+  // Teeth for the weekday blocks — two identical zero lines would also
+  // "match". pos-1's Friday fixture books amount × Friday-count in January
+  // (pre-increase, fully active) and nothing in its dark May; pos-2's Mon+Fri
+  // dual books qty × rate × count on the cost line and qty × count on the
+  // stat one.
+  const fridayCounts = weekdayCounts(YEAR, 1 << 5);
+  const monFriCounts = weekdayCounts(YEAR, (1 << 1) | (1 << 5));
+  const music1 = live.results.get("pos-1")!.get(`${flatWeekdayId}:cost`)!.months;
+  // × 2: pos-1 counts two heads, and the engine books every line headcount
+  // times over.
+  expect(music1[0]).toBeCloseTo(2 * 250 * fridayCounts[0], 9);
+  expect(music1[4]).toBe(0);
+  const clean2 = live.results.get("pos-2")!.get(`${countWeekdayId}:cost`)!.months;
+  const clean2Stat = live.results.get("pos-2")!.get(`${countWeekdayId}:stat`)!.months;
+  expect(clean2[0]).toBeCloseTo(3 * 45 * monFriCounts[0], 9);
+  expect(clean2Stat[0]).toBeCloseTo(3 * monFriCounts[0], 9);
 
   // Teeth for the rules blocks — two identical ZERO lines would also "match",
   // so pin that the derived rates actually landed on both paths. pos-1 wears
@@ -543,6 +600,18 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   expect(scaled1.total).toBeGreaterThan(0);
   expect(uniforms1.months[0]).toBeGreaterThan(0);
   expect(live.results.get("pos-2")!.get(`${ruleBlockOutId}:cost`)!.total).toBeGreaterThan(0);
+  // Teeth for the collapse block — two identical all-zero lines would also
+  // "match". pos-1 is dark in May, so December carries its whole (non-zero)
+  // figure and May books nothing; full-year pos-2 splits May/December evenly
+  // and books nothing anywhere else.
+  const collapse1 = live.results.get("pos-1")!.get(`${multCollapseId}:cost`)!.months;
+  expect(collapse1[4]).toBe(0);
+  expect(collapse1[11]).toBeGreaterThan(0);
+  expect(collapse1.filter((v) => v !== 0)).toHaveLength(1);
+  const collapse2 = live.results.get("pos-2")!.get(`${multCollapseId}:cost`)!.months;
+  expect(collapse2[4]).toBeGreaterThan(0);
+  expect(collapse2[4]).toBeCloseTo(collapse2[11], 9);
+  expect(collapse2.filter((v) => v !== 0)).toHaveLength(2);
 
   // ── The structure cache must not change a single number ──
   // Same call, twice, through a cache: the first run compiles and fills it, the

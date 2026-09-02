@@ -338,6 +338,57 @@ describe("child ordering", () => {
     expect(def.count_exempt).toBe(0);
   });
 
+  it("round-trips a multiplier's collapse months", () => {
+    // The months are a column of their own (like count_exempt); forgetting the
+    // key in either mapper would silently turn a 13th-month block back into a
+    // spread on the other device.
+    const doc = componentDefToDoc(
+      {
+        id: "d1",
+        ou: OU,
+        kind: "SPREAD",
+        spread_method: "PERCENT_OF",
+        label: "Thirteenth Salary",
+        collapse_months: JSON.stringify([6, 12]),
+      },
+      []
+    );
+    expect(doc.collapseMonths).toEqual([6, 12]);
+
+    const { def } = componentDefFromDoc(doc);
+    expect(JSON.parse(def.collapse_months as string)).toEqual([6, 12]);
+  });
+
+  it("reads a document without collapseMonths as NULL — spread with the base", () => {
+    const { def } = componentDefFromDoc({ id: "d1", ou: OU, kind: "SPREAD" });
+    expect(def.collapse_months).toBeNull();
+  });
+
+  it("round-trips a weekday spread's mask", () => {
+    // Forgetting the key in either mapper would silently zero the mask on the
+    // other device — a WEEKDAY_COUNT def with no mask books nothing at all.
+    const doc = componentDefToDoc(
+      {
+        id: "d1",
+        ou: OU,
+        kind: "SPREAD",
+        spread_method: "WEEKDAY_COUNT",
+        label: "Live Music",
+        weekday_mask: 1 << 5,
+      },
+      []
+    );
+    expect(doc.weekdayMask).toBe(1 << 5);
+
+    const { def } = componentDefFromDoc(doc);
+    expect(def.weekday_mask).toBe(1 << 5);
+  });
+
+  it("reads a document without weekdayMask as NULL — not a weekday def", () => {
+    const { def } = componentDefFromDoc({ id: "d1", ou: OU, kind: "SPREAD" });
+    expect(def.weekday_mask).toBeNull();
+  });
+
   it("round-trips the whole bank-holiday premium config", () => {
     // Every knob has to survive a sync hop. The coverage map is the easy one to
     // lose: it is a JSON column locally, so forgetting it in either mapper would

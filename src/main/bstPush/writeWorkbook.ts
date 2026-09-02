@@ -215,7 +215,7 @@ function assertCellWritable(
 
 
 /** The parts of one `<c>` element this writer cares about. */
-interface ParsedCell {
+export interface ParsedCell {
   /** Full source text of the element — unique per cell, since `r` is. */
   source: string;
   ref: string;
@@ -227,7 +227,7 @@ interface ParsedCell {
 
 const CELL_RE = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
 
-function parseCells(rowBody: string): ParsedCell[] {
+export function parseCells(rowBody: string): ParsedCell[] {
   const cells: ParsedCell[] = [];
   for (const match of rowBody.matchAll(CELL_RE)) {
     const attrs = match[1];

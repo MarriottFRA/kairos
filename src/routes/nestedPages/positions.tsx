@@ -86,6 +86,8 @@ import { listKpiDrivers } from "../../services/kpiDriversService";
 import { KpiDriverWithSeries } from "../../shared/kpiDrivers/ipc";
 import { listClusters as listHotelClusters } from "../../services/hotelClustersService";
 import { HotelClusterDto } from "../../shared/hotelClusters/ipc";
+import { listCopySources } from "../../services/hotelCopyService";
+import { HotelCopySetupResponse } from "../../shared/hotelCopy/ipc";
 import { recomputeNiOpenings, saveSsScheme } from "../../services/socialSecurityService";
 import BlockDialog from "../../components/blocks/BlockDialog";
 import SsSchemeDialog, {
@@ -143,7 +145,9 @@ import PositionsToolbar, {
 import AddFieldDialog from "../../components/positions/AddFieldDialog";
 import RemoveFieldDialog from "../../components/positions/RemoveFieldDialog";
 import ManageColumnsDialog from "../../components/positions/ManageColumnsDialog";
-import CopyScenarioDialog from "../../components/positions/CopyScenarioDialog";
+import CopyScenarioDialog, {
+  HotelSourceOption,
+} from "../../components/positions/CopyScenarioDialog";
 import DeleteClusterPositionDialog, {
   PendingPositionDelete,
 } from "../../components/positions/DeleteClusterPositionDialog";
@@ -155,7 +159,8 @@ import { uuidv7 } from "../../shared/engine/ids";
  *
  * Without this the grid appends unknown fields to the far right of the column
  * order, which both hides the new column and splits its section band in two.
- * The new field goes immediately after the last column of its section.
+ * The new field goes immediately after the last column of its section, and
+ * inherits the section's pinning when the whole band is pinned.
  */
 function withNewFieldInLayout(
   state: GridInitialState,
@@ -188,14 +193,20 @@ function withNewFieldInLayout(
     };
   }
 
+  const left = next.pinnedColumns?.left;
+  if (left && bandKeys.every((band) => left.includes(band))) {
+    next.pinnedColumns = { ...next.pinnedColumns, left: insertAfter(left) };
+  }
+
   return next;
 }
 
 /**
  * Drop a removed column from the grid's exported layout — the mirror of
  * {@link withNewFieldInLayout}. A key left behind in orderedFields is mostly
- * tolerated by the grid, but its width and visibility entries would come back
- * to life if the column were ever re-added, so prune all three.
+ * tolerated by the grid, but a stale pinned key splits its section band into
+ * two banners, and width/visibility entries would come back to life if the
+ * column were ever re-added — so the key is pruned everywhere it can appear.
  */
 function withoutFieldInLayout(
   state: GridInitialState,
@@ -224,6 +235,13 @@ function withoutFieldInLayout(
     next.columns = columns;
   }
 
+  if (next.pinnedColumns) {
+    const pinned = { ...next.pinnedColumns };
+    if (pinned.left) pinned.left = pinned.left.filter((field) => field !== key);
+    if (pinned.right) pinned.right = pinned.right.filter((field) => field !== key);
+    next.pinnedColumns = pinned;
+  }
+
   return next;
 }
 
@@ -247,6 +265,9 @@ const IDLE_SNAPSHOT: QueueSnapshot = {
 /** Shared empty list, so "no blocks yet" is one identity rather than a new one
  *  per render (see the `blocks` memo below). */
 const EMPTY_BLOCKS: BlockDto[] = [];
+
+/** Same discipline for the copy dialog's hotel group when it is gated off. */
+const NO_HOTEL_SOURCES: HotelSourceOption[] = [];
 
 /** "The simulation has not produced anything yet" as one identity — the block
  *  Total column reads an empty map and a missing one identically (blank cell),
@@ -358,6 +379,12 @@ export default function Positions() {
   // file but not budgeted. Hidden by default; the toolbar toggle reveals them.
   const [showInactive, setShowInactive] = useState(false);
   const [copyOpen, setCopyOpen] = useState(false);
+  /** Hotels whose blocks & setup exist locally AND appear in the user's own
+   *  hotel list — the copy dialog's "Other hotels" group (gated at render on
+   *  structure editability and this hotel having no blocks yet). */
+  const [copyHotelSources, setCopyHotelSources] = useState<HotelSourceOption[]>(
+    NO_HOTEL_SOURCES
+  );
   /** Checkbox selection, for the toolbar's bulk actions. */
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   /** Bumped after a copy lands, to re-run the load effect. */
@@ -565,7 +592,8 @@ export default function Positions() {
     return () => {
       cancelled = true;
     };
-  }, [selectedHotelOu, scenario]);
+    // reloadToken: a setup copy from another hotel lands a calendar too.
+  }, [selectedHotelOu, scenario, reloadToken]);
 
   // ── KPI drivers (per OU): the block dialog's KPI options + live-sim series ──
   // Best-effort — with none loaded, KPI-based blocks simply show zero totals.
@@ -587,7 +615,8 @@ export default function Positions() {
     return () => {
       cancelled = true;
     };
-  }, [selectedHotelOu]);
+    // reloadToken: a setup copy from another hotel lands KPI drivers too.
+  }, [selectedHotelOu, reloadToken]);
 
   // ── Hotel clusters (cross-hotel; not OU-scoped). Reloaded on hotel switch
   // anyway so edits made on the Clusters tab are picked up on return. ──
@@ -603,15 +632,37 @@ export default function Positions() {
       }
       // Names are cosmetic — a failure leaves cluster tooltips showing OU codes,
       // which is worse to read but never wrong, so it never blocks the grid.
+      // The same server list also gates the copy dialog's hotel sources: only
+      // properties the user can see are offered, however many OUs the local
+      // store happens to hold.
       try {
         const hotels = await authService.getHotels();
-        if (!cancelled) {
-          setHotelNames(
-            new Map(hotels.map((hotel) => [hotel.ou, hotel.hotel_name]))
-          );
+        if (cancelled) return;
+        const nameByOu = new Map(
+          hotels.map((hotel) => [hotel.ou, hotel.hotel_name])
+        );
+        setHotelNames(nameByOu);
+        try {
+          const sources = selectedHotelOu
+            ? await listCopySources(selectedHotelOu)
+            : [];
+          if (!cancelled) {
+            setCopyHotelSources(
+              sources
+                .filter((source) => nameByOu.has(source.ou))
+                .map((source) => ({
+                  ou: source.ou,
+                  name: nameByOu.get(source.ou) as string,
+                }))
+            );
+          }
+        } catch (err) {
+          console.warn("Copy-from-hotel sources unavailable:", err);
+          if (!cancelled) setCopyHotelSources(NO_HOTEL_SOURCES);
         }
       } catch (err) {
         console.warn("Hotel names unavailable for cluster tooltips:", err);
+        if (!cancelled) setCopyHotelSources(NO_HOTEL_SOURCES);
       }
     })();
     return () => {
@@ -1628,6 +1679,18 @@ export default function Positions() {
     );
   }, []);
 
+  /** Another hotel's setup landed — blocks, columns, KPI drivers and the
+   *  calendar all changed, so everything keyed on reloadToken re-fetches. */
+  const handleSetupCopied = useCallback(
+    (result: HotelCopySetupResponse, sourceName: string) => {
+      setReloadToken((token) => token + 1);
+      setToast(
+        `Copied ${result.blocks} ${result.blocks === 1 ? "block" : "blocks"} and setup from ${sourceName}`
+      );
+    },
+    []
+  );
+
   /**
    * Bulk activate/deactivate over the checkbox selection. Each row goes through
    * the same patch queue as a cell edit, so the coalescing, retry and status
@@ -1983,6 +2046,11 @@ export default function Positions() {
           >
             No positions in {budgetYear} — {scenario?.label}. Copy them from
             another year or scenario instead of entering them again.
+            {planScope.structureEditable &&
+            blocks.length === 0 &&
+            copyHotelSources.length > 0
+              ? " You can also copy another hotel's blocks & setup."
+              : ""}
           </Alert>
         ) : null}
         {gridReady && (
@@ -2036,8 +2104,16 @@ export default function Positions() {
         targetScenarioId={scenario?.id ?? ""}
         targetYear={budgetYear}
         targetLabel={scenario?.label ?? "this scenario"}
+        // Other hotels only while THIS hotel's block set is untouched and the
+        // user may reshape structure — the backend enforces both regardless.
+        hotelSources={
+          planScope.structureEditable && blocks.length === 0
+            ? copyHotelSources
+            : NO_HOTEL_SOURCES
+        }
         onClose={() => setCopyOpen(false)}
         onCopied={handleCopied}
+        onSetupCopied={handleSetupCopied}
       />
 
       <AddFieldDialog

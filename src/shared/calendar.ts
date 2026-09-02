@@ -167,6 +167,21 @@ export function countWeekendDays(year: number, month: number, mask: number): num
 }
 
 /**
+ * Per-month counts of the days falling on a weekday in `mask` (index 0 =
+ * January). Despite countWeekendDays' name the mask is ANY weekday set —
+ * `1 << 5` counts Fridays. The WEEKDAY_COUNT spread's single source of truth:
+ * both the engine compiler and its reference implementation call this, so the
+ * two cannot disagree on what a "Friday" is.
+ */
+export function weekdayCounts(year: number, mask: number): number[] {
+  const counts: number[] = [];
+  for (let month = 1; month <= 12; month++) {
+    counts.push(countWeekendDays(year, month, mask));
+  }
+  return counts;
+}
+
+/**
  * Clamp a day count that is allowed to be fractional into 0…calendarDays,
  * rounded to two decimals so a typed 0.25 stays 0.25 and float noise from
  * arithmetic never reaches the store. Junk parses to 0, as elsewhere.

@@ -8,7 +8,9 @@
  * the positions `sea_1..12` convention. "Stats" are the operational units (hours,
  * covers, room nights…). Amount is derived (stats * rate) when a rate is present,
  * so the amt cells read-only then; otherwise the stored amt is authoritative and
- * typeable.
+ * typeable. Stats mirror that split one level up: with a KPI driver set they are
+ * derived from its cached series (KPI ÷ Per × Units) and the stat cells go
+ * read-only; otherwise the stored stat is authoritative and typeable.
  */
 
 import { daysInMonth } from "../../shared/calendar";
@@ -21,9 +23,13 @@ import {
   SpreadMode,
 } from "../../shared/manualInput/ipc";
 import {
+  ManualKpiSeriesSlice,
+  isKpiStatsDriven as isKpiStatsDrivenId,
   isRateDriven as isRateDrivenRate,
   manualAmountForMonth,
+  manualStatForMonth,
   num,
+  resolveManualStatsSeries,
 } from "../../shared/manualInput/rowMath";
 
 export interface ManualGridRow {
@@ -34,6 +40,12 @@ export interface ManualGridRow {
   costAccount: string;
   statsAccount: string;
   rate: number | null;
+  /** "" = none (stats typed); a KPI driver id derives the monthly Stats. */
+  statsKpiDriverId: string;
+  /** The "per" amount of the KPI, e.g. 50000 in "20 hours per 50,000". */
+  statsKpiDivisor: number | null;
+  /** Units per divisor of KPI, e.g. the 20 in "20 hours per 50,000". */
+  statsKpiFactor: number | null;
   /** "" = not configured; drives the Apply-spread action. */
   spreadMode: SpreadMode | "";
   /** Base spread into Stats; null when unset. */
@@ -60,25 +72,93 @@ export function isRateDriven(row: ManualGridRow): boolean {
   return isRateDrivenRate(row.rate);
 }
 
+/** Whether a row's monthly stats are derived from a KPI driver (vs. typed). */
+export function isKpiStatsDriven(row: ManualGridRow): boolean {
+  return isKpiStatsDrivenId(row.statsKpiDriverId);
+}
+
+/** Cached series slices for a KPI driver id, or null when the driver is unknown. */
+export type ManualStatsResolver = (
+  driverId: string
+) => ManualKpiSeriesSlice[] | null;
+
+/**
+ * The stat shown for a month: KPI ÷ Per × Units when KPI-driven and the series
+ * resolves, else the stored stat cell (the typed value, or the last baked
+ * snapshot of a driver that can no longer resolve).
+ */
+export function statForMonth(
+  row: ManualGridRow,
+  month: number,
+  resolve?: ManualStatsResolver | null
+): number {
+  if (isKpiStatsDriven(row) && resolve) {
+    const series = resolveManualStatsSeries(
+      resolve(row.statsKpiDriverId),
+      row.departmentCode
+    );
+    if (series) {
+      return manualStatForMonth(
+        row.statsKpiDivisor,
+        row.statsKpiFactor,
+        series[month - 1]
+      );
+    }
+  }
+  return num(row[statsKey(month)]);
+}
+
 /** The amount shown for a month: stats*rate when rate-driven, else the typed amt. */
-export function amountForMonth(row: ManualGridRow, month: number): number {
+export function amountForMonth(
+  row: ManualGridRow,
+  month: number,
+  resolve?: ManualStatsResolver | null
+): number {
   return manualAmountForMonth(
     row.rate,
-    row[statsKey(month)],
+    statForMonth(row, month, resolve),
     row[amountKey(month)]
   );
 }
 
-export function totalStats(row: ManualGridRow): number {
+export function totalStats(
+  row: ManualGridRow,
+  resolve?: ManualStatsResolver | null
+): number {
   let sum = 0;
-  for (let m = 1; m <= MANUAL_INPUT_PERIOD_COUNT; m++) sum += num(row[statsKey(m)]);
+  for (let m = 1; m <= MANUAL_INPUT_PERIOD_COUNT; m++) {
+    sum += statForMonth(row, m, resolve);
+  }
   return sum;
 }
 
-export function totalAmount(row: ManualGridRow): number {
+export function totalAmount(
+  row: ManualGridRow,
+  resolve?: ManualStatsResolver | null
+): number {
   let sum = 0;
-  for (let m = 1; m <= MANUAL_INPUT_PERIOD_COUNT; m++) sum += amountForMonth(row, m);
+  for (let m = 1; m <= MANUAL_INPUT_PERIOD_COUNT; m++) {
+    sum += amountForMonth(row, m, resolve);
+  }
   return sum;
+}
+
+/**
+ * Copy the Stats currently displayed for `from` into `into`'s stat cells — the
+ * clear-driver snapshot: when the KPI link is removed the last derived numbers
+ * persist into stats_json, so nothing jumps. Call with the OLD (still-driven)
+ * row as `from` and the edited row as `into`.
+ */
+export function bakeDerivedStats(
+  from: ManualGridRow,
+  into: ManualGridRow,
+  resolve?: ManualStatsResolver | null
+): ManualGridRow {
+  const next: ManualGridRow = { ...into };
+  for (let m = 1; m <= MANUAL_INPUT_PERIOD_COUNT; m++) {
+    next[statsKey(m)] = statForMonth(from, m, resolve);
+  }
+  return next;
 }
 
 /** Storage row -> flat grid row. */
@@ -91,6 +171,9 @@ export function toGridRow(row: ManualInputRow): ManualGridRow {
     costAccount: row.costAccount,
     statsAccount: row.statsAccount,
     rate: row.rate,
+    statsKpiDriverId: row.statsKpiDriverId ?? "",
+    statsKpiDivisor: row.statsKpiDivisor,
+    statsKpiFactor: row.statsKpiFactor,
     spreadMode: row.spreadMode ?? "",
     spreadBaseStats: row.spreadBaseStats,
     spreadBaseAmount: row.spreadBaseAmount,
@@ -124,6 +207,9 @@ export function toInput(row: ManualGridRow): ManualInputRowInput {
     costAccount: String(row.costAccount ?? ""),
     statsAccount: String(row.statsAccount ?? ""),
     rate,
+    statsKpiDriverId: String(row.statsKpiDriverId ?? "").trim() || null,
+    statsKpiDivisor: baseOrNull(row.statsKpiDivisor),
+    statsKpiFactor: baseOrNull(row.statsKpiFactor),
     stats,
     amounts,
     spreadMode: row.spreadMode === "" ? null : row.spreadMode,
@@ -151,6 +237,9 @@ export function emptyGridRow(id: string): ManualGridRow {
     costAccount: "",
     statsAccount: "",
     rate: null,
+    statsKpiDriverId: "",
+    statsKpiDivisor: null,
+    statsKpiFactor: null,
     spreadMode: "",
     spreadBaseStats: null,
     spreadBaseAmount: null,
@@ -188,7 +277,10 @@ function spreadWeights(mode: SpreadMode, year: number): number[] {
  * spread is always flat over the mode's weights. Only a side with a base set
  * (non-null) is touched, so an unused base leaves that vector alone. The Amount
  * base is skipped for rate-driven rows — a typed monthly Amount would be
- * overwritten by the derived stats*rate value anyway. A no-op when no mode is set.
+ * overwritten by the derived stats*rate value anyway — and the Stats base is
+ * skipped for KPI-driven rows for the same reason (and to protect the baked
+ * snapshot under the locked cells, since this action bypasses isCellEditable).
+ * A no-op when no mode is set.
  */
 export function applySpread(row: ManualGridRow, year: number): ManualGridRow {
   const mode = row.spreadMode;
@@ -210,7 +302,9 @@ export function applySpread(row: ManualGridRow, year: number): ManualGridRow {
     }
   };
 
-  if (row.spreadBaseStats != null) fill(statsKey, num(row.spreadBaseStats), false);
+  if (row.spreadBaseStats != null && !isKpiStatsDriven(row)) {
+    fill(statsKey, num(row.spreadBaseStats), false);
+  }
   if (row.spreadBaseAmount != null && !isRateDriven(row)) {
     fill(amountKey, num(row.spreadBaseAmount), true);
   }

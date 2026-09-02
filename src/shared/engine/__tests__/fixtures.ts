@@ -80,9 +80,10 @@ export function makeScenario(): Scenario {
 }
 
 /** Flat 20 productive days per month unless overridden — keeps math hand-checkable.
- *  `holidayDays` defaults to zero (no bank-holiday cost). */
+ *  `holidayDays` defaults to zero (no bank-holiday cost). Carries FIXTURE_YEAR so
+ *  WEEKDAY_COUNT parity runs on the same real calendar the scenario names. */
 export function makeCalendar(realDays?: number[], holidayDays?: number[]): CalendarContext {
-  return makeCalendarContext(realDays ?? new Array(MONTHS).fill(20), holidayDays);
+  return makeCalendarContext(realDays ?? new Array(MONTHS).fill(20), holidayDays, FIXTURE_YEAR);
 }
 
 /** Builder override shape: everything optional except a plain-string id. */
@@ -513,6 +514,39 @@ export function randomScenario(
   const rand = rng(seed);
   const pick = <T,>(items: T[]): T => items[Math.floor(rand() * items.length)];
   const standard = standardDefinitions();
+  // Collapse-months multipliers (the 13th/14th-period-salary shape) — added
+  // here rather than in standardDefinitions so the suites with hand-derived
+  // expectations over the standard set (compile, disassemble, perRowDepartment)
+  // stay untouched. Fixed months, no rand() draws, so the def set is the same
+  // every seed; the ~25%-inactive-month positions below fuzz the drop policy.
+  standard.push(
+    makeDef({
+      id: "def-thirteenth",
+      spreadMethod: "PERCENT_OF",
+      label: "Thirteenth Salary",
+      accountCode: "628900",
+      sortOrder: 24,
+      collapseMonths: [6],
+    }),
+    makeDef({
+      id: "def-fourteenth",
+      spreadMethod: "PERCENT_OF",
+      label: "Fourteenth Salary",
+      accountCode: "628950",
+      sortOrder: 25,
+      collapseMonths: [6, 12],
+    }),
+    // Per-occurrence weekday spread (Mon + Fri), fixed mask — no rand() draws,
+    // same discipline as the collapse defs above.
+    makeDef({
+      id: "def-weekdays",
+      spreadMethod: "WEEKDAY_COUNT",
+      weekdayMask: (1 << 1) | (1 << 5),
+      label: "Live Music",
+      accountCode: "628970",
+      sortOrder: 26,
+    })
+  );
   const definitions =
     defWidth === undefined ? standard : widenDefinitions(standard, defWidth);
   const wideDefs = definitions.slice(standard.length);
@@ -652,7 +686,14 @@ export function randomScenario(
         rand() < 0.5
           ? { rateDefId: defId("def-housing") }
           : { rate: Math.round(rand() * 100) / 10000 }
-      )
+      ),
+      // Collapse-months draws LAST in the block, so every draw above keeps its
+      // old stream position within this position's iteration.
+      makeValue(id, "def-thirteenth", { rate: Math.round(rand() * 100) / 1200 }),
+      makeValue(id, "def-fourteenth", { rate: Math.round(rand() * 200) / 1200 }),
+      // Appended after the collapse draws for the same reason they sit last:
+      // every draw above keeps its old within-position stream position.
+      makeValue(id, "def-weekdays", { yearlyValue: Math.round(rand() * 500 * 100) / 100 })
     );
 
     // Width-axis extras. Appended AFTER the standard values so the RNG stream

@@ -90,6 +90,49 @@ describe("DIRECT_ABS", () => {
     }
   });
 
+  it("collapses into chosen months like any other line — still seasonality-gated", () => {
+    // A KPI-driven multiplier with collapseMonths: the absolute series is
+    // computed as usual, then the year's figure lands in the chosen months.
+    // The collapse TARGET keeps the inactive-month gate even though DIRECT_ABS
+    // itself ignores seasonality — one drop policy everywhere (collapseWeights).
+    const input = buildInput();
+    const kpiDef = input.definitions.find((d) => d.id === defId("def-kpi"))!;
+
+    kpiDef.collapseMonths = [4]; // April, active (seasonality 1)
+    let compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    let line = simulate(compiled.plan)
+      .positionLines(input.positions[0].id)
+      .find((l) => l.component.id === defId("def-kpi"))!;
+    const yearTotal = KPI_MONTHLY.reduce((a, b) => a + b, 0);
+    for (let m = 0; m < MONTHS; m++) {
+      // Whole year in April, still no headcount scaling (DIRECT_ABS is exempt).
+      expect(line.months[m]).toBe(m === 3 ? yearTotal : 0);
+    }
+    let reference = referencePosition(
+      input.positions[0], input.calendar, input.definitions,
+      input.ssSchemes, input.componentValues
+    );
+    for (let m = 0; m < MONTHS; m++) {
+      expect(line.months[m]).toBe(reference.lines.get(defId("def-kpi"))![m]);
+    }
+
+    kpiDef.collapseMonths = [3]; // March: seasonality 0 — the cost is dropped.
+    compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    line = simulate(compiled.plan)
+      .positionLines(input.positions[0].id)
+      .find((l) => l.component.id === defId("def-kpi"))!;
+    reference = referencePosition(
+      input.positions[0], input.calendar, input.definitions,
+      input.ssSchemes, input.componentValues
+    );
+    for (let m = 0; m < MONTHS; m++) {
+      expect(line.months[m]).toBe(0);
+      expect(reference.lines.get(defId("def-kpi"))![m]).toBe(0);
+    }
+  });
+
   it("matches the reference implementation bit-for-bit", () => {
     const input = buildInput();
     const compiled = compile(input);

@@ -35,12 +35,10 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  FormControlLabel,
   LinearProgress,
   Paper,
   Snackbar,
   Stack,
-  Switch,
   Tooltip,
   Typography,
   alpha,
@@ -58,6 +56,9 @@ import MonthPlanBar, {
   describeMonthPlan,
 } from "../../components/bstPush/MonthPlanBar";
 import PushPlanGrid from "../../components/bstPush/PushPlanGrid";
+import PushSettingsCard, {
+  GUARD_MODE_META,
+} from "../../components/bstPush/PushSettingsCard";
 import {
   BstPushCommitResult,
   BstPushConfig,
@@ -94,7 +95,7 @@ import { BstPushEligibility } from "../../shared/kairosSync/protocol";
 import PushAdvisoryAlert from "../../components/sync/PushAdvisoryAlert";
 
 type Stage = "idle" | "review" | "done";
-type RowFilter = "all" | "problems";
+type RowFilter = "all" | "problems" | "allocation" | "protected";
 type Toast = { severity: "success" | "error" | "info"; message: string } | null;
 
 const count = (n: number) => n.toLocaleString();
@@ -281,7 +282,13 @@ function consequence(plan: BstPushPlan): string {
   if (plan.zeroCellCount > 0) {
     parts.push(
       `Zeroes ${count(plan.zeroCellCount)} cell${plan.zeroCellCount === 1 ? "" : "s"}` +
-        ` matching the clear rules.`
+        ` under the clear rules and push settings.`
+    );
+  }
+  if (plan.guardedCellCount > 0) {
+    parts.push(
+      `Leaves ${count(plan.guardedCellCount)} cell${plan.guardedCellCount === 1 ? "" : "s"}` +
+        ` untouched (allocation rows / locked cells).`
     );
   }
   if (plan.skippedCount > 0) {
@@ -306,9 +313,12 @@ function reportText(report: BstPushReport): string {
     `Budget year: ${report.file.year ?? "—"}`,
     `Months: ${describeMonthPlan(report.options.months)}`,
     `Clear rules: ${report.clearScope.prefixes.join(", ") || "none"}`,
+    `Allocation rows: ${GUARD_MODE_META[report.options.allocationRows].label}`,
+    `Protected cells: ${GUARD_MODE_META[report.options.protectedCells].label}`,
     `Rows written: ${report.writeCount}`,
     `Cells written: ${report.cellCount}`,
     `Cells cleared: ${report.zeroCellCount}`,
+    `Cells left alone by the guards: ${report.guardedCellCount}`,
     `Unused combos not written: ${report.skippedCount}`,
     `Sheets touched: ${report.sheetsTouched}`,
     `Rows not written: ${report.problemCount}`,
@@ -488,6 +498,8 @@ export default function BstPush() {
         setPushConfig(saved);
         setOptions({
           months: saved.months,
+          allocationRows: saved.allocationRows,
+          protectedCells: saved.protectedCells,
           backup: saved.backup,
           skipUnusedCombos: saved.skipUnusedCombos,
         });
@@ -545,6 +557,8 @@ export default function BstPush() {
       if (!ou) return;
       void saveBstPushConfig(ou, {
         months: next.months,
+        allocationRows: next.allocationRows,
+        protectedCells: next.protectedCells,
         backup: next.backup,
         skipUnusedCombos: next.skipUnusedCombos,
       })
@@ -618,11 +632,12 @@ export default function BstPush() {
   // A newly chosen file already arrives with its options applied, so the first
   // run after one lands must not re-fetch.
   const settledOptions = useRef<string | null>(null);
-  // `skipUnusedCombos` is here and `backup` is not: the former changes what the
-  // plan writes, the latter changes nothing about it.
+  // `skipUnusedCombos` and the guard modes are here and `backup` is not: the
+  // former change what the plan writes, the latter changes nothing about it.
   const optionKey =
     `${planFilePath}|${options.months.join(",")}` +
-    `|u${options.skipUnusedCombos ? 1 : 0}|r${rulesRevision}`;
+    `|u${options.skipUnusedCombos ? 1 : 0}|r${rulesRevision}` +
+    `|a${options.allocationRows}|p${options.protectedCells}`;
   useEffect(() => {
     if (!planFilePath) {
       settledOptions.current = null;
@@ -686,10 +701,16 @@ export default function BstPush() {
 
   const shownRows = useMemo(() => {
     const rows = stage === "done" ? (report?.rows ?? []) : (plan?.rows ?? []);
-    if (filter === "all") return rows;
-    return rows.filter(
-      (row) => row.status === "no_row" || row.status === "no_sheet"
-    );
+    if (filter === "problems") {
+      return rows.filter(
+        (row) => row.status === "no_row" || row.status === "no_sheet"
+      );
+    }
+    if (filter === "allocation") return rows.filter((row) => row.isAllocation);
+    if (filter === "protected") {
+      return rows.filter((row) => row.lockedMonths.some(Boolean));
+    }
+    return rows;
   }, [stage, report, plan, filter]);
 
   const refusalMessage = refusal ? refusalCopy(refusal) : null;
@@ -834,61 +855,18 @@ export default function BstPush() {
                 disabled={busy === "commit"}
                 onSave={(prefixes) => void handleSaveRules(prefixes)}
               />
-              <Box>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      size="small"
-                      checked={options.backup}
-                      disabled={working}
-                      onChange={(event) =>
-                        updateOptions({ ...options, backup: event.target.checked })
-                      }
-                    />
-                  }
-                  label={
-                    <Typography variant="body2">
-                      Back up the file before writing
-                    </Typography>
-                  }
-                />
-                <FormControlLabel
-                  sx={{ display: "flex", mt: 0.5 }}
-                  control={
-                    <Switch
-                      size="small"
-                      checked={options.skipUnusedCombos}
-                      // A refresh must not lock this either — same reason as the
-                      // month strip above.
-                      disabled={busy === "commit"}
-                      onChange={(event) =>
-                        updateOptions({
-                          ...options,
-                          skipUnusedCombos: event.target.checked,
-                        })
-                      }
-                    />
-                  }
-                  label={
-                    <Typography variant="body2">
-                      Skip unused combos — write no values to rows Kairos holds
-                      no data for, instead of overwriting them with zeroes
-                    </Typography>
-                  }
-                />
-                {options.skipUnusedCombos &&
-                  pushConfig.clearPrefixes.length > 0 && (
-                    <Typography
-                      variant="caption"
-                      sx={{ display: "block", pl: 4.75, color: "warning.main" }}
-                    >
-                      Heads up: the clear rules (
-                      {pushConfig.clearPrefixes.join(", ")}) still run — a
-                      skipped row whose account they match is still zeroed in
-                      replaced or cleared months.
-                    </Typography>
-                  )}
-              </Box>
+              {/* A refresh must not lock the plan options either — same
+                  reason as the month strip above. Backup keeps its stricter
+                  gate: it changes nothing about the plan. */}
+              <PushSettingsCard
+                options={options}
+                onChange={updateOptions}
+                allocationRowCount={plan.allocationRowCount}
+                protectedRowCount={plan.protectedRowCount}
+                clearPrefixes={pushConfig.clearPrefixes}
+                disabled={busy === "commit"}
+                backupDisabled={working}
+              />
             </Stack>
           )}
 
@@ -931,7 +909,11 @@ export default function BstPush() {
               emptyMessage={
                 filter === "problems"
                   ? "Every row found its place in the BST."
-                  : "No rows to push."
+                  : filter === "allocation"
+                    ? "No plan row lands on an allocation row."
+                    : filter === "protected"
+                      ? "No plan row carries protection-locked cells."
+                      : "No rows to push."
               }
             />
           </Box>
@@ -1235,6 +1217,33 @@ function SummaryTiles({
           hint="Kairos holds no data for these rows, so no values are written to them. A clear rule that matches them still zeroes them."
         />
       )}
+      {source.allocationRowCount > 0 && (
+        <StatTile
+          value={count(source.allocationRowCount)}
+          label="Allocation rows"
+          active={filter === "allocation"}
+          onClick={() =>
+            onFilter(filter === "allocation" ? "all" : "allocation")
+          }
+          hint={`Plan rows landing on the BST's own allocation rows ("Allocated from…"). Current setting: ${GUARD_MODE_META[source.options.allocationRows].label}. Click to show only these.`}
+        />
+      )}
+      {source.protectedRowCount > 0 && (
+        <StatTile
+          value={count(source.protectedRowCount)}
+          label="Rows with locked cells"
+          active={filter === "protected"}
+          onClick={() => onFilter(filter === "protected" ? "all" : "protected")}
+          hint={`Plan rows whose month cells are locked by the BST's sheet protection. Current setting: ${GUARD_MODE_META[source.options.protectedCells].label}. Click to show only these.`}
+        />
+      )}
+      {source.guardedCellCount > 0 && (
+        <StatTile
+          value={count(source.guardedCellCount)}
+          label={past ? "Cells left alone" : "Cells to leave alone"}
+          hint="Cells holding Kairos values that are NOT written: they sit on allocation rows or locked cells, and the push settings say to leave those alone."
+        />
+      )}
       <StatTile
         value={count(source.problemCount)}
         label={past ? "Rows not written" : "Rows that can't land"}
@@ -1415,6 +1424,13 @@ function ConfirmPushDialog({
               size="small"
               color="warning"
               label={`${count(plan.zeroCellCount)} cells cleared`}
+              variant="outlined"
+            />
+          )}
+          {plan.guardedCellCount > 0 && (
+            <Chip
+              size="small"
+              label={`${count(plan.guardedCellCount)} cells left alone`}
               variant="outlined"
             />
           )}

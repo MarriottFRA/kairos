@@ -17,8 +17,31 @@ import { AccountFilter } from "./fields";
  * heads here so a hotel can never silently fail to report headcount, whatever
  * the per-row Headcount account is set to. Surfaced read-only on the Positions
  * grid as the "HC Stats" column so the A972540 rows in Results are traceable.
+ * The one Classification exempt from the pin is Buyout Labour — see
+ * positionCountAccountForJobType.
  */
 export const POSITION_COUNT_ACCOUNT = "A972540";
+
+/**
+ * The Classification whose rows are bought in rather than staffed. Its Count is
+ * a quantity of purchased labour, not heads, so it must not inflate A972540.
+ */
+export const BUYOUT_JOB_TYPE = "Buyout Labour";
+
+/**
+ * The account the pinned position-count head posts for a row's Classification —
+ * POSITION_COUNT_ACCOUNT for every grade (a blank/unknown grade included: an
+ * unclassified row must still report its heads), and "" for Buyout Labour,
+ * whose Count is not a headcount. "" carries the usual blank-account contract
+ * (calculate, don't post), and is also what the read-only HC Stats cell shows
+ * for the row, so the grid and Results agree on where the count went.
+ */
+export function positionCountAccountForJobType(jobTypeCode: unknown): string {
+  if (typeof jobTypeCode === "string" && jobTypeCode.trim() === BUYOUT_JOB_TYPE) {
+    return "";
+  }
+  return POSITION_COUNT_ACCOUNT;
+}
 
 /**
  * Where the hotel's Weekly Hours setting reports — the standard full-time
@@ -68,9 +91,11 @@ export const STAFFING_ACCOUNT_FILTER: AccountFilter = { startsWith: ["A988"] };
  * the account, always. So it is derived instead — the grid shows it as a
  * calculated column and nothing stores it (seed v26).
  *
- * A grade that is ABSENT here has no headcount account, deliberately: Associate,
- * Casual and Buyout Labour report their heads only through the pinned
- * POSITION_COUNT_ACCOUNT head. A blank account makes the per-row headcount line
+ * A grade that is ABSENT here has no headcount account, deliberately: Associate
+ * and Casual report their heads only through the pinned POSITION_COUNT_ACCOUNT
+ * head, and Buyout Labour reports no heads at all (its position-count posting is
+ * suppressed too — see positionCountAccountForJobType). A blank account makes
+ * the per-row headcount line
  * compile with the (equally blank) account its definition carries, and the
  * output projection drops blank-account lines — so nothing is posted, which is
  * the intent. Keys must be values of JOB_TYPE_OPTIONS (fieldSeed); a test pins

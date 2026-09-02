@@ -23,6 +23,7 @@ import {
   ClearScopeAccount,
   clearsColumn,
   ComboStatus,
+  GuardMode,
   matchesClearRules,
   MonthAction,
   MonthPlanEntry,
@@ -51,6 +52,42 @@ export const toCombo = comboKeyOf;
 /** A9… accounts are counts and hours; everything else is money in thousands. */
 export function scaleForAccount(account: string): number {
   return account.startsWith("9") ? 1 : 1000;
+}
+
+/** What the guards let the push do to one cell. */
+export type CellGuard = "write" | "clear" | "skip";
+
+const GUARD_RANK: Record<GuardMode, number> = {
+  overwrite: 0,
+  clear: 1,
+  skip: 2,
+};
+
+/**
+ * Resolve the guard modes for one cell of a BST row.
+ *
+ * The allocation guard covers the whole row; the protection guard covers each
+ * locked cell. Where both apply with different modes the most conservative
+ * wins — skip > clear > overwrite — which matters constantly in practice: most
+ * of a BST's allocation rows are also protection-locked.
+ *
+ * The single authority for both passes AND the preview, so what the user
+ * approves and what the writer does can never disagree.
+ */
+export function cellGuard(
+  location: ComboLocation,
+  monthIndex: number,
+  options: Pick<BstPushOptions, "allocationRows" | "protectedCells">
+): CellGuard {
+  let mode: GuardMode = "overwrite";
+  if (location.isAllocation) mode = options.allocationRows;
+  if (
+    location.lockedMonths[monthIndex] &&
+    GUARD_RANK[options.protectedCells] > GUARD_RANK[mode]
+  ) {
+    mode = options.protectedCells;
+  }
+  return mode === "overwrite" ? "write" : mode;
 }
 
 export interface BuildPlanInput {
@@ -248,6 +285,22 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
   let nonFiniteRows = 0;
   const skippedCombos = new Set<string>();
 
+  let allocationRowCount = 0;
+  let protectedRowCount = 0;
+  let guardedRowCount = 0;
+  let guardedCellCount = 0;
+
+  // BST-wide tallies for the guard warnings — the clear pass reaches every
+  // addressable row, not only the ones Kairos produces values for.
+  let bstAllocationRows = 0;
+  let bstLockedRows = 0;
+  for (const locations of target.bySheet.values()) {
+    for (const location of locations) {
+      if (location.isAllocation) bstAllocationRows++;
+      if (location.lockedMonths.some(Boolean)) bstLockedRows++;
+    }
+  }
+
   for (const row of outputs) {
     const sheet = toSheetName(row.dept);
     const bareAccount = toBareAccount(row.account);
@@ -279,6 +332,32 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     const scaled = scaleMonths(row.months, bareAccount, options.months);
     if (scaled.skippedNonFinite) nonFiniteRows++;
 
+    // Apply the guards: mask suppressed value cells out of the row, so every
+    // downstream tally — and the grid — sees only what actually lands.
+    const guardedMonths = new Array<boolean>(PUSH_MONTHS).fill(false);
+    if (location && (status === "write" || status === "duplicate_row")) {
+      let rowIsZeroed = false;
+      let rowWasGuarded = false;
+      for (let m = 0; m < PUSH_MONTHS; m++) {
+        const guard = cellGuard(location, m, options);
+        if (guard === "write") continue;
+        const action = options.months[m];
+        if (writesValues(action) || clearsColumn(action)) {
+          guardedMonths[m] = true;
+          rowWasGuarded = true;
+        }
+        if (scaled.wroteMask[m]) {
+          scaled.wroteMask[m] = false;
+          scaled.months[m] = 0;
+          if (guard === "skip") guardedCellCount++;
+        }
+        if (guard === "clear" && clearsColumn(action)) rowIsZeroed = true;
+      }
+      if (rowWasGuarded && !scaled.wroteMask.some(Boolean)) {
+        status = rowIsZeroed ? "zeroed" : "guarded";
+      }
+    }
+
     const writable = status === "write" || status === "duplicate_row";
     if (writable) {
       writeCount++;
@@ -290,10 +369,14 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         writeCellsByMonth[m]++;
         writeTotalByMonth[m] += scaled.months[m];
       }
-    } else if (status !== "no_data" && status !== "skipped") {
+    } else if (status === "no_row" || status === "no_sheet") {
       problemCount++;
       if (status === "no_sheet") missingSheets.add(sheet);
     }
+
+    if (status === "guarded") guardedRowCount++;
+    if (location?.isAllocation) allocationRowCount++;
+    if (location?.lockedMonths.some(Boolean)) protectedRowCount++;
 
     rows.push({
       id: combo,
@@ -306,6 +389,12 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         accountNameByCode.get(row.account) ?? location?.description ?? "",
       status,
       isStats: row.isStats,
+      isAllocation: location?.isAllocation ?? false,
+      allocationText: location?.columnC ?? null,
+      lockedMonths: location
+        ? [...location.lockedMonths]
+        : new Array<boolean>(PUSH_MONTHS).fill(false),
+      guardedMonths,
       months: scaled.months,
       total: scaled.months.reduce((sum, value) => sum + value, 0),
       targetRow: location?.row ?? null,
@@ -387,8 +476,58 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         (clearPrefixes.length > 0
           ? ` The clear rules (${clearPrefixes.join(", ")}) still apply, ` +
             `though, so any of those rows they match are still zeroed in ` +
-            `replaced or cleared months.`
+            `replaced or cleared months — except cells the push settings ` +
+            `guard as allocation rows or locked cells.`
           : "")
+    );
+  }
+
+  // ── Guard warnings: what the push-settings modes mean for THIS file ──
+  const anyClearMonths = options.months.some(clearsColumn);
+  if (options.allocationRows === "overwrite" && bstAllocationRows > 0) {
+    warnings.push(
+      `Allocation rows are set to Overwrite: the ${bstAllocationRows} such ` +
+        `row(s) in this BST are treated like any other row, so Kairos values ` +
+        `and the clear rules can replace their formulas.`
+    );
+  }
+  if (
+    options.allocationRows === "clear" &&
+    bstAllocationRows > 0 &&
+    anyClearMonths
+  ) {
+    warnings.push(
+      `Allocation rows are set to Clear: the ${bstAllocationRows} such ` +
+        `row(s) in this BST are zeroed in every replaced or cleared month, ` +
+        `replacing their formulas with 0.`
+    );
+  }
+  if (options.protectedCells === "overwrite" && bstLockedRows > 0) {
+    warnings.push(
+      `Locked cells are set to Overwrite: sheet protection binds Excel's ` +
+        `UI, not this tool, so the ${bstLockedRows} row(s) with ` +
+        `protection-locked month cells are written straight through.`
+    );
+  }
+  if (
+    options.protectedCells === "clear" &&
+    bstLockedRows > 0 &&
+    anyClearMonths
+  ) {
+    warnings.push(
+      `Locked cells are set to Clear: protection-locked month cells on ` +
+        `${bstLockedRows} row(s) are zeroed in every replaced or cleared ` +
+        `month, replacing locked formulas with 0.`
+    );
+  }
+  if (guardedCellCount > 0) {
+    warnings.push(
+      `${guardedCellCount} cell(s) holding Kairos values are left untouched: ` +
+        `they sit on allocation rows or protection-locked cells, and the ` +
+        `push settings say to leave those alone` +
+        (guardedRowCount > 0
+          ? ` (${guardedRowCount} row(s) receive nothing at all).`
+          : `.`)
     );
   }
   const skipped = monthsWhere((action) => action === "skip");
@@ -476,6 +615,10 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     skippedCount: skippedCombos.size,
     cellCount,
     zeroCellCount: zeroWrites.length,
+    allocationRowCount,
+    protectedRowCount,
+    guardedRowCount,
+    guardedCellCount,
     warnings,
   };
 }
@@ -510,6 +653,11 @@ export interface CellWrite {
  * choice, made per column against a strip that shows exactly which columns are
  * being cleared and which are being left alone, which is the whole point of
  * protecting a year's actuals.
+ *
+ * The guards cut across the rules in both directions: a `skip` guard exempts
+ * its cells from rule-driven zeroing (this is what finally stops the default
+ * "5" rule wiping the BST's own allocation rows), and a `clear` guard zeroes
+ * its cells whether or not any rule matches the row.
  */
 export function toZeroWrites(
   target: BstTarget,
@@ -520,13 +668,18 @@ export function toZeroWrites(
   for (let m = 0; m < PUSH_MONTHS; m++) {
     if (clearsColumn(options.months[m])) columns.push(BUDGET_COL_START + m);
   }
-  if (columns.length === 0 || prefixes.length === 0) return [];
+  if (columns.length === 0) return [];
 
   const writes: CellWrite[] = [];
   for (const locations of target.bySheet.values()) {
     for (const location of locations) {
-      if (!matchesClearRules(location.combo.slice(5), prefixes)) continue;
+      const ruleMatched =
+        prefixes.length > 0 &&
+        matchesClearRules(location.combo.slice(5), prefixes) !== null;
       for (const col of columns) {
+        const guard = cellGuard(location, col - BUDGET_COL_START, options);
+        if (guard === "skip") continue;
+        if (guard !== "clear" && !ruleMatched) continue;
         writes.push({
           sheet: location.sheet,
           row: location.row,
@@ -566,9 +719,15 @@ export function toCellWrites(plan: BstPushPlan, target: BstTarget): CellWrite[] 
     // accounts are mine to reset", and where they overlap the rules win. The
     // plan warns about that overlap rather than resolving it silently.
     if (row.targetRow == null || row.status === "skipped") continue;
+    const location = target.combos.get(row.combo);
     for (let m = 0; m < PUSH_MONTHS; m++) {
       const action = plan.options.months[m];
       if (!writesValues(action)) continue;
+      // A guarded cell never receives a value: `skip` leaves it entirely
+      // alone, `clear` already put a 0 there in the pass above.
+      if (location && cellGuard(location, m, plan.options) !== "write") {
+        continue;
+      }
       writes.push({
         sheet: row.sheet,
         row: row.targetRow,

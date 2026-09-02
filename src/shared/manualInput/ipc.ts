@@ -5,7 +5,10 @@
  * account + a stats account, optional rate) with 12 months of Stats + Amount.
  * "Stats" are the operational units (hours, covers, room nights…); when a rate is
  * set the monthly Amount is derived (stats * rate); with no rate the monthly
- * Amount is typed directly. The spread_* / increase_* fields persist the inline
+ * Amount is typed directly. The Stats side has the same split one level up: when
+ * a KPI driver is referenced the monthly Stats are derived from its cached
+ * series (series / divisor * factor, e.g. "20 hours per 50,000 of revenue");
+ * with no driver the Stats are typed. The spread_* / increase_* fields persist the inline
  * "fill 12 months from a base" helper so it round-trips — a separate Stats base
  * and Amount base; the increase escalates only the Amount side. Rows live in the
  * encrypted secure store. This module is the single contract imported by both the
@@ -42,7 +45,14 @@ export interface ManualInputRow {
   statsAccount: string;
   /** NULL => monthly amounts are typed; set => monthly amounts are derived. */
   rate: number | null;
-  /** length MANUAL_INPUT_PERIOD_COUNT, Jan..Dec. Operational units (hours, covers…). */
+  /** KPI driver whose cached series drives the monthly Stats; null = stats typed. */
+  statsKpiDriverId: string | null;
+  /** The "per" amount of the KPI, e.g. the 50000 in "20 hours per 50,000". */
+  statsKpiDivisor: number | null;
+  /** Units produced per divisor of KPI, e.g. the 20 in "20 hours per 50,000". */
+  statsKpiFactor: number | null;
+  /** length MANUAL_INPUT_PERIOD_COUNT, Jan..Dec. Operational units (hours,
+   *  covers…); authoritative only when statsKpiDriverId === null. */
   stats: number[];
   /** length MANUAL_INPUT_PERIOD_COUNT; authoritative only when rate === null. */
   amounts: number[];
@@ -72,6 +82,9 @@ export interface ManualInputRowInput {
   costAccount: string;
   statsAccount: string;
   rate: number | null;
+  statsKpiDriverId: string | null;
+  statsKpiDivisor: number | null;
+  statsKpiFactor: number | null;
   stats: number[];
   amounts: number[];
   spreadMode: SpreadMode | null;

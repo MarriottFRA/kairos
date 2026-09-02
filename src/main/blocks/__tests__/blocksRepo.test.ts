@@ -1,5 +1,5 @@
-/**
- * Blocks repository tests — block CRUD + block→definition compilation against
+﻿/**
+ * Blocks repository tests â€” block CRUD + blockâ†’definition compilation against
  * in-memory SQLite. Covers: each block type's definition projection, base
  * compilation (salary / block / KPI / stat / calendar), update semantics,
  * the delete guard while referenced as a base, restore, reorder mirroring,
@@ -61,7 +61,7 @@ function flatMonthly(overrides: Partial<BlockInput> = {}): BlockInput {
   };
 }
 
-describe("saveBlock — definition projection", () => {
+describe("saveBlock â€” definition projection", () => {
   it("FLAT_MONTHLY compiles to one SPREAD def with the FLAT_MONTHLY method", () => {
     const id = saveBlock(db, OU_A, flatMonthly(), NOW);
 
@@ -133,6 +133,109 @@ describe("saveBlock — definition projection", () => {
     // base-salary curve, which is what "weighted by salary" means here.
     expect(cost.baseSelector).toBeUndefined();
     expect(listBlocks(db, OU_A)[0].spread).toBe("WEIGHTED_BASE");
+  });
+
+  it("FLAT_MONTHLY with a spread compiles to the mapped method (amount = yearly)", () => {
+    const id = saveBlock(db, OU_A, flatMonthly({ spread: "DAYS" }), NOW);
+
+    const defs = getComponentDefinitions(db, OU_A);
+    expect(defs).toHaveLength(1);
+    expect(defs[0].id).toBe(blockCostDefId(id));
+    expect(defs[0].spreadMethod).toBe("FLAT_PER_DAY");
+    expect(listBlocks(db, OU_A)[0].spread).toBe("DAYS");
+  });
+
+  it("FLAT_MONTHLY with a WEIGHTED_* spread points at the seeded stat head", () => {
+    const id = saveBlock(db, OU_A, flatMonthly({ spread: "WEIGHTED_FTE" }), NOW);
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const cost = defs.find((def) => def.id === blockCostDefId(id))!;
+    expect(cost.spreadMethod).toBe("WEIGHTED_BY_BASE");
+    expect(cost.baseSelector).toEqual({
+      kind: "COMPONENTS",
+      componentIds: [systemStatDefId(OU_A.ou, "FTE")],
+    });
+    // The system FTE stat head must have been seeded alongside, exactly as it
+    // is for a COUNT_RATE block with the same spread.
+    expect(defs.some((def) => def.id === systemStatDefId(OU_A.ou, "FTE"))).toBe(true);
+  });
+
+  it("FLAT_MONTHLY without a spread keeps the classic per-month method", () => {
+    // The zero-regression pin: an untouched fixed block (and every existing
+    // one, whose stored spread defaults to ACTIVE_MONTHS) still compiles to
+    // the engine's per-month FLAT_MONTHLY, not FLAT_PER_ACTIVE_MONTH.
+    saveBlock(db, OU_A, flatMonthly({ spread: "ACTIVE_MONTHS" }), NOW);
+    expect(getComponentDefinitions(db, OU_A)[0].spreadMethod).toBe("FLAT_MONTHLY");
+  });
+
+  it("WEEKDAYS spread carries its mask onto every compiled def", () => {
+    const fixedId = saveBlock(
+      db,
+      OU_A,
+      flatMonthly({ spread: "WEEKDAYS", weekdayMask: 1 << 5 }),
+      NOW
+    );
+    const dualId = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "COUNT_RATE",
+        label: "Live Music",
+        accountCode: "628970",
+        accountLocked: true,
+        statsAccountCode: "988200",
+        spread: "WEEKDAYS",
+        weekdayMask: (1 << 1) | (1 << 5),
+      },
+      NOW
+    );
+
+    const defs = getComponentDefinitions(db, OU_A);
+    expect(defs.find((def) => def.id === blockCostDefId(fixedId))).toMatchObject({
+      spreadMethod: "WEEKDAY_COUNT",
+      weekdayMask: 1 << 5,
+    });
+    // On BOTH dual defs: the loader writes cost = qty × rate and stat = qty
+    // into the yearlyValue slot, so a shared method/mask books cost and count
+    // on the same days.
+    expect(defs.find((def) => def.id === blockCostDefId(dualId))).toMatchObject({
+      spreadMethod: "WEEKDAY_COUNT",
+      weekdayMask: (1 << 1) | (1 << 5),
+    });
+    expect(defs.find((def) => def.id === blockStatDefId(dualId))).toMatchObject({
+      spreadMethod: "WEEKDAY_COUNT",
+      weekdayMask: (1 << 1) | (1 << 5),
+    });
+    expect(listBlocks(db, OU_A).map((block) => block.weekdayMask)).toEqual([
+      1 << 5,
+      (1 << 1) | (1 << 5),
+    ]);
+  });
+
+  it("WEEKDAYS with no weekday chosen is refused", () => {
+    expect(() =>
+      saveBlock(db, OU_A, flatMonthly({ spread: "WEEKDAYS" }), NOW)
+    ).toThrow(/at least one weekday/i);
+    expect(() =>
+      saveBlock(db, OU_A, flatMonthly({ spread: "WEEKDAYS", weekdayMask: 0 }), NOW)
+    ).toThrow(/at least one weekday/i);
+  });
+
+  it("re-saving away from WEEKDAYS clears the mask from config and defs", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      flatMonthly({ spread: "WEEKDAYS", weekdayMask: 1 << 5 }),
+      NOW
+    );
+    saveBlock(db, OU_A, flatMonthly({ id, spread: "ACTIVE_MONTHS" }), NOW);
+
+    expect(listBlocks(db, OU_A)[0].weekdayMask).toBeUndefined();
+    const def = getComponentDefinitions(db, OU_A).find(
+      (candidate) => candidate.id === blockCostDefId(id)
+    )!;
+    expect(def.spreadMethod).toBe("FLAT_MONTHLY");
+    expect(def.weekdayMask).toBeUndefined();
   });
 
   it("MULTIPLIER of base salary compiles to PERCENT_OF over BASE_SALARY", () => {
@@ -287,6 +390,31 @@ describe("saveBlock — definition projection", () => {
     });
   });
 
+  it("MULTIPLIER of the vacation accrual references the seeded accrual head", () => {
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "SS on Accrual",
+        accountCode: "518000",
+        accountLocked: true,
+        base: { kind: "ACCRUAL" },
+      },
+      NOW
+    );
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const accrual = defs.find((def) => def.id === holidayAccrualDefId(OU_A.ou))!;
+    expect(accrual.kind).toBe("HOLIDAY_ACCRUAL");
+
+    const charge = defs.find((def) => def.label === "SS on Accrual")!;
+    expect(charge.baseSelector).toEqual({
+      kind: "COMPONENTS",
+      componentIds: [holidayAccrualDefId(OU_A.ou)],
+    });
+  });
+
   it("MULTIPLIER of a calendar series rides base_ref JSON", () => {
     saveBlock(
       db,
@@ -303,6 +431,39 @@ describe("saveBlock — definition projection", () => {
 
     const [def] = getComponentDefinitions(db, OU_A);
     expect(def.baseSelector).toEqual({ kind: "CALENDAR", series: "PAY_DAYS" });
+  });
+
+  it("MULTIPLIER of service days rides base_ref JSON", () => {
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Per Service Day",
+        accountCode: "517500",
+        accountLocked: true,
+        base: { kind: "SERVICE", mode: "TOTAL" },
+      },
+      NOW
+    );
+    saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Per Service Day (Month)",
+        accountCode: "517600",
+        accountLocked: true,
+        base: { kind: "SERVICE", mode: "MONTH" },
+      },
+      NOW
+    );
+
+    const defs = getComponentDefinitions(db, OU_A);
+    const total = defs.find((def) => def.label === "Per Service Day")!;
+    expect(total.baseSelector).toEqual({ kind: "SERVICE", mode: "TOTAL" });
+    const month = defs.find((def) => def.label === "Per Service Day (Month)")!;
+    expect(month.baseSelector).toEqual({ kind: "SERVICE", mode: "MONTH" });
   });
 
   it("CUSTOM_MONTHLY compiles to DIRECT_MONTHLY", () => {
@@ -379,7 +540,7 @@ describe("saveBlock — definition projection", () => {
       NOW
     );
     const [dto] = listBlocks(db, OU_A);
-    // A rule is legal with no filters at all — that means "everyone".
+    // A rule is legal with no filters at all â€” that means "everyone".
     expect(dto.poolSpreadBase).toBe("HEADCOUNT");
     expect(dto.poolEligibilityMode).toBe("MANUAL");
     expect(dto.poolMonthlyAmounts).toEqual(Array(12).fill(1000));
@@ -418,7 +579,7 @@ describe("saveBlock — definition projection", () => {
   });
 });
 
-describe("saveBlock — compound (COMBINE) bases", () => {
+describe("saveBlock â€” compound (COMBINE) bases", () => {
   function compound(overrides: Partial<BlockInput> = {}): BlockInput {
     return {
       blockType: "MULTIPLIER",
@@ -455,7 +616,7 @@ describe("saveBlock — compound (COMBINE) bases", () => {
     saveBlock(db, OU_A, compound(), NOW);
 
     const block = listBlocks(db, OU_A)[0];
-    expect(block.ratioNoHeadcount).toBe(true); // DIV → a ratio by default
+    expect(block.ratioNoHeadcount).toBe(true); // DIV â†’ a ratio by default
     expect(block.useRowRate).toBe(true);
     expect(
       getComponentDefinitions(db, OU_A).find((def) => def.label === "Cost Per Hour")!
@@ -477,7 +638,7 @@ describe("saveBlock — compound (COMBINE) bases", () => {
   });
 
   it("lets a non-division compound keep the headcount multiplier", () => {
-    saveBlock(db, OU_A, compound({ label: "Days × Hours", base: {
+    saveBlock(db, OU_A, compound({ label: "Days Ã— Hours", base: {
       kind: "COMBINE",
       op: "MUL",
       left: { kind: "CALENDAR", series: "PAY_DAYS" },
@@ -503,7 +664,7 @@ describe("saveBlock — compound (COMBINE) bases", () => {
     );
 
     // Editing Housing to divide by the Levy that already depends on it would
-    // close the loop — caught here rather than as a CYCLE at recalc time.
+    // close the loop â€” caught here rather than as a CYCLE at recalc time.
     expect(() =>
       saveBlock(
         db,
@@ -552,7 +713,7 @@ describe("saveBlock — compound (COMBINE) bases", () => {
   });
 });
 
-describe("saveBlock — where it books", () => {
+describe("saveBlock â€” where it books", () => {
   const multiplier = (overrides: Partial<BlockInput> = {}): BlockInput => ({
     blockType: "MULTIPLIER",
     label: "Shared Services Levy",
@@ -641,7 +802,7 @@ describe("saveBlock — where it books", () => {
   });
 });
 
-describe("saveBlock — update semantics", () => {
+describe("saveBlock â€” update semantics", () => {
   it("recompiles the projection on edit and preserves sort order", () => {
     const id = saveBlock(db, OU_A, flatMonthly(), NOW);
     const before = listBlocks(db, OU_A)[0];
@@ -851,7 +1012,7 @@ describe("reorderBlocks", () => {
   });
 });
 
-describe("saveBlock — rate rules", () => {
+describe("saveBlock â€” rate rules", () => {
   function rulesMultiplier(overrides: Partial<BlockInput> = {}): BlockInput {
     return {
       blockType: "MULTIPLIER",
@@ -897,7 +1058,7 @@ describe("saveBlock — rate rules", () => {
       ],
       otherwise: 0.05,
     });
-    // The compiled def is byte-identical to a plain multiplier — rules resolve
+    // The compiled def is byte-identical to a plain multiplier â€” rules resolve
     // to per-row values at load time, never into the definition.
     const def = getComponentDefinitions(db, OU_A).find((d) => d.label === "Banded Bonus")!;
     expect(def.spreadMethod).toBe("PERCENT_OF");
@@ -1031,7 +1192,7 @@ describe("saveBlock — rate rules", () => {
   });
 
   it("still rejects a COMPUTED field (renderer-only value)", () => {
-    // fte is seeded as a COMPUTED catalog field — it never reaches the loader.
+    // fte is seeded as a COMPUTED catalog field â€” it never reaches the loader.
     expect(() =>
       saveBlock(
         db,
@@ -1087,10 +1248,10 @@ describe("saveBlock — rate rules", () => {
     expect(listBlocks(db, OU_A).find((b) => b.id === rulesId)?.rateRules?.rules[0]?.rateBlockId).toBe(
       targetId
     );
-    // The referenced block cannot be deleted out from under the rule…
+    // The referenced block cannot be deleted out from under the ruleâ€¦
     expect(() => deleteBlock(db, OU_A, targetId, NOW)).toThrow(/Scaled Uniforms/);
-    // …and a rule multiplier cannot loop back through the base chain: pointing
-    // the flat block's… actually the reverse — the rules block cannot
+    // â€¦and a rule multiplier cannot loop back through the base chain: pointing
+    // the flat block'sâ€¦ actually the reverse â€” the rules block cannot
     // reference something that (via bases) depends on the rules block itself.
     const dependentId = saveBlock(
       db,
@@ -1354,6 +1515,7 @@ describe("scoping + engine round trip", () => {
         deletedAt: null,
       },
       calendar: {
+        year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
         holidayDays: new Float64Array(12),
@@ -1414,8 +1576,8 @@ describe("scoping + engine round trip", () => {
     ensurePositionCountDef(db, OU_A, NOW);
     const defs = getComponentDefinitions(db, OU_A);
 
-    // Count 3, half-owned by a shared cluster (weight 0.5 → heads must NOT flex),
-    // and idle in January (seasonality[0] = 0 → that month's head is 0).
+    // Count 3, half-owned by a shared cluster (weight 0.5 â†’ heads must NOT flex),
+    // and idle in January (seasonality[0] = 0 â†’ that month's head is 0).
     const seasonality = new Array(12).fill(1);
     seasonality[0] = 0;
     const compiled = compile({
@@ -1428,6 +1590,7 @@ describe("scoping + engine round trip", () => {
         deletedAt: null,
       },
       calendar: {
+        year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
         holidayDays: new Float64Array(12),
@@ -1479,7 +1642,7 @@ describe("scoping + engine round trip", () => {
   });
 
   // These heads are what the Positions grid's account columns post through. They
-  // must exist for every OU regardless of which blocks the user built — before
+  // must exist for every OU regardless of which blocks the user built â€” before
   // this, only the position-count head was permanently seeded, which is why
   // Results only ever showed A972540. Asserted against the real SQL (not
   // hand-built defs) so the seed and the read path are pinned together; the
@@ -1510,7 +1673,7 @@ describe("scoping + engine round trip", () => {
       kind: "HOLIDAY_ACCRUAL",
       accountCode: "",
     });
-    // The vacation-cost head is a PERCENT_OF spread over the VACATION series —
+    // The vacation-cost head is a PERCENT_OF spread over the VACATION series â€”
     // no new opcode, no new ComponentKind, no migration of the kind CHECK. The
     // selector rides as base_ref JSON, so this also pins that round-trip.
     expect(byId.get(vacationCostDefId(OU_A.ou))).toMatchObject({
@@ -1525,7 +1688,7 @@ describe("scoping + engine round trip", () => {
     });
 
     // The set must still compile: exactly one BASE_SALARY, at most one accrual,
-    // and the vacation base resolves — all validated by compile().
+    // and the vacation base resolves â€” all validated by compile().
     const compiled = compile({
       scenario: {
         id: "scen-1" as never,
@@ -1536,6 +1699,7 @@ describe("scoping + engine round trip", () => {
         deletedAt: null,
       },
       calendar: {
+        year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
         holidayDays: new Float64Array(12),
@@ -1573,5 +1737,92 @@ describe("scoping + engine round trip", () => {
       buyouts: [],
     });
     expect("errors" in compiled).toBe(false);
+  });
+});
+
+describe("saveBlock â€” collapse months (lands in chosen months)", () => {
+  const thirteenth = (collapseMonths?: number[]): BlockInput => ({
+    blockType: "MULTIPLIER",
+    label: "Thirteenth Salary",
+    accountCode: "628900",
+    accountLocked: true,
+    base: { kind: "BASE_SALARY" },
+    ...(collapseMonths ? { collapseMonths } : {}),
+  });
+
+  it("round-trips normalized (deduped, sorted) through DTO and compiled def", () => {
+    const id = saveBlock(db, OU_A, thirteenth([12, 6, 6]), NOW);
+
+    expect(listBlocks(db, OU_A)[0].collapseMonths).toEqual([6, 12]);
+    const [def] = getComponentDefinitions(db, OU_A);
+    expect(def.id).toBe(blockCostDefId(id));
+    expect(def.collapseMonths).toEqual([6, 12]);
+  });
+
+  it("clears the column when a re-save goes back to spreading with the base", () => {
+    const id = saveBlock(db, OU_A, thirteenth([6]), NOW);
+    saveBlock(db, OU_A, { ...thirteenth(), id }, NOW);
+
+    expect(listBlocks(db, OU_A)[0].collapseMonths).toBeUndefined();
+    expect(getComponentDefinitions(db, OU_A)[0].collapseMonths).toBeUndefined();
+  });
+
+  it("projects DIRECT_ABS and collapse_months together for a KPI base", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      {
+        blockType: "MULTIPLIER",
+        label: "Bonus Pool Share",
+        accountCode: "628970",
+        accountLocked: true,
+        base: { kind: "KPI", kpiDriverId: "kpi-1" },
+        collapseMonths: [12],
+      },
+      NOW
+    );
+
+    const [def] = getComponentDefinitions(db, OU_A);
+    expect(def.id).toBe(blockCostDefId(id));
+    expect(def.spreadMethod).toBe("DIRECT_ABS");
+    expect(def.kpiDriverId).toBe("kpi-1");
+    expect(def.collapseMonths).toEqual([12]);
+  });
+
+  it("rejects the field on a non-multiplier block", () => {
+    expect(() =>
+      saveBlock(db, OU_A, flatMonthly({ collapseMonths: [6] }), NOW)
+    ).toThrow(/Only a Multiplier block/);
+  });
+
+  it("rejects out-of-range months and an empty selection", () => {
+    expect(() => saveBlock(db, OU_A, thirteenth([0]), NOW)).toThrow(
+      /between January and December/
+    );
+    expect(() => saveBlock(db, OU_A, thirteenth([13]), NOW)).toThrow(
+      /between January and December/
+    );
+    expect(() => saveBlock(db, OU_A, thirteenth([6.5]), NOW)).toThrow(
+      /between January and December/
+    );
+    expect(() => saveBlock(db, OU_A, thirteenth([]), NOW)).toThrow(
+      /at least one month/
+    );
+  });
+
+  it("normalizes a malformed synced blob on read instead of crashing", () => {
+    const id = saveBlock(db, OU_A, thirteenth([6]), NOW);
+    // A hand-edited or older-peer blob: junk entries must drop out on read.
+    const row = db
+      .prepare(`SELECT config FROM block_configs WHERE id = ?`)
+      .get(id) as { config: string };
+    const config = JSON.parse(row.config) as Record<string, unknown>;
+    config.collapseMonths = [12, "x", 0, 6, 6, null, 13];
+    db.prepare(`UPDATE block_configs SET config = ? WHERE id = ?`).run(
+      JSON.stringify(config),
+      id
+    );
+
+    expect(listBlocks(db, OU_A)[0].collapseMonths).toEqual([6, 12]);
   });
 });

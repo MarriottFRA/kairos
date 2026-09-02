@@ -17,10 +17,12 @@
  * merely a fast encoding of it.
  */
 
+import { weekdayCounts } from "../calendar";
 import {
   bankHolidayCoefficient,
   BaseSelector,
   CalendarContext,
+  collapseWeights,
   ComponentValue,
   CostComponentDefinition,
   MONTHS,
@@ -623,6 +625,20 @@ export function referencePosition(
             }
             break;
           }
+          case "WEEKDAY_COUNT": {
+            // Per-occurrence: the value (carried in the yearlyValue slot) is
+            // booked once for each day of the month falling on a masked
+            // weekday — a 5-Friday month books 5×. The yearly total follows
+            // the calendar; a missing/empty mask reads as a zero line.
+            const perOccurrence = value?.yearlyValue ?? 0;
+            const counts = weekdayCounts(calendar.year, def.weekdayMask ?? 0);
+            for (let m = 0; m < MONTHS; m++) {
+              out[m] =
+                perOccurrence * counts[m] * seas[m] *
+                (applyIncrease ? d.incMul[m] : 1);
+            }
+            break;
+          }
           case "DIRECT_ABS": {
             // Absolute pass-through — no seasonality, no increase. The KPI
             // series (× per-position multiplier) is already resolved to
@@ -633,6 +649,18 @@ export function referencePosition(
           }
           default:
             throw new Error(`reference: unsupported spread method ${def.spreadMethod}`);
+        }
+        // Land the whole yearly result in the def's chosen months (13th-month
+        // shape) — after the spread computed as usual, before the line is
+        // published so downstream bases read the collapsed series, and before
+        // the count × weight tail, with which it commutes. Mirror of the
+        // COLLAPSE_LINE emission in compile.ts; the weights (and the
+        // inactive-month drop policy) come from the one shared helper.
+        if (def.collapseMonths && def.collapseMonths.length > 0) {
+          const w = collapseWeights(def.collapseMonths, position.seasonality);
+          let total = 0;
+          for (let m = 0; m < MONTHS; m++) total += out[m];
+          for (let m = 0; m < MONTHS; m++) out[m] = w[m] * total;
         }
         break;
       }

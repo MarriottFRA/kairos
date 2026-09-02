@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelCopyHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers } from "./handlers";
 import { createAuthDebugHandlers } from "./handlers/authDebug"; // [AUTH-DEBUG]
 import { KAIROS_SYNC_CHANNELS } from "../shared/kairosSync/ipc";
 import {
@@ -169,6 +169,15 @@ export function initializeIpc(deps: {
   // cost-component definitions, plaintext local store). OU-gated.
   const blocksHandlers = createBlocksHandlers();
   Object.entries(blocksHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register Copy-hotel-setup handlers (clone another hotel's blocks + setup
+  // into the selected one). OU-gated on the TARGET — the selected hotel in
+  // `request.ou`; the source OU is re-branded inside the handler, the same
+  // second-scope discipline the cluster channels follow.
+  const hotelCopyHandlers = createHotelCopyHandlers();
+  Object.entries(hotelCopyHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 

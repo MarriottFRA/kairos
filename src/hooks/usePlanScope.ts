@@ -64,6 +64,7 @@ import { DepartmentOwnership, Relation } from "../shared/kairosSync/protocol";
 import {
   DepartmentWritePolicy,
   NO_DEPARTMENT_WRITE,
+  clampToGrant,
   departmentWritePolicy,
   enumeratedWritableDepartments,
   holdsAnyDepartment,
@@ -226,6 +227,7 @@ export function usePlanScope(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [canAddRows, setCanAddRows] = useState<boolean | undefined>(undefined);
+  const [grantCanEdit, setGrantCanEdit] = useState<boolean | undefined>(undefined);
   /**
    * The re-ask trigger, carrying whether that particular ask ignores the cache.
    *
@@ -305,16 +307,22 @@ export function usePlanScope(
   }, [ou, planId, nonce]);
 
   /**
-   * The delegation's own permission flags, for the one flag the grid needs.
+   * The delegation's own permission flags, for the two flags the grid needs.
    *
    * Only ever fetched for somebody who actually holds a delegation — an owner's
    * page must not pay a request to learn something that cannot apply to them.
-   * A failure leaves it `undefined`, which is permissive: see `canAddRows`.
+   * A failure leaves both `undefined`, which is permissive: see `canAddRows`.
+   *
+   * `canEdit` is the read-only switch itself, and it is read here as well as
+   * trusted to shape the ownership answer: `writable` describes who HOLDS each
+   * department, and a read-only delegate displaces nobody — so this flag is the
+   * one place the grant's own read-only-ness is stated outright.
    */
   useEffect(() => {
     const relation = ownership?.me.relation;
     if (!ou || !planId || relation !== "DELEGATE") {
       setCanAddRows(undefined);
+      setGrantCanEdit(undefined);
       return;
     }
 
@@ -326,7 +334,10 @@ export function usePlanScope(
         // single row is the expected shape. More than one would mean an owner is
         // reading it, and `relation` has already ruled that out.
         const mine = result.data.delegations[0];
-        if (mine) setCanAddRows(mine.canAddRows);
+        if (mine) {
+          setCanAddRows(mine.canAddRows);
+          setGrantCanEdit(mine.canEdit);
+        }
       })
       .catch(() => {
         // Permissive on failure, deliberately.
@@ -343,16 +354,27 @@ export function usePlanScope(
     // readable ones. An EMPTY set, never `undefined` — the two mean opposite
     // things here, and `undefined` is the one that unlocks the grid.
     const empty: ReadonlySet<string> = new Set<string>();
-    const writePolicy = notShared
-      ? NO_DEPARTMENT_WRITE
-      : ownership === null
-        ? undefined
-        : departmentWritePolicy(ownership);
+    // The grant's own `canEdit: false` clamps whatever the ownership answer
+    // produced: it strips every write capability server-side, so no department
+    // may stay writable under it however the enumeration was shaped.
+    const writePolicy = clampToGrant(
+      notShared
+        ? NO_DEPARTMENT_WRITE
+        : ownership === null
+          ? undefined
+          : departmentWritePolicy(ownership),
+      grantCanEdit
+    );
     return {
       ownership,
       writePolicy,
       holdsNoDepartment: writePolicy !== undefined && !holdsAnyDepartment(writePolicy),
-      enumeratedWritable: notShared ? [] : enumeratedWritableDepartments(ownership),
+      // A read-only delegate is working in no department, whatever the
+      // enumeration says — presence must not report them as mid-edit.
+      enumeratedWritable:
+        notShared || grantCanEdit === false
+          ? []
+          : enumeratedWritableDepartments(ownership),
       readableDepartments: notShared
         ? empty
         : ownership === null
@@ -363,7 +385,9 @@ export function usePlanScope(
       // Unpublished plans keep the full editor — the demotion only applies to a
       // plan the server has an opinion about. A locked one is not unpublished.
       structureEditable: notShared ? false : ownership ? ownership.structureEditableByMe : true,
-      canAddRows: notShared ? false : canAddRows,
+      // `canEdit: false` strips every write capability, adding rows included,
+      // whatever the separate `canAddRows` flag was set to.
+      canAddRows: notShared || grantCanEdit === false ? false : canAddRows,
       planLocked: notShared || ownership?.me.relation === "GLOBAL_ADMIN",
       unpublished,
       notShared,
@@ -371,5 +395,5 @@ export function usePlanScope(
       error,
       refresh,
     };
-  }, [ownership, unpublished, notShared, canAddRows, loading, error, refresh]);
+  }, [ownership, unpublished, notShared, canAddRows, grantCanEdit, loading, error, refresh]);
 }

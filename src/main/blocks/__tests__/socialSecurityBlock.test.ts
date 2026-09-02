@@ -1,5 +1,5 @@
-/**
- * Social Security / NI block — a user-added block that emits a SOCIAL_SECURITY
+﻿/**
+ * Social Security / NI block â€” a user-added block that emits a SOCIAL_SECURITY
  * definition once a scheme is attached. Covers: an unconfigured block compiles
  * to NO def (harmless); configuring it emits the def; and an end-to-end
  * compile+simulate produces the NI line off the contributory base each scheme
@@ -108,6 +108,7 @@ function scenarioInput(schemes: SocialSecurityScheme[]): ScenarioInput {
   return {
     scenario: { id: "scen-1" as never, ou: OU.ou, year: 2026, label: "", updatedAt: NOW.now, deletedAt: null },
     calendar: {
+      year: 2026,
       realDays: new Float64Array(12).fill(21),
       flatDays: new Float64Array(12).fill(30),
       holidayDays: new Float64Array(12),
@@ -159,8 +160,8 @@ describe("configuring the NI block", () => {
       .positionLines("pos-1" as never)
       .find((line) => line.component.id === niCostDefId);
     expect(niLine).toBeDefined();
-    // Salaried 3000/mo, no vacation → net base + vacation = 3000 each month; flat
-    // 10% → 300/mo, 3600/yr.
+    // Salaried 3000/mo, no vacation â†’ net base + vacation = 3000 each month; flat
+    // 10% â†’ 300/mo, 3600/yr.
     const total = [...niLine!.months].reduce((sum, value) => sum + value, 0);
     expect(total).toBeCloseTo(3600, 5);
     for (const month of niLine!.months) expect(month).toBeCloseTo(300, 5);

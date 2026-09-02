@@ -255,7 +255,30 @@ import { POSITION_COUNT_ACCOUNT, STAFFING_ACCOUNT_FILTER } from "./systemAccount
 //     migration is needed, and nothing derives from this field anyway (the only
 //     reader is the Results display-name fallback, which takes the string as
 //     it stands). The bump is what re-applies dropdown_source per OU.
-export const SEED_VERSION = 29;
+// v30: seven roles the one-per-role list was still missing, each named in the
+//     list's own idiom (spelled out, no shorthand — "Food & Beverage
+//     Coordinator", not "F&B"; "Telephone Operator", not "Telecomm") and filed
+//     beside the post it works with: Telephone Operator (Front Office — a PBX
+//     post Front Desk Agent doesn't cover), Revenue Analyst (beside Revenue
+//     Manager, the working-level shape Sales Executive already has), Food &
+//     Beverage Coordinator (the department-coordinator pattern of HR and
+//     Sales), and Compliance Manager (Finance — a role of its own, not a grade
+//     or outlet variant of anything listed). Financial Controller (beside
+//     Director of Finance) is a rule-4 coexistence: the group runs cluster
+//     DOFs over several hotels each, so the on-property finance head is a
+//     second post the group counts, not a junior DOF — posts worded "Assistant
+//     Director of Finance" (retired v29) file here now, the contract wording
+//     staying in the local title as ever. The last two are Marriott
+//     vocabulary — Rooms Controller (Front Office) and Voyager (General) — in
+//     the list because the group's hotels ARE Marriott-branded, so rule 3 cuts
+//     the other way: these are posts the group genuinely counts across its
+//     large properties, not one hotel's wording for a listed role. Front Desk
+//     Manager and Housekeeping Manager stayed out on the same grounds their
+//     Assistant variants left in v29: a second management post under a
+//     department head is the parent title + Classification. Additions only, so
+//     nothing needs a retirement mapping; the bump re-applies dropdown_source
+//     per OU.
+export const SEED_VERSION = 30;
 
 /** base_account prefixes each account field books to. The A5 cost prefixes are a
  *  picker-scoped narrowing only — a cost is any non-stats account (the split
@@ -372,10 +395,12 @@ const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
     group: "Finance & Purchasing",
     titles: [
       "Director of Finance",
+      "Financial Controller",
       "Cost Controller",
       "Accountant",
       "Accounts Clerk",
       "Income Auditor",
+      "Compliance Manager",
       "Payroll Officer",
       "Purchasing Manager",
       "Storekeeper",
@@ -398,9 +423,11 @@ const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
       "Night Manager",
       "Front Desk Supervisor",
       "Front Desk Agent",
+      "Rooms Controller",
       "Guest Relations Agent",
       "Concierge",
       "Night Auditor",
+      "Telephone Operator",
       "Reservations Manager",
       "Reservations Agent",
       "Bell Attendant",
@@ -423,6 +450,7 @@ const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
     titles: [
       "Director of Food & Beverage",
       "Food & Beverage Manager",
+      "Food & Beverage Coordinator",
       "Outlet Manager",
       "Outlet Supervisor",
       "Host / Hostess",
@@ -451,6 +479,7 @@ const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
       "Sales Executive",
       "Sales Coordinator",
       "Revenue Manager",
+      "Revenue Analyst",
       "Marketing Manager",
       "Events Manager",
       "Events Executive",
@@ -483,7 +512,9 @@ const STANDARD_JOB_TITLE_GROUPS: Array<{ group: string; titles: string[] }> = [
     ],
   },
   // Not a department: these are budgeted anywhere and have no role of their own.
-  { group: "General", titles: ["Trainee / Apprentice", "Intern"] },
+  // Voyager is Marriott's management-trainee programme — its own line, not a
+  // Trainee spelling, because a hotel budgets both at once.
+  { group: "General", titles: ["Voyager", "Trainee / Apprentice", "Intern"] },
 ];
 
 /** Flattened for the picker. The order matters: the editor renders a section
@@ -695,9 +726,12 @@ const SEED: FieldDef[] = [
   }),
   // The universal position-count head (VBA §21), surfaced as the account it
   // books to. Read-only and pinned: whatever the per-row Headcount account above
-  // says, the engine ALWAYS books Count to A972540 as well, so heads can never go
+  // says, the engine books Count to A972540 as well, so heads can never go
   // unreported. This column exists purely so that account is traceable — it is
-  // the answer to "where did A972540 in Results come from?".
+  // the answer to "where did A972540 in Results come from?". The defaultValue is
+  // only the fallback: the cell derives per row, blank for Buyout Labour, whose
+  // Count is bought-in labour and posts no headcount (see
+  // systemAccounts.positionCountAccountForJobType).
   //
   // It replaced (v20) a "Position Count" NUMBER column, which restated Count and
   // so explained nothing about the head it stood for.

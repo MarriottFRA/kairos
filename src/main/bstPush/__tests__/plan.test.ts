@@ -15,12 +15,15 @@ import * as XLSX from "xlsx";
 import {
   NotBstFileError,
   UnsupportedLayoutError,
+  isAllocationLabel,
   isDepartmentSheet,
   readTarget,
 } from "../readTarget";
+import { annotateProtection } from "../readProtection";
 import {
   buildClearScope,
   buildPushPlan,
+  cellGuard,
   countZeroableCells,
   scaleForAccount,
   toBareAccount,
@@ -34,9 +37,11 @@ import {
   DEFAULT_BST_PUSH_OPTIONS,
   DEFAULT_CLEAR_PREFIXES,
   matchesClearRules,
+  normalizeBstPushConfig,
   normalizeBstPushOptions,
   normalizeClearPrefix,
   normalizeClearPrefixes,
+  normalizeGuardMode,
 } from "../../../shared/bstPush/ipc";
 import type { BstPushOptions, MonthAction } from "../../../shared/bstPush/ipc";
 import type { OutputAggRowDto } from "../../../shared/positions/ipc";
@@ -57,13 +62,20 @@ function setupSheet(): XLSX.WorkSheet {
   return ws;
 }
 
-/** A department sheet: E2 echoes the code, column B carries the combos. */
-function deptSheet(code: string, rows: { row: number; combo: string; desc: string }[]) {
+/** A department sheet: E2 echoes the code, column B carries the combos, and
+ *  column C, when given, carries the BST's row label ("Allocated from …"). */
+function deptSheet(
+  code: string,
+  rows: { row: number; combo: string; desc: string; c?: string }[]
+) {
   const ws: XLSX.WorkSheet = { "!ref": `A1:T${Math.max(...rows.map((r) => r.row)) + 2}` };
   (ws as any).E2 = { t: "s", v: code };
   for (const entry of rows) {
     (ws as any)[`A${entry.row}`] = { t: "s", v: entry.desc };
     (ws as any)[`B${entry.row}`] = { t: "s", v: entry.combo };
+    if (entry.c !== undefined) {
+      (ws as any)[`C${entry.row}`] = { t: "s", v: entry.c };
+    }
   }
   return ws;
 }
@@ -135,9 +147,12 @@ function outRow(
 const NAMES = new Map<string, string>();
 const RULES = [...DEFAULT_CLEAR_PREFIXES];
 
-/** Every month doing the same thing. */
+/** Every month doing the same thing. Guards off — the pre-guard behavior most
+ *  of these tests were written against. */
 const every = (action: MonthAction): BstPushOptions => ({
   months: Array.from({ length: 12 }, () => action),
+  allocationRows: "overwrite",
+  protectedCells: "overwrite",
   backup: true,
   skipUnusedCombos: false,
 });
@@ -147,6 +162,8 @@ const only = (action: MonthAction, ...months: number[]): BstPushOptions => ({
   months: Array.from({ length: 12 }, (_unused, index) =>
     months.includes(index + 1) ? action : "skip"
   ),
+  allocationRows: "overwrite",
+  protectedCells: "overwrite",
   backup: true,
   skipUnusedCombos: false,
 });
@@ -471,6 +488,8 @@ describe("buildPushPlan", () => {
         "replace", "replace", "replace", "replace",
         "replace", "replace", "replace", "replace",
       ],
+      allocationRows: "overwrite",
+      protectedCells: "overwrite",
       backup: true,
       skipUnusedCombos: false,
     };
@@ -651,6 +670,8 @@ describe("cell writes", () => {
         "clear", "clear", "clear",
         "replace", "replace", "replace",
       ],
+      allocationRows: "overwrite",
+      protectedCells: "overwrite",
       backup: true,
       skipUnusedCombos: false,
     };
@@ -691,24 +712,289 @@ describe("cell writes", () => {
   });
 });
 
+// ── The guards: allocation rows and protected cells ─────────────────
+
+/**
+ * A separate fixture so the guard cases cannot disturb the counts the tests
+ * above assert. Row 20 and 30 are allocation rows (column C says so); row 20's
+ * account matches the default "5" rule, row 30's does not — the pair that
+ * exposes both directions of the guard/rule interaction.
+ */
+function buildGuardWorkbook(): Buffer {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, setupSheet(), "Setup Fields");
+  XLSX.utils.book_append_sheet(
+    wb,
+    deptSheet("0020", [
+      { row: 10, combo: "0020-510000", desc: "Wage" },
+      { row: 20, combo: "0020-512000", desc: "Wage share", c: "Allocated from 0363" },
+      { row: 30, combo: "0020-414001", desc: "Food cost share", c: "Alloc From 0362/0364" },
+      { row: 40, combo: "0020-560000", desc: "Benefits" },
+    ]),
+    "0020"
+  );
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+}
+
+/** A fresh target per test (lockedMonths is mutated), with locks injected the
+ *  way annotateProtection would — SheetJS fixtures cannot carry protection. */
+function guardTarget(locks: Record<string, boolean[] | true> = {}) {
+  const fresh = readTarget(buildGuardWorkbook(), "guards.xlsx");
+  for (const [combo, spec] of Object.entries(locks)) {
+    fresh.combos.get(combo)!.lockedMonths =
+      spec === true ? Array.from({ length: 12 }, () => true) : spec;
+  }
+  return fresh;
+}
+
+function guardPlan(
+  t: ReturnType<typeof guardTarget>,
+  outputs: OutputAggRowDto[],
+  options: BstPushOptions,
+  clearPrefixes: string[] = RULES
+) {
+  return buildPushPlan({
+    target: t,
+    filePath: "C:/tmp/guards.xlsx",
+    outputs,
+    options,
+    clearPrefixes,
+    departmentNameByCode: NAMES,
+    accountNameByCode: NAMES,
+  });
+}
+
+const rowsTouched = (writes: { row: number }[]) =>
+  new Set(writes.map((write) => write.row));
+
+describe("allocation detection", () => {
+  it("matches every observed column C spelling", () => {
+    expect(isAllocationLabel("Allocated from 0120-759101")).toBe(true);
+    expect(isAllocationLabel("Allocation from 0363")).toBe(true);
+    expect(isAllocationLabel("Alloc From 0362/0364")).toBe(true);
+    expect(isAllocationLabel("Allocated to 0010-660112")).toBe(true);
+    expect(isAllocationLabel("allocation:")).toBe(true);
+    expect(isAllocationLabel("Payroll")).toBe(false);
+    expect(isAllocationLabel("")).toBe(false);
+    expect(isAllocationLabel(null)).toBe(false);
+  });
+
+  it("reads column C into the target and flags allocation rows", () => {
+    const fresh = guardTarget();
+    expect(fresh.combos.get("0020-512000")).toMatchObject({
+      columnC: "Allocated from 0363",
+      isAllocation: true,
+    });
+    expect(fresh.combos.get("0020-414001")!.isAllocation).toBe(true);
+    expect(fresh.combos.get("0020-510000")).toMatchObject({
+      columnC: null,
+      isAllocation: false,
+    });
+    // SheetJS cannot see protection, so a freshly read target is all-unlocked.
+    expect(fresh.combos.get("0020-512000")!.lockedMonths).toEqual(
+      Array(12).fill(false)
+    );
+  });
+});
+
+describe("cellGuard", () => {
+  it("resolves the most conservative applicable mode per cell", () => {
+    const fresh = guardTarget({ "0020-512000": [true, ...Array(11).fill(false)] });
+    const allocation = fresh.combos.get("0020-512000")!;
+    const plain = fresh.combos.get("0020-510000")!;
+
+    // Skip beats clear on the locked cell; the allocation mode alone governs
+    // the unlocked cells of the same row.
+    const options = { allocationRows: "clear", protectedCells: "skip" } as const;
+    expect(cellGuard(allocation, 0, options)).toBe("skip");
+    expect(cellGuard(allocation, 1, options)).toBe("clear");
+    expect(cellGuard(plain, 0, options)).toBe("write");
+
+    // Overwrite everywhere = no guard at all.
+    expect(
+      cellGuard(allocation, 0, {
+        allocationRows: "overwrite",
+        protectedCells: "overwrite",
+      })
+    ).toBe("write");
+  });
+});
+
+describe("guard modes", () => {
+  it("skip keeps an allocation row out of BOTH passes", () => {
+    const fresh = guardTarget();
+    const options: BstPushOptions = { ...every("replace"), allocationRows: "skip" };
+    const result = guardPlan(fresh, [outRow("D0020", "A512000", 12_000)], options);
+
+    // The row held Kairos data, and every cell of it was withheld.
+    expect(result.rows[0].status).toBe("guarded");
+    expect(result.rows[0].months).toEqual(Array(12).fill(0));
+    expect(result.rows[0].guardedMonths).toEqual(Array(12).fill(true));
+    expect(result.guardedRowCount).toBe(1);
+    expect(result.guardedCellCount).toBe(12);
+    expect(result.cellCount).toBe(0);
+    expect(result.warnings.join(" ")).toMatch(/left untouched/);
+
+    const writes = toCellWrites(result, fresh);
+    // Row 20 matches the "5" rule, but the guard exempts it from the zeroing
+    // that today wipes real allocation rows. Rows 10 and 40 still clear.
+    expect(rowsTouched(writes).has(20)).toBe(false);
+    expect(rowsTouched(writes).has(10)).toBe(true);
+    expect(rowsTouched(writes).has(40)).toBe(true);
+  });
+
+  it("clear zeroes allocation rows whether or not a rule matches them", () => {
+    const fresh = guardTarget();
+    const options: BstPushOptions = { ...every("replace"), allocationRows: "clear" };
+    const result = guardPlan(
+      fresh,
+      [outRow("D0020", "A414001", 9_000)],
+      options,
+      [] // no rules at all — the guard alone drives the zeroing
+    );
+
+    // Kairos data for the allocation row is not written; zeroes land instead.
+    expect(result.rows[0].status).toBe("zeroed");
+    const writes = toCellWrites(result, fresh);
+    expect(writes.every((write) => write.value === 0)).toBe(true);
+    // Both allocation rows are zeroed; the plain rows are untouched (no rules).
+    expect(rowsTouched(writes)).toEqual(new Set([20, 30]));
+    expect(writes).toHaveLength(24);
+    expect(result.zeroCellCount).toBe(24);
+  });
+
+  it("overwrite × overwrite reproduces the pre-guard behavior exactly", () => {
+    const fresh = guardTarget();
+    const result = guardPlan(
+      fresh,
+      [outRow("D0020", "A512000", 12_000)],
+      every("replace")
+    );
+    expect(result.rows[0].status).toBe("write");
+    expect(result.cellCount).toBe(12);
+    const writes = toCellWrites(result, fresh);
+    // Rule-driven zeroes on 10, 20, 40 (the 5xxxxx rows), values on top of 20.
+    expect(rowsTouched(writes)).toEqual(new Set([10, 20, 40]));
+    expect(writes.filter((w) => w.row === 20 && w.value !== 0)).toHaveLength(12);
+    expect(result.warnings.join(" ")).toMatch(/Allocation rows are set to Overwrite/);
+  });
+
+  it("skip guards locked cells per cell, not per row", () => {
+    const halfLocked = [...Array(6).fill(true), ...Array(6).fill(false)];
+    const fresh = guardTarget({ "0020-560000": halfLocked });
+    const options: BstPushOptions = { ...every("replace"), protectedCells: "skip" };
+    const result = guardPlan(fresh, [outRow("D0020", "A560000", 12_000)], options);
+
+    const row = result.rows[0];
+    // The unlocked half still writes; the locked half is withheld and masked.
+    expect(row.status).toBe("write");
+    expect(row.months.slice(0, 6)).toEqual(Array(6).fill(0));
+    expect(row.months.slice(6)).toEqual(Array(6).fill(12));
+    expect(row.guardedMonths).toEqual(halfLocked);
+    expect(row.lockedMonths).toEqual(halfLocked);
+    expect(result.cellCount).toBe(6);
+    expect(result.guardedCellCount).toBe(6);
+    expect(result.protectedRowCount).toBe(1);
+
+    const writes = toCellWrites(result, fresh);
+    const row40 = writes.filter((write) => write.row === 40);
+    // Zeroes and values both stay right of the lock boundary (col I+6).
+    expect(row40.every((write) => write.col >= BUDGET_COL_START + 6)).toBe(true);
+    expect(row40.filter((write) => write.value !== 0)).toHaveLength(6);
+  });
+
+  it("guards a fully locked row entirely, and clear mode zeroes it instead", () => {
+    const skipResult = guardPlan(
+      guardTarget({ "0020-560000": true }),
+      [outRow("D0020", "A560000", 12_000)],
+      { ...every("replace"), protectedCells: "skip" }
+    );
+    expect(skipResult.rows[0].status).toBe("guarded");
+
+    const fresh = guardTarget({ "0020-560000": true });
+    const clearResult = guardPlan(
+      fresh,
+      [outRow("D0020", "A560000", 12_000)],
+      { ...every("replace"), protectedCells: "clear" },
+      []
+    );
+    expect(clearResult.rows[0].status).toBe("zeroed");
+    const writes = toCellWrites(clearResult, fresh);
+    expect(rowsTouched(writes)).toEqual(new Set([40]));
+    expect(writes.every((write) => write.value === 0)).toBe(true);
+    expect(writes).toHaveLength(12);
+  });
+
+  it("lets skip beat clear when both guards apply to a cell", () => {
+    const fresh = guardTarget({ "0020-512000": true });
+    const options: BstPushOptions = {
+      ...every("replace"),
+      allocationRows: "clear",
+      protectedCells: "skip",
+    };
+    const result = guardPlan(fresh, [outRow("D0020", "A512000", 12_000)], options, []);
+    // Locked everywhere → skip wins everywhere → the row is fully withheld,
+    // not zeroed. The unlocked allocation row (30) still clears.
+    expect(result.rows[0].status).toBe("guarded");
+    const writes = toCellWrites(result, fresh);
+    expect(rowsTouched(writes)).toEqual(new Set([30]));
+  });
+
+  it("counts allocation and locked rows for the tiles", () => {
+    const fresh = guardTarget({ "0020-560000": true });
+    const result = guardPlan(
+      fresh,
+      [
+        outRow("D0020", "A512000", 1_000),
+        outRow("D0020", "A414001", 1_000),
+        outRow("D0020", "A560000", 1_000),
+        outRow("D0020", "A510000", 1_000),
+      ],
+      every("replace")
+    );
+    expect(result.allocationRowCount).toBe(2);
+    expect(result.protectedRowCount).toBe(1);
+  });
+});
+
+describe("guard normalization", () => {
+  it("lands absent or garbled modes on skip — the safe default", () => {
+    expect(normalizeGuardMode(undefined)).toBe("skip");
+    expect(normalizeGuardMode("yes")).toBe("skip");
+    expect(normalizeGuardMode("overwrite")).toBe("overwrite");
+    expect(normalizeGuardMode("clear")).toBe("clear");
+
+    const options = normalizeBstPushOptions({});
+    expect(options.allocationRows).toBe("skip");
+    expect(options.protectedCells).toBe("skip");
+
+    const config = normalizeBstPushConfig({});
+    expect(config.allocationRows).toBe("skip");
+    expect(config.protectedCells).toBe("skip");
+    expect(
+      normalizeBstPushConfig({ allocationRows: "clear", protectedCells: "overwrite" })
+    ).toMatchObject({ allocationRows: "clear", protectedCells: "overwrite" });
+  });
+});
+
 // ── Opt-in spot check against the real workbook ─────────────────────
 
-const realFile = path.join(
-  process.env.USERPROFILE || process.env.HOME || "",
-  "Downloads",
-  "2027 BGT_Spread_File - 75AZB Bvlgari Hotel Roma.xlsm"
-);
-const hasRealFile = (() => {
+const home = process.env.USERPROFILE || process.env.HOME || "";
+const REAL_FILE_NAME = "2027 BGT_Spread_File - 75AZB Bvlgari Hotel Roma.xlsm";
+const realFile = [
+  path.join(home, "Downloads", REAL_FILE_NAME),
+  path.join(home, "Downloads", "kairos", "Test File", REAL_FILE_NAME),
+].find((candidate) => {
   try {
-    return fs.existsSync(realFile);
+    return fs.existsSync(candidate);
   } catch {
     return false;
   }
-})();
+});
 
-describe.runIf(hasRealFile)("readTarget (real 75AZB file)", () => {
+describe.runIf(Boolean(realFile))("readTarget (real 75AZB file)", () => {
   it("finds the identity and every department sheet", () => {
-    const real = readTarget(fs.readFileSync(realFile), path.basename(realFile));
+    const real = readTarget(fs.readFileSync(realFile!), path.basename(realFile!));
     expect(real.ou).toBe("OU75AZB");
     expect(real.year).toBe(2027);
     expect(real.budgetBucketType).toBe("BUDGET");
@@ -718,5 +1004,31 @@ describe.runIf(hasRealFile)("readTarget (real 75AZB file)", () => {
     // Known rows from the reference workbook.
     expect(real.combos.get("0010-510600")).toMatchObject({ sheet: "0010", row: 178 });
     expect(real.combos.get("0410-988112")).toMatchObject({ sheet: "0410", row: 269 });
-  });
+  }, 120_000);
+
+  it("finds the allocation rows and the protection the guards act on", () => {
+    const bytes = fs.readFileSync(realFile!);
+    const real = readTarget(bytes, path.basename(realFile!));
+    annotateProtection(real, bytes);
+
+    let allocationRows = 0;
+    let fullyLocked = 0;
+    let partiallyLocked = 0;
+    for (const locations of real.bySheet.values()) {
+      for (const location of locations) {
+        if (location.isAllocation) allocationRows++;
+        const locked = location.lockedMonths.filter(Boolean).length;
+        if (locked === 12) fullyLocked++;
+        else if (locked > 0) partiallyLocked++;
+      }
+    }
+
+    // The reference file, verified by an independent raw-XML probe: 142
+    // allocation rows and 239 fully locked combo rows (2,868 locked month
+    // cells, ~2.9%); locking is all-or-nothing per row in this file, but the
+    // guards still work per cell for the BST that mixes them.
+    expect(allocationRows).toBe(142);
+    expect(fullyLocked).toBe(239);
+    expect(partiallyLocked).toBe(0);
+  }, 120_000);
 });
