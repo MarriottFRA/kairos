@@ -112,7 +112,10 @@ const OVERRIDES: Readonly<
   // ── Contract ──────────────────────────────────────────────────────
   contractYearlyDays: {
     unit: "days / yr",
-    hint: "Calendar days the contract covers in the year — normally 365.",
+    hint:
+      "Calendar days the contract covers — normally 365 on the Full year Input " +
+      "Basis. On Working months it is the seasonal contract's own span instead " +
+      "(about 182 for six months), because nothing is prorated there.",
   },
   contractDaysOff: {
     unit: "days / yr",
@@ -128,11 +131,18 @@ const OVERRIDES: Readonly<
   },
   yearlyManhoursPaid: {
     unit: "= derived",
-    hint: "Derived: (Yearly Days − Days Off) × Daily Hours. Read-only.",
+    hint:
+      "Derived: (Yearly Days − Days Off) × Daily Hours, prorated by Input " +
+      "Basis — a full-year contract worked for six months is paid half a " +
+      "year's hours. Read-only.",
   },
   yearlyHoursWorked: {
     unit: "hrs / yr",
-    hint: "Auto-calculated: (calendar productive days − vacation days) × daily hours. Feeds the payroll engine. Type a value to override.",
+    hint:
+      "Auto-calculated: (calendar productive days − vacation days) × daily " +
+      "hours, prorated by Input Basis like FTE. Feeds the payroll engine. Type " +
+      "a value to override — an override is prorated too, since Input Basis " +
+      "says what period every figure on the row covers.",
   },
   workingHoursAccount: {
     unit: "A988… account",
@@ -149,9 +159,12 @@ const OVERRIDES: Readonly<
     hint:
       "Full-time equivalent — 1.00 is a full-time position. Derived: this " +
       "post's worked hours (Yearly Days − Vacation − Days Off − Public " +
-      "Holidays, × Daily Hours, prorated by working months) over what a " +
+      "Holidays, × Daily Hours, prorated by Input Basis) over what a " +
       "full-timer at this hotel works — the Yearly Days / Days Off / Public " +
-      "Holidays and Weekly Hours set on the Home page. Read-only.",
+      "Holidays and Weekly Hours set on the Home page. It is an ANNUAL ratio, " +
+      "so a post working six full-time months reads 0.50 whichever way its " +
+      "contract is written down — as a full year it only works half of, or as " +
+      "a six-month contract in its own terms. Read-only.",
   },
 
   // ── Working months ────────────────────────────────────────────────
@@ -177,16 +190,20 @@ const OVERRIDES: Readonly<
     unit: "amount / yr",
     hint:
       "Gross yearly basic salary from the contract, before increases and " +
-      "additional costs. Divided by the row's working months to give Monthly " +
-      "Basic — a nine-month contract states nine months' pay (see Annual Basis).",
+      "additional costs. Divided by the row's Input Basis months to give " +
+      "Monthly Basic — a flat 12, or the months the position works when the " +
+      "contract covers only those.",
   },
   annualDivisorBasis: {
-    short: "Annual Basis",
-    unit: "÷ divisor",
+    short: "Input Basis",
+    unit: "stated over",
     hint:
-      "How Annual Basic converts to Monthly Basic: by the months this position " +
-      "actually works (the default — the contract covers only those months), or " +
-      "by a flat 12 for a full-year rate.",
+      "What period this row's yearly figures cover. Full year: they describe a " +
+      "full 12-month contract, so a post that works fewer months is prorated " +
+      "to them — the usual case for a new starter or mid-year leaver. Working " +
+      "months: they already cover only the months worked, as on a real seasonal " +
+      "contract, and are used as typed. Governs Contract days, Vacation Days, " +
+      "the Manual Increase, and Annual Basic's divisor.",
   },
   monthlyBaseSalary: {
     unit: "amount / mo",
@@ -240,11 +257,17 @@ const OVERRIDES: Readonly<
   // ── Vacation ──────────────────────────────────────────────────────
   vacationDays: {
     unit: "days / yr",
-    hint: "Vacation entitlement per year under the contract.",
+    hint:
+      "Vacation entitlement per year under the contract, read through Input " +
+      "Basis: on Full year a post that works six months earns half of it; on " +
+      "Working months the whole entitlement is taken inside those months.",
   },
   accrualDaysPerMonth: {
     unit: "days / mo",
-    hint: "Vacation days accrued each month. Valued by the engine at this position's daily base pay.",
+    hint:
+      "Vacation days accrued each month — the entitlement earned over the " +
+      "months this post works. Valued by the engine at its daily base pay. " +
+      "Read-only.",
   },
   accrualAccount: {
     unit: "A5… account",

@@ -187,19 +187,22 @@ export function executePosition(
       case OP_VACATION: {
         const vacationDays = paramPool[pp];
         const dayRate = scratch[SCRATCH_DAYRATE];
-        // Weights are normalized by their own total (see reference.vacationDaysTaken),
-        // so the year's leave sums to vacationDays whatever the raw weights total.
-        // Days are kept alongside the priced series: ACCRUAL provisions for the
-        // same days, and deriving both legs from one series is what makes the
-        // accrual line net to zero.
+        // Weights are normalized by Σ (weight × seasonality) — see
+        // reference.vacationDaysTaken — so the months the position actually works
+        // absorb the whole entitlement, whatever the raw weights total. Days are
+        // kept alongside the priced series: ACCRUAL provisions for the same days,
+        // and deriving both legs from one series is what makes the accrual line
+        // net to zero.
         let weightTotal = 0;
-        for (let m = 0; m < MONTHS; m++) weightTotal += paramPool[pp + 1 + m];
+        for (let m = 0; m < MONTHS; m++) {
+          weightTotal += paramPool[pp + 1 + m] * seasonality[posOfs + m];
+        }
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           const takenDays =
             s === 0 || weightTotal === 0
               ? 0
-              : vacationDays * paramPool[pp + 1 + m] / weightTotal * s;
+              : (vacationDays * paramPool[pp + 1 + m] * s) / weightTotal;
           scratch[SCRATCH_VACDAYS + m] = takenDays;
           scratch[SCRATCH_VAC + m] = takenDays * dayRate * scratch[SCRATCH_INC + m];
         }
@@ -450,10 +453,13 @@ export function executePosition(
         const totalHours = paramPool[pp];
         const vacationHours = paramPool[pp + 1];
         const twd2 = scratch[SCRATCH_TWD2];
-        // Weights normalized by their total (see reference.hoursWorked), so the
-        // hours taken back out equal the vacation hours added in.
+        // Weights normalized by Σ (weight × seasonality) (see
+        // reference.hoursWorked), so the hours taken back out equal the vacation
+        // hours added in — on a seasonal post as well as a full-year one.
         let weightTotal = 0;
-        for (let m = 0; m < MONTHS; m++) weightTotal += paramPool[pp + 2 + m];
+        for (let m = 0; m < MONTHS; m++) {
+          weightTotal += paramPool[pp + 2 + m] * seasonality[posOfs + m];
+        }
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           if (totalHours === 0 || s === 0) {
@@ -461,7 +467,9 @@ export function executePosition(
           } else {
             const spread = (totalHours / twd2) * realDays[m] * s;
             const vacOut =
-              weightTotal === 0 ? 0 : vacationHours * paramPool[pp + 2 + m] / weightTotal * s;
+              weightTotal === 0
+                ? 0
+                : (vacationHours * paramPool[pp + 2 + m] * s) / weightTotal;
             values[out + m] = spread - vacOut;
           }
         }

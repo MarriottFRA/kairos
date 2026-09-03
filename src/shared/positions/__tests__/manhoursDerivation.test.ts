@@ -20,7 +20,13 @@ import {
 describe("Manhours Worked derivation", () => {
   // 21 net productive days each month = 252 productive days/year.
   const calendar = makeCalendarContext(Array(12).fill(21));
-  const position = { vacationDays: 20, dailyContractHours: 8 };
+  const position = {
+    vacationDays: 20,
+    dailyContractHours: 8,
+    // Full year: resolveYearlyHoursWorked reads seasonality for the Input Basis
+    // prorate, which is a no-op here and exercised on its own in inputBasis.test.
+    seasonality: Array(12).fill(1) as number[],
+  };
   /** A full-year contract: 365 − 104 weekend − 9 holidays = 252 productive. */
   const contract: ContractDays = { yearlyDays: 365, daysOff: 104, pubHolidays: 9 };
   /** What a row written before the Contract defaults existed looks like. */
@@ -88,5 +94,19 @@ describe("Manhours Worked derivation", () => {
   it("reads the contract keys out of the bag, not just the calendar", () => {
     const partTimeBag = { ...bag, contractDaysOff: 156 };
     expect(resolveYearlyHoursWorked(0, position, partTimeBag, calendar)).toBe(1440);
+  });
+
+  it("restates both branches for the row's Input Basis", () => {
+    // A full-year contract worked for six months does half a year's hours,
+    // whether that figure was derived or typed in by hand. The switch says what
+    // period every number on the row covers; an override is one of them.
+    const seasonal = { ...position, seasonality: Array(12).fill(0).map((_v, m) => (m < 6 ? 1 : 0)) };
+    expect(resolveYearlyHoursWorked(0, seasonal, bag, calendar)).toBe(928);
+    expect(resolveYearlyHoursWorked(1800, seasonal, bag, calendar)).toBe(900);
+
+    // Stated over its own six months instead, nothing is prorated.
+    const contractBasis = { ...bag, annualDivisorBasis: "WORKING_MONTHS" };
+    expect(resolveYearlyHoursWorked(0, seasonal, contractBasis, calendar)).toBe(1856);
+    expect(resolveYearlyHoursWorked(1800, seasonal, contractBasis, calendar)).toBe(1800);
   });
 });

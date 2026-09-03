@@ -29,6 +29,7 @@ import type {
   ScenarioInput,
 } from "../../shared/engine/types";
 import {
+  applyInputBasis,
   applyPositionAccounts,
   applyRateRules,
   applyRuleRateDependencies,
@@ -37,8 +38,6 @@ import {
   injectKpiSeries,
   readPositionAccounts,
   resolveBlockValues,
-  resolveFte,
-  resolveYearlyHoursWorked,
 } from "../../shared/positions/engineInput";
 import {
   PositionDefaults,
@@ -172,7 +171,7 @@ export async function loadScenarioInput(
       // Length of service from the hiring date, for the SERVICE bases. Mirrors
       // runLiveSim; serviceDaysParity pins the two.
       const service = serviceDaysFor(hiringDates.get(record.id), scenario.year);
-      return {
+      const position: Position = {
       id: record.id as PositionId,
       scenarioId: record.scenarioId as ScenarioId,
       departmentCode: record.departmentCode,
@@ -181,19 +180,9 @@ export async function loadScenarioInput(
       hotelClusterWeight: resolved.weight,
       payType: record.payType,
       headcount: record.headcount,
-      // Derived from the row's Contract columns against the hotel's full-timer,
-      // never from the (now vestigial) fte column — see engineInput.deriveFte.
-      // The day counts are POSITION_EXTRA, hence extraValues. Mirrors
-      // rowToEnginePosition; liveSimParity pins the two.
-      fte: resolveFte(
-        {
-          vacationDays: record.vacationDays,
-          dailyContractHours: record.dailyContractHours,
-          seasonality: record.seasonality,
-        },
-        record.extraValues,
-        fullTime
-      ),
+      // Filled by applyInputBasis below, from the row's Contract columns against
+      // the hotel's full-timer — never from the (now vestigial) fte column.
+      fte: 0,
       seasonality: record.seasonality,
       monthlyBaseSalary: record.monthlyBaseSalary,
       hourlyRate: record.hourlyRate,
@@ -202,30 +191,28 @@ export async function loadScenarioInput(
       manualYearlyIncrease: record.manualYearlyIncrease,
       increaseMonth: record.increaseMonth,
       dailyContractHours: record.dailyContractHours,
-      // Auto-derived from the row's own Contract columns (yearly days − days off
-      // − public holidays − vacation) × daily hours; a positive stored value is a
-      // manual override. Those day counts are POSITION_EXTRA, hence extraValues —
-      // the same bag resolveFte reads just above. Shared with runLiveSim via
-      // resolveYearlyHoursWorked — liveSimParity pins the two.
-      yearlyHoursWorked: resolveYearlyHoursWorked(
-        record.yearlyHoursWorked,
-        record,
-        record.extraValues,
-        calendar
-      ),
+      // The stored figure: a positive value is a manual override, ≤ 0 derives
+      // from the row's own Contract columns. applyInputBasis resolves it below.
+      yearlyHoursWorked: record.yearlyHoursWorked,
       vacationDays: record.vacationDays,
       vacationMonthlyWeights: record.vacationMonthlyWeights,
-      // Accrual is auto-calculated (Yearly Days ÷ 12) and ALWAYS computed. The
-      // accrual account used to gate this, so a blank account produced no
-      // numbers at all; it now only decides whether the line is posted, leaving
-      // the value available to anything referencing it as a base. Mirrors
-      // rowToEnginePosition.
-      accrualDaysPerMonth: record.vacationDays / 12,
+      // Accrual is ALWAYS computed. The accrual account used to gate this, so a
+      // blank account produced no numbers at all; it now only decides whether
+      // the line is posted, leaving the value available to anything referencing
+      // it as a base. Restated by applyInputBasis below.
+      accrualDaysPerMonth: 0,
       serviceDaysPerMonth: service.perMonth,
       serviceDaysOpening: service.opening,
       updatedAt: record.updatedAt,
       deletedAt: null,
       };
+      // Restate every yearly figure over the period the row states them for —
+      // fte, worked hours, vacation, the manual increase and the accrual rate,
+      // in the one order that is correct. The Contract day counts and the Input
+      // Basis itself are POSITION_EXTRA, hence extraValues. Mirrors
+      // rowToEnginePosition; liveSimParity pins the two.
+      applyInputBasis(position, record.extraValues, calendar, fullTime);
+      return position;
     });
 
   const componentValues: ComponentValue[] = values.componentValues.map(

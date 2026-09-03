@@ -851,9 +851,16 @@ export function analyzeOracleReport(
       headcount: 1,
       seasonality: Array<number>(MONTHS).fill(1),
       // The Oracle figure IS an annual salary, so the row carries it as one and
-      // behaves exactly like a hand-added row. With twelve working months the
-      // divisor is 12, so the stored monthly is precisely the macro's AE.
+      // behaves exactly like a hand-added row. The basis is stated rather than
+      // left to the default: every figure here — the salary, the standards'
+      // yearly days, the vacation entitlement — is a full-year one, and the
+      // stored monthly is then precisely the macro's AE. (Twelve working months
+      // makes the two bases agree today, so this is documentation with teeth
+      // rather than a behaviour change: a later edit that makes an imported row
+      // seasonal now prorates instead of re-reading its full-year figures as
+      // contract-sized.)
       salaryEntryMode: "ANNUAL",
+      annualDivisorBasis: "TWELVE",
       annualBaseSalary: derived.annual,
       monthlyBaseSalary: derived.monthly,
       meritIncreasePct: 0,

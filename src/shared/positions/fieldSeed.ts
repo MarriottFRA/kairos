@@ -13,7 +13,7 @@
 import { MONTH_LABELS } from "../calendar";
 import {
   ACCOUNT_FIELD_KEYS,
-  ANNUAL_DIVISOR_KEY,
+  INPUT_BASIS_KEY,
   BASIC_SALARY_ANNUAL_KEY,
   FieldCatalog,
   FieldDef,
@@ -278,7 +278,22 @@ import { POSITION_COUNT_ACCOUNT, STAFFING_ACCOUNT_FILTER } from "./systemAccount
 //     department head is the parent title + Classification. Additions only, so
 //     nothing needs a retirement mapping; the bump re-applies dropdown_source
 //     per OU.
-export const SEED_VERSION = 30;
+// v31: "Annual Basis" becomes "Input Basis" and moves to the head of the
+//     Contract band, visible. It always asked the general question — what period
+//     are this row's yearly figures stated for? — but only answered it for the
+//     Annual → Monthly salary divisor, while the derived FTE assumed a full year
+//     (a hardcoded ÷12), the derived man-hours assumed the contract period, and
+//     the vacation weights split the difference by accident. It now governs all
+//     of them: contract days, vacation days, the manual yearly increase and the
+//     hours/FTE derivations read it through engineInput.basisMonthsFor /
+//     basisScaleFor. Default flips to TWELVE, which is what an untouched row was
+//     already behaving as. Storage key unchanged (annualDivisorBasis), so this is
+//     a seed change with no field migration; the row DATA restatement that keeps
+//     seasonal rows' budgets identical is secure_db MIGRATIONS[7]. The refresh
+//     UPDATE rewrites section, sort_order and default_label, so existing catalogs
+//     pick up the move and the rename; `visible` is never refreshed and existing
+//     catalogs already hold 1, which is the value we want.
+export const SEED_VERSION = 31;
 
 /** base_account prefixes each account field books to. The A5 cost prefixes are a
  *  picker-scoped narrowing only — a cost is any non-stats account (the split
@@ -536,10 +551,12 @@ const SALARY_ENTRY_OPTIONS = [
   { value: "MONTHLY", label: "Monthly" },
 ];
 
-/** What Annual Basic is divided by to reach the monthly base. */
-const ANNUAL_DIVISOR_OPTIONS = [
-  { value: "WORKING_MONTHS", label: "÷ Working months" },
-  { value: "TWELVE", label: "÷ 12" },
+/** What period the row's yearly figures are stated for — see fields.InputBasis.
+ *  Full year keeps the ÷12 in the label because it is also the salary divisor,
+ *  which is the form long-time users know this switch by. */
+const INPUT_BASIS_OPTIONS = [
+  { value: "TWELVE", label: "Full year (÷12)" },
+  { value: "WORKING_MONTHS", label: "Working months" },
 ];
 
 type SeedOverrides = Partial<FieldDef> & Pick<FieldDef, "key" | "defaultLabel">;
@@ -743,6 +760,25 @@ const SEED: FieldDef[] = [
   }),
 
   // ── Contract ──────────────────────────────────────────────────────
+  // Declared FIRST because it says how to read everything after it. A yearly
+  // figure on a position is ambiguous on its own: 365 contract days, 25 vacation
+  // days and a 45,000 salary can describe a full-time year that this post only
+  // works six months of, or a six-month contract stated in its own terms. This
+  // column is the row's answer, and the derived man-hours, FTE, vacation cost,
+  // accrual, manual increase and Monthly Basic all read it (engineInput
+  // .applyInputBasis). Stored per row, not as a global preference, so flipping it
+  // never re-bases positions that were already set up.
+  sys("contract", "ENUM", "POSITION_EXTRA", {
+    key: INPUT_BASIS_KEY,
+    defaultLabel: "Input Basis",
+    locked: true,
+    dropdownSource: { kind: "static", options: INPUT_BASIS_OPTIONS },
+    // A full year is what the hotel-year defaults seed a new row with (365 days,
+    // 104 off, 8 public holidays) and what every row written before this switch
+    // was already treated as. Marking a post seasonal is then the ONLY thing the
+    // user has to do for the common new-starter/mid-year-leaver case.
+    defaultValue: "TWELVE",
+  }),
   sys("contract", "NUMBER", "POSITION_EXTRA", {
     key: "contractYearlyDays",
     defaultLabel: "Yearly Days",
@@ -827,10 +863,11 @@ const SEED: FieldDef[] = [
   //
   // Within the salaried side, Salary Entry picks the inner pair: contracts are
   // written per year, so Annual Basic is what most users hold, and Monthly Basic
-  // is derived from it (÷ the row's working months). Typing Monthly reverses the
-  // derivation. Whichever face is derived is locked, but BOTH are stored — the
-  // engine only ever reads monthlyBaseSalary, so this is a grid + storage
-  // concern that leaves the spread math untouched.
+  // is derived from it (÷ the row's Input Basis months — a flat 12, or its
+  // working months). Typing Monthly reverses the derivation. Whichever face is
+  // derived is locked, but BOTH are stored — the engine only ever reads
+  // monthlyBaseSalary, so this is a grid + storage concern that leaves the
+  // spread math untouched.
   sys("basicSalary", "ENUM", "POSITION_EXTRA", {
     key: SALARY_ENTRY_MODE_KEY,
     defaultLabel: "Salary Entry",
@@ -858,20 +895,6 @@ const SEED: FieldDef[] = [
     defaultLabel: "Hourly Rate",
     locked: true,
     validation: { min: 0 },
-  }),
-  // The Annual → Monthly divisor, per row. Working months is the default: a
-  // nine-month contract states nine months' pay, so spreading it over twelve
-  // would understate every month. A flat 12 is there for shops that quote a
-  // full-year rate regardless — rare enough to ship hidden, reachable from
-  // Manage Columns. Stored per row (not as a global preference) so flipping it
-  // never re-bases positions that were already set up.
-  sys("basicSalary", "ENUM", "POSITION_EXTRA", {
-    key: ANNUAL_DIVISOR_KEY,
-    defaultLabel: "Annual Basis",
-    locked: true,
-    dropdownSource: { kind: "static", options: ANNUAL_DIVISOR_OPTIONS },
-    defaultValue: "WORKING_MONTHS",
-    visible: false,
   }),
   // The twelve Additional Cost columns sit behind this one, collapsed by
   // default: they are a wide, rarely-used family, and the summary answers the

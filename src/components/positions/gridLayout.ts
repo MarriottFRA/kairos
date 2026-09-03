@@ -65,3 +65,44 @@ export function healNewColumn(
     },
   };
 }
+
+/**
+ * Move a column a seed bump has RELOCATED to a different band.
+ *
+ * healNewColumn cannot do this: the key is already in the saved order, just in
+ * the wrong place, and the grid has no reason to touch it. Moving it anyway
+ * would be a reset — the one thing this file does not do — so the move is
+ * conditional on the key still sitting where the OLD seed put it. `afterKey` is
+ * that old left-hand neighbour: if the saved layout still reads
+ * `…, afterKey, key, …` then nobody has ever dragged this column and the seed's
+ * new position is simply the better default. A user who moved it themselves
+ * fails that test and keeps their arrangement, which is the point.
+ *
+ * (v31 relocated Input Basis from the end of Basic Salary to the head of
+ * Contract — visible in every layout saved since v19, so there is no add-time
+ * hook to reuse.)
+ */
+export function healMovedColumn(
+  state: GridInitialState,
+  key: string,
+  /** The column it now goes in front of. */
+  anchorKey: string,
+  /** The column it used to sit directly after. */
+  afterKey: string
+): GridInitialState {
+  const ordered = state.columns?.orderedFields;
+  if (!ordered) return state;
+  const at = ordered.indexOf(key);
+  if (at <= 0 || ordered[at - 1] !== afterKey) return state;
+
+  const without = [...ordered.slice(0, at), ...ordered.slice(at + 1)];
+  const anchor = without.indexOf(anchorKey);
+  if (anchor < 0) return state;
+  return {
+    ...state,
+    columns: {
+      ...state.columns,
+      orderedFields: [...without.slice(0, anchor), key, ...without.slice(anchor)],
+    },
+  };
+}

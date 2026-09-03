@@ -36,6 +36,10 @@ describe("what travels between sibling rows", () => {
       "cluster",
       "title",
       "annualBaseSalary",
+      // Input Basis: it reinterprets every yearly number on the row, so a
+      // sibling that received the figures without it would budget a different
+      // amount from the same contract.
+      "annualDivisorBasis",
     ]) {
       expect(syncsByKey(seeded(key)), key).toBe(true);
     }

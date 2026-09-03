@@ -15,7 +15,7 @@
  */
 
 import type { CalendarContext } from "../engine/types";
-import { resolveYearlyHoursWorked } from "../positions/engineInput";
+import { basisScaleFor, resolveYearlyHoursWorked } from "../positions/engineInput";
 import type { PositionRecord } from "../positions/ipc";
 import type { AllocationDto, SpreadBase } from "./ipc";
 
@@ -79,23 +79,35 @@ export function aggregateDepartmentMetrics(
     const contractYearlyDays = num(p.extraValues?.contractYearlyDays);
     const contractDaysOff = num(p.extraValues?.contractDaysOff);
     const dailyHours = num(p.dailyContractHours);
+    const seasonality = p.seasonality ?? [];
+    // The same POSITION_EXTRA bag the two contract reads above pull from — it
+    // carries the row's Input Basis as well as its day counts, so every yearly
+    // figure here is restated over the period the engine will spread it across.
+    const extras = p.extraValues ?? {};
+    const scale = basisScaleFor(extras, seasonality);
     const manhoursWorked = resolveYearlyHoursWorked(
       num(p.yearlyHoursWorked),
-      { vacationDays: num(p.vacationDays), dailyContractHours: dailyHours },
-      // The same POSITION_EXTRA bag the two contract reads above pull from —
-      // the derivation now takes its day count off the row's contract, so an
+      {
+        vacationDays: num(p.vacationDays),
+        dailyContractHours: dailyHours,
+        seasonality,
+      },
+      // The derivation takes its day count off the row's contract, so an
       // allocation spread over Manhours Worked follows Days Off like the grid.
-      p.extraValues ?? {},
+      extras,
       calendar
     );
 
     metrics.headcount += h;
     metrics.fte += num(p.fte) * h;
     metrics.manhoursWorked += manhoursWorked * h;
-    metrics.manhoursPaid += (contractYearlyDays - contractDaysOff) * dailyHours * h;
+    // Contract Days and Manhours Paid are contract-stated figures, so they take
+    // the same prorate resolveYearlyHoursWorked applied above.
+    metrics.manhoursPaid +=
+      (contractYearlyDays - contractDaysOff) * dailyHours * scale * h;
     metrics.baseSalary += num(p.monthlyBaseSalary) * h;
-    metrics.contractDays += contractYearlyDays * h;
-    metrics.vacationDays += num(p.vacationDays) * h;
+    metrics.contractDays += contractYearlyDays * scale * h;
+    metrics.vacationDays += num(p.vacationDays) * scale * h;
   }
 
   return [...byDept.entries()].map(([departmentCode, metrics]) => ({

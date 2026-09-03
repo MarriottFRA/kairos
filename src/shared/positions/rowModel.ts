@@ -18,7 +18,12 @@
 
 import { uuidv7 } from "../engine/ids";
 import { referenceVacation } from "../engine/reference";
-import { deriveYearlyHoursWorked, readContractDays, resolveFte } from "./engineInput";
+import {
+  applyInputBasis,
+  basisMonthsFor,
+  basisScaleFor,
+  resolveFte,
+} from "./engineInput";
 import {
   EMPTY_FULL_TIME_REFERENCE,
   FullTimeReference,
@@ -32,8 +37,8 @@ import {
 } from "../engine/types";
 import {
   ACCOUNT_FIELD_KEYS,
-  ANNUAL_DIVISOR_KEY,
-  AnnualDivisorBasis,
+  INPUT_BASIS_KEY,
+  InputBasis,
   BASIC_SALARY_ANNUAL_KEY,
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
@@ -183,7 +188,7 @@ export function changedFieldKeys(
     if (!Object.is(oldRow[def.key], newRow[def.key])) changed.push(def.key);
   }
 
-  // Flipping Salary Entry (or Annual Basis) promotes a face that until now was
+  // Flipping Salary Entry (or Input Basis) promotes a face that until now was
   // only ever DERIVED into the one the row is typed in. hydrateBasicSalary
   // computes that face at load time precisely so it does not read as an edit —
   // which means on a row whose stored record never carried it (anything written
@@ -192,7 +197,7 @@ export function changedFieldKeys(
   // alone, and the next load would take the STORED figure — 0 — as the typed
   // one and zero the salary. So write the whole group whenever either selector
   // moves: four scalars, and what the user sees is what is stored.
-  if (changed.includes(SALARY_ENTRY_MODE_KEY) || changed.includes(ANNUAL_DIVISOR_KEY)) {
+  if (changed.includes(SALARY_ENTRY_MODE_KEY) || changed.includes(INPUT_BASIS_KEY)) {
     for (const key of [BASIC_SALARY_ANNUAL_KEY, BASIC_SALARY_MONTHLY_KEY]) {
       if (!changed.includes(key)) changed.push(key);
     }
@@ -211,18 +216,20 @@ export function changedFieldKeys(
 // the engine loaders, the live sim, the allocation spread bases — has to know
 // this feature exists.
 //
-// The divisor is Σ working months, not 12: a nine-month contract states nine
-// months' pay, so twelfths would understate every month it is actually paid in.
-// A row can opt into a flat 12 via Annual Basis. Because the divisor is part of
-// the row, a Working 1..12 edit re-derives too — sanitizeRow sees the whole row,
-// so that falls out for free.
+// The divisor is Input Basis: a flat 12 when the contract figure describes a
+// full year, or Σ working months when it already covers only the months worked
+// (a nine-month contract that states nine months' pay). Because the basis is
+// part of the row, a Working 1..12 edit re-derives too — sanitizeRow sees the
+// whole row, so that falls out for free.
 
-/** What Annual Basic divides by on this row. Σ seasonality unless the row opts
- *  into a flat 12; 0 is possible (a position that never works) and callers must
+/** What Annual Basic divides by on this row — the row's Input Basis months. One
+ *  implementation shared with the engine-input paths (engineInput.basisMonthsFor)
+ *  so the salary face and the derived hours/FTE can never read the switch
+ *  differently. 0 is possible (a position that never works) and callers must
  *  guard, since the engine's own twm/twd normalization would be dividing by 0
  *  in the same situation. */
 export function annualDivisorFor(row: PositionRow): number {
-  return divisorBasisOf(row) === "TWELVE" ? MONTHS : sumVector(row, "seasonality");
+  return basisMonthsFor(row, rowVector(row, "seasonality"));
 }
 
 /** Which face the user types. Anything unrecognized — including the absent key
@@ -231,8 +238,11 @@ export function salaryEntryModeOf(row: PositionRow): SalaryEntryMode {
   return row[SALARY_ENTRY_MODE_KEY] === "ANNUAL" ? "ANNUAL" : "MONTHLY";
 }
 
-function divisorBasisOf(row: PositionRow): AnnualDivisorBasis {
-  return row[ANNUAL_DIVISOR_KEY] === "TWELVE" ? "TWELVE" : "WORKING_MONTHS";
+/** Absent = TWELVE. See fields.InputBasis: a row written before the switch had
+ *  its FTE prorated by a hardcoded ÷12 and its vacation weights normalized over
+ *  all twelve months, so a full-year reading is what it already behaved as. */
+function divisorBasisOf(row: PositionRow): InputBasis {
+  return row[INPUT_BASIS_KEY] === "WORKING_MONTHS" ? "WORKING_MONTHS" : "TWELVE";
 }
 
 /**
@@ -246,7 +256,7 @@ function divisorBasisOf(row: PositionRow): AnnualDivisorBasis {
  */
 function deriveBasicSalary(row: PositionRow): void {
   row[SALARY_ENTRY_MODE_KEY] = salaryEntryModeOf(row);
-  row[ANNUAL_DIVISOR_KEY] = divisorBasisOf(row);
+  row[INPUT_BASIS_KEY] = divisorBasisOf(row);
 
   if (row.payType === "HOURLY") {
     row[BASIC_SALARY_MONTHLY_KEY] = 0;
@@ -303,7 +313,7 @@ export function basicSalaryCellLocked(
  */
 function hydrateBasicSalary(row: PositionRow): void {
   row[SALARY_ENTRY_MODE_KEY] = salaryEntryModeOf(row);
-  row[ANNUAL_DIVISOR_KEY] = divisorBasisOf(row);
+  row[INPUT_BASIS_KEY] = divisorBasisOf(row);
   row[BASIC_SALARY_ANNUAL_KEY] =
     salaryEntryModeOf(row) === "ANNUAL"
       ? toNumber(row[BASIC_SALARY_ANNUAL_KEY], 0)
@@ -491,6 +501,13 @@ export function toCreate(row: PositionRow, catalog: FieldCatalog): PositionCreat
  * fields carry through; identity/sync fields the engine ignores are stubbed.
  * Used to run the same vacation valuation the budget applies against rows the
  * user is still editing, without a round-trip to the store.
+ *
+ * Pass the CALENDAR to get a position stated the way the engine will spread it:
+ * applyInputBasis then restates the yearly figures for the row's Input Basis,
+ * exactly as loadScenarioInput does. Without one the position carries the raw
+ * typed values (FTE aside, which needs no calendar) — enough for callers that
+ * only want the shape, but never enough to compare against a budget. Every
+ * caller that shows a number to the user passes it.
  */
 export function rowToEnginePosition(
   row: PositionRow,
@@ -498,7 +515,9 @@ export function rowToEnginePosition(
   /** The hotel-year full-time yardstick FTE is measured against. Omitted (or
    *  unloaded) leaves FTE at 0 — fine for callers that only value vacation, but
    *  runLiveSim must pass it or an FTE-based pool spread reads zero. */
-  fullTime: FullTimeReference = EMPTY_FULL_TIME_REFERENCE
+  fullTime: FullTimeReference = EMPTY_FULL_TIME_REFERENCE,
+  /** The hotel-year day basis. Present ⇒ the Input Basis restatement runs. */
+  calendar?: Pick<CalendarContext, "realDays"> | null
 ): Position {
   const position: Position = {
     id: row.id as PositionId,
@@ -531,14 +550,22 @@ export function rowToEnginePosition(
     // The engine reads this as an on/off guard only (nonzero = accrue): the
     // roll-forward derives its own earning leg from the leave actually taken,
     // so the magnitude here is not the rate. See the ACCRUAL op in opcodes.ts.
-    accrualDaysPerMonth: toNumber(row.vacationDays, 0) / 12,
+    // Restated over the row's working months by applyInputBasis below.
+    accrualDaysPerMonth: toNumber(row.vacationDays, 0) / MONTHS,
     updatedAt: "",
     deletedAt: null,
   };
-  // Derived, never stored — the row's Contract columns measured against the
-  // hotel's full-timer. Mirror of loadScenarioInput; the grid's FTE column shows
-  // this same number via fteById.
-  position.fte = resolveFte(position, row, fullTime);
+  if (calendar) {
+    // Restate the yearly figures for the row's Input Basis — fte, worked hours,
+    // vacation, the manual increase and the accrual rate, in the one order that
+    // is correct. Mirror of loadScenarioInput; liveSimParity pins the two.
+    applyInputBasis(position, row, calendar, fullTime);
+  } else {
+    // Derived, never stored — the row's Contract columns measured against the
+    // hotel's full-timer. The grid's FTE column shows this same number via
+    // fteById, which needs no calendar.
+    position.fte = resolveFte(position, row, fullTime);
+  }
   return position;
 }
 
@@ -557,7 +584,10 @@ export function vacationCostById(
   const out = new Map<string, number>();
   if (!calendar) return out;
   for (const row of rows) {
-    const months = referenceVacation(rowToEnginePosition(row, scenarioId), calendar);
+    const months = referenceVacation(
+      rowToEnginePosition(row, scenarioId, EMPTY_FULL_TIME_REFERENCE, calendar),
+      calendar
+    );
     let total = 0;
     for (const value of months) total += value;
     out.set(row.id, total);
@@ -573,6 +603,9 @@ export function vacationCostById(
  * come off the row, editing any of the Contract columns moves this map on the
  * next render, exactly as it moves fteById. Empty map while the calendar loads
  * (the column then falls back to any stored override, else blank).
+ *
+ * Shown AFTER the Input Basis prorate, like FTE: a full-year contract worked for
+ * six months reads half a year's hours, because that is what the budget spreads.
  */
 export function manhoursWorkedById(
   rows: PositionRow[],
@@ -582,14 +615,15 @@ export function manhoursWorkedById(
   const out = new Map<string, number>();
   if (!calendar) return out;
   for (const row of rows) {
-    out.set(
-      row.id,
-      deriveYearlyHoursWorked(
-        rowToEnginePosition(row, scenarioId),
-        readContractDays(row),
-        calendar
-      )
+    // Built with no stored override so the map always shows the DERIVED figure —
+    // the column falls back to the typed value itself when one is present.
+    const position = rowToEnginePosition(
+      { ...row, yearlyHoursWorked: 0 },
+      scenarioId,
+      EMPTY_FULL_TIME_REFERENCE,
+      calendar
     );
+    out.set(row.id, position.yearlyHoursWorked);
   }
   return out;
 }
@@ -626,11 +660,14 @@ function sumVector(row: PositionRow, vector: VectorName): number {
   return total;
 }
 
-/** Hours paid across the year: paid days (yearly days − days off) × daily hours. */
+/** Hours paid across the year: paid days (yearly days − days off) × daily hours,
+ *  restated for the row's Input Basis — a full-year contract worked for six
+ *  months is paid half a year's hours. */
 function yearlyManhoursPaidOf(row: PositionRow): number {
   return (
     (toNumber(row.contractYearlyDays, 0) - toNumber(row.contractDaysOff, 0)) *
-    toNumber(row.dailyContractHours, 0)
+    toNumber(row.dailyContractHours, 0) *
+    basisScaleFor(row, rowVector(row, "seasonality"))
   );
 }
 
@@ -654,15 +691,20 @@ export const COMPUTES: Record<string, ComputeFn> = {
 
   vacationWeightsTotal: (row) => sumVector(row, "vacationMonthlyWeights"),
 
-  /** Monthly holiday-accrual entitlement: Yearly Days ÷ WORKING months, not ÷ 12.
-   *  The engine earns the provision across the months the position actually works
-   *  (a 9-month post earns its entitlement in 9), so dividing by 12 would under-
-   *  report the rate for a seasonal row. Identical for a full-year row. Read-only,
-   *  and always calculated — the Accrual account decides only whether the
-   *  resulting line is POSTED (see rowToEnginePosition / loadScenarioInput). */
+  /** Monthly holiday-accrual entitlement: the Input Basis entitlement ÷ WORKING
+   *  months, not ÷ 12. The engine earns the provision across the months the
+   *  position actually works (a 9-month post earns its entitlement in 9), so
+   *  dividing by 12 would under-report the rate for a seasonal row. Identical for
+   *  a full-year row. Read-only, and always calculated — the Accrual account
+   *  decides only whether the resulting line is POSTED (see applyInputBasis,
+   *  which computes this exact figure for both engine paths). */
   accrualDaysPerMonth: (row) => {
+    const seasonality = rowVector(row, "seasonality");
     const workingMonths = sumVector(row, "seasonality");
-    return workingMonths > 0 ? toNumber(row.vacationDays, 0) / workingMonths : 0;
+    if (workingMonths <= 0) return 0;
+    const vacationDays =
+      toNumber(row.vacationDays, 0) * basisScaleFor(row, seasonality);
+    return vacationDays / workingMonths;
   },
 
   /** Σ of the twelve Additional Cost months — the summary the family collapses
@@ -704,7 +746,11 @@ export const COMPUTES: Record<string, ComputeFn> = {
       if (m >= incFrom) activeFromIncrease += seas;
     }
     if (activeFromIncrease > 0) {
-      total += toNumber(row.manualYearlyIncrease, 0);
+      // Restated for the row's Input Basis, like the engine input — a full-year
+      // increase on a half-year post lands half of it (see applyInputBasis).
+      total +=
+        toNumber(row.manualYearlyIncrease, 0) *
+        basisScaleFor(row, rowVector(row, "seasonality"));
     }
     return total;
   },

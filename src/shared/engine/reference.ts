@@ -130,6 +130,17 @@ function grossBaseSalary(
  * ≠ 1 but the math self-corrects). Total 1 divides exactly, so a tidy sum-to-1
  * set is unchanged. Total 0 means no weighted month, so no vacation is placed.
  *
+ * The normalizer is Σ (weight × seasonality), NOT Σ of all twelve weights: leave
+ * can only be taken in a month the position works, so the months it does work
+ * have to absorb the whole entitlement. Normalizing over twelve and then zeroing
+ * the inactive months — which is what this did before Input Basis — silently
+ * dropped the leave that fell outside the contract, an implicit prorate whose
+ * size depended on how the weights happened to be spread. That prorate is now
+ * explicit and lives on the INPUT (engineInput.applyInputBasis scales
+ * `vacationDays` by twm/12 for a full-year contract), so this function's only
+ * job is placing whatever entitlement it is handed. For flat weights the two
+ * formulations give the identical per-month figure.
+ *
  * Split out from `vacationCost` because the accrual provisions for the same
  * days it prices — deriving both legs from ONE day series is what makes the
  * accrual line net to zero (see `holidayAccrual`).
@@ -138,13 +149,13 @@ function vacationDaysTaken(position: Position): number[] {
   const seas = position.seasonality;
   const weights = position.vacationMonthlyWeights;
   let weightTotal = 0;
-  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
+  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m] * seas[m];
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
     out.push(
       seas[m] === 0 || weightTotal === 0
         ? 0
-        : position.vacationDays * weights[m] / weightTotal * seas[m]
+        : (position.vacationDays * weights[m] * seas[m]) / weightTotal
     );
   }
   return out;
@@ -297,10 +308,12 @@ function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTo
   const vacationHours = position.vacationDays * position.dailyContractHours;
   // Vacation hours are added back to the yearly total, spread by days, then
   // taken out again following the vacation weights (VBA Section 22). The weights
-  // are normalized by their total (as in vacationCost), so drifted weights remove
-  // exactly the added-back hours; total 0 removes none.
+  // are normalized by Σ (weight × seasonality), exactly as in vacationDaysTaken,
+  // so what is removed is exactly what was added back — for a seasonal post too,
+  // which the old all-twelve normalizer got wrong in the same direction as the
+  // leave it was placing. Total 0 removes none.
   let weightTotal = 0;
-  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m];
+  for (let m = 0; m < MONTHS; m++) weightTotal += weights[m] * seas[m];
   const totalHours = position.yearlyHoursWorked + vacationHours;
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
@@ -310,7 +323,7 @@ function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTo
     }
     const spread = (totalHours / d.twd2) * calendar.realDays[m] * seas[m];
     const vacOut =
-      weightTotal === 0 ? 0 : vacationHours * weights[m] / weightTotal * seas[m];
+      weightTotal === 0 ? 0 : (vacationHours * weights[m] * seas[m]) / weightTotal;
     out.push(spread - vacOut);
   }
   return out;

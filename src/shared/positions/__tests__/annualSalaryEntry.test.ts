@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { BUILTIN_CATALOG } from "../fieldSeed";
 import {
-  ANNUAL_DIVISOR_KEY,
+  INPUT_BASIS_KEY,
   BASIC_SALARY_ANNUAL_KEY,
   BASIC_SALARY_HOURLY_KEY,
   BASIC_SALARY_MONTHLY_KEY,
@@ -40,7 +40,7 @@ function rowWith(overrides: Partial<PositionRow> = {}, workingMonths = 12): Posi
     [BASIC_SALARY_HOURLY_KEY]: 0,
     [BASIC_SALARY_ANNUAL_KEY]: 0,
     [SALARY_ENTRY_MODE_KEY]: "ANNUAL",
-    [ANNUAL_DIVISOR_KEY]: "WORKING_MONTHS",
+    [INPUT_BASIS_KEY]: "WORKING_MONTHS",
     increaseMonth: 13,
   };
   for (let m = 1; m <= MONTHS; m++) {
@@ -78,7 +78,7 @@ describe("Annual → Monthly derivation", () => {
   it("divides by a flat 12 when the row opts into that basis", () => {
     const out = sanitize(
       rowWith(
-        { [BASIC_SALARY_ANNUAL_KEY]: 60_000, [ANNUAL_DIVISOR_KEY]: "TWELVE" },
+        { [BASIC_SALARY_ANNUAL_KEY]: 60_000, [INPUT_BASIS_KEY]: "TWELVE" },
         9
       )
     );
@@ -89,7 +89,7 @@ describe("Annual → Monthly derivation", () => {
     // 50,000 / 12 must not be stored as 4,166.67, or the year total comes back
     // as 49,999.99 and stops reconciling to the contract figure.
     const out = sanitize(
-      rowWith({ [BASIC_SALARY_ANNUAL_KEY]: 50_000, [ANNUAL_DIVISOR_KEY]: "TWELVE" })
+      rowWith({ [BASIC_SALARY_ANNUAL_KEY]: 50_000, [INPUT_BASIS_KEY]: "TWELVE" })
     );
     expect((out[BASIC_SALARY_MONTHLY_KEY] as number) * 12).toBeCloseTo(50_000, 6);
   });
@@ -228,16 +228,28 @@ describe("rows saved before the pairing existed", () => {
     expect(row[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
   });
 
+  it("reads an absent Input Basis as a full year", () => {
+    // Not WORKING_MONTHS: every derived quantity on a pre-v19 row was computed
+    // from a full-year contract (FTE's hardcoded ÷12, vacation weights
+    // normalized over all twelve months), so a full-year reading is the one that
+    // leaves those rows behaving exactly as they did.
+    expect(toRow(legacyRecord(5_000, 9))[INPUT_BASIS_KEY]).toBe("TWELVE");
+  });
+
   it("shows an Annual figure derived from the stored monthly one", () => {
     expect(toRow(legacyRecord(5_000))[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
-    expect(toRow(legacyRecord(5_000, 9))[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    // The nine-month row too: its stored monthly is the engine's input and is
+    // never recomputed at load, so the Annual FACE simply restates it over the
+    // row's full-year basis. secure_db MIGRATIONS[7] writes this same figure for
+    // rows that type Annual, where the face is the stored one.
+    expect(toRow(legacyRecord(5_000, 9))[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
   });
 
   it("survives an unrelated edit without moving the monthly figure", () => {
     const loaded = toRow(legacyRecord(5_000, 9));
     const edited = sanitize({ ...loaded, headcount: 3 }, loaded);
     expect(edited[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
-    expect(edited[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(edited[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
   });
 });
 
@@ -264,12 +276,12 @@ describe("switching which face the row types", () => {
   it("keeps the amount, in both directions", () => {
     const monthly = toRow(legacyRecord(5_000, 9));
     const annual = flipTo(monthly, "ANNUAL");
-    expect(annual[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(annual[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
     expect(annual[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
 
     const back = flipTo(annual, "MONTHLY");
     expect(back[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
-    expect(back[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(back[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
   });
 
   it("saves both faces, not just the selector", () => {
@@ -294,16 +306,16 @@ describe("switching which face the row types", () => {
     );
 
     const reloaded = toRow(applyPatch(record, positionFields));
-    expect(reloaded[BASIC_SALARY_ANNUAL_KEY]).toBe(45_000);
+    expect(reloaded[BASIC_SALARY_ANNUAL_KEY]).toBe(60_000);
     expect(reloaded[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
     // And the next edit must not re-derive the monthly base from a stored 0.
     const edited = sanitize({ ...reloaded, headcount: 2 }, reloaded);
     expect(edited[BASIC_SALARY_MONTHLY_KEY]).toBe(5_000);
   });
 
-  it("does the same when only the divisor basis moves", () => {
+  it("does the same when only the input basis moves", () => {
     const loaded = toRow(legacyRecord(5_000, 9));
-    const rebased = sanitize({ ...loaded, [ANNUAL_DIVISOR_KEY]: "TWELVE" }, loaded);
+    const rebased = sanitize({ ...loaded, [INPUT_BASIS_KEY]: "WORKING_MONTHS" }, loaded);
     expect(changedFieldKeys(loaded, rebased, BUILTIN_CATALOG)).toContain(
       BASIC_SALARY_ANNUAL_KEY
     );
@@ -323,7 +335,10 @@ describe("new rows", () => {
   it("default to typing the annual contract figure", () => {
     const draft = newDraftRow(BUILTIN_CATALOG);
     expect(draft[SALARY_ENTRY_MODE_KEY]).toBe("ANNUAL");
-    expect(draft[ANNUAL_DIVISOR_KEY]).toBe("WORKING_MONTHS");
+    // A new row is seeded with the hotel-year defaults' full-year contract
+    // (365 days, 104 off, 8 public holidays), so a full year is what its figures
+    // are stated over until someone says otherwise.
+    expect(draft[INPUT_BASIS_KEY]).toBe("TWELVE");
     expect(draft[BASIC_SALARY_ANNUAL_KEY]).toBe(0);
     expect(draft[BASIC_SALARY_MONTHLY_KEY]).toBe(0);
   });

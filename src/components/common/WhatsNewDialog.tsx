@@ -10,9 +10,17 @@
  * No build number anywhere on purpose: notes are numbered, not versioned (see
  * releases.ts), and the app's own version rolls on a different cadence. The
  * date is what a reader wants — "is this the thing I was told about last week".
+ *
+ * The newest note is shown open and every older one is kept below it, collapsed
+ * behind its date. Notes are the only place a feature is ever announced, so a
+ * note that scrolled off the end would take its features with it — and "already
+ * there, nobody knew" is the problem this whole feature exists to fix.
  */
 
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
   Chip,
@@ -26,8 +34,14 @@ import {
   Typography,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
-import { LATEST_UPDATE, UpdateItem } from "../../shared/updates/releases";
+import {
+  LATEST_UPDATE,
+  UPDATE_NOTES,
+  UpdateItem,
+  UpdateNote,
+} from "../../shared/updates/releases";
 
 export interface WhatsNewDialogProps {
   open: boolean;
@@ -109,8 +123,76 @@ function NewItemCard({ item }: { item: UpdateItem }) {
   );
 }
 
+/**
+ * One note's three sections. Every one of them is optional and any of them can
+ * lead: a note may be a single improvement with no headline feature behind it,
+ * and an empty section would otherwise draw its heading over nothing. `first`
+ * only trims the top margin, so it belongs to whichever section actually shows
+ * up first rather than permanently to New.
+ */
+function NoteSections({ note }: { note: UpdateNote }) {
+  const noNew = note.new.length === 0;
+  return (
+    <>
+      {!noNew && (
+        <>
+          <SectionHeading first>New</SectionHeading>
+          <Stack spacing={1.25}>
+            {note.new.map((item) => (
+              <NewItemCard key={item.title} item={item} />
+            ))}
+          </Stack>
+        </>
+      )}
+
+      {note.improved.length > 0 && (
+        <>
+          <SectionHeading first={noNew}>Improved</SectionHeading>
+          <Stack spacing={1.5}>
+            {note.improved.map((item) => (
+              <Box key={item.title}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                  {item.title}
+                </Typography>
+                <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                  {item.body}
+                </Typography>
+              </Box>
+            ))}
+          </Stack>
+        </>
+      )}
+
+      {note.fixes.length > 0 && (
+        <>
+          <SectionHeading first={noNew && note.improved.length === 0}>
+            Fixes &amp; optimisations
+          </SectionHeading>
+          <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
+            {note.fixes.map((fix) => (
+              <Typography
+                key={fix}
+                component="li"
+                variant="body2"
+                sx={{ color: "text.secondary", mb: 0.5 }}
+              >
+                {fix}
+              </Typography>
+            ))}
+          </Box>
+        </>
+      )}
+    </>
+  );
+}
+
 export default function WhatsNewDialog({ open, onClose }: WhatsNewDialogProps) {
   const note = LATEST_UPDATE;
+  // Everything ever announced, still reachable. A note is only "latest" for as
+  // long as the next one takes to arrive, and a one-line improvement pushing ten
+  // features out of the app for good is not what the bell is for. Collapsed, so
+  // the note the bell is actually about is still the thing you see.
+  const earlier = UPDATE_NOTES.slice(1);
 
   return (
     <Dialog
@@ -145,46 +227,41 @@ export default function WhatsNewDialog({ open, onClose }: WhatsNewDialogProps) {
       </DialogTitle>
 
       <DialogContent dividers>
-        <SectionHeading first>New</SectionHeading>
-        <Stack spacing={1.25}>
-          {note.new.map((item) => (
-            <NewItemCard key={item.title} item={item} />
-          ))}
-        </Stack>
+        <NoteSections note={note} />
 
-        {note.improved.length > 0 && (
+        {earlier.length > 0 && (
           <>
-            <SectionHeading>Improved</SectionHeading>
-            <Stack spacing={1.5}>
-              {note.improved.map((item) => (
-                <Box key={item.title}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                    {item.title}
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                    {item.body}
-                  </Typography>
-                </Box>
-              ))}
-            </Stack>
-          </>
-        )}
-
-        {note.fixes.length > 0 && (
-          <>
-            <SectionHeading>Fixes &amp; optimisations</SectionHeading>
-            <Box component="ul" sx={{ m: 0, pl: 2.5 }}>
-              {note.fixes.map((fix) => (
-                <Typography
-                  key={fix}
-                  component="li"
-                  variant="body2"
-                  sx={{ color: "text.secondary", mb: 0.5 }}
+            <SectionHeading>Earlier updates</SectionHeading>
+            {earlier.map((old) => (
+              <Accordion
+                key={old.id}
+                // Per note, so an older release that still deserves reading is
+                // open on arrival rather than folded away behind a date nobody
+                // clicks. See UpdateNote.startOpen.
+                defaultExpanded={old.startOpen ?? false}
+                disableGutters
+                elevation={0}
+                square
+                sx={{
+                  bgcolor: "transparent",
+                  "&:before": { display: "none" },
+                  borderTop: 1,
+                  borderColor: "divider",
+                }}
+              >
+                <AccordionSummary
+                  expandIcon={<ExpandMoreIcon fontSize="small" />}
+                  sx={{ px: 0, minHeight: 0, "& .MuiAccordionSummary-content": { my: 1 } }}
                 >
-                  {fix}
-                </Typography>
-              ))}
-            </Box>
+                  <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                    {formatNoteDate(old.date)}
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ px: 0, pt: 0, pb: 2 }}>
+                  <NoteSections note={old} />
+                </AccordionDetails>
+              </Accordion>
+            ))}
           </>
         )}
       </DialogContent>

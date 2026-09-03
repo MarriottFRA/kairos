@@ -39,7 +39,7 @@ import {
   SocialSecurityScheme,
 } from "../engine/types";
 import { FullTimeReference } from "../positionDefaults";
-import { ACCOUNT_FIELD_KEYS } from "./fields";
+import { ACCOUNT_FIELD_KEYS, INPUT_BASIS_KEY, InputBasis } from "./fields";
 import {
   POSITION_COUNT_ACCOUNT,
   headcountAccountForJobType,
@@ -93,6 +93,72 @@ export function buildBankHolidayDefinition(
     updatedAt: calendar.updatedAt ?? "",
     deletedAt: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Input Basis — what period the row's yearly figures are stated for
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the row's Input Basis out of a flat key/value bag — a stored position's
+ * `extraValues` or a live grid row, the same two shapes readContractDays serves.
+ *
+ * Anything unrecognized, the absent key included, is TWELVE. That is what a row
+ * written before the switch existed actually meant: every derived quantity on it
+ * (FTE's ÷12 prorate, the vacation weights normalized over all twelve months)
+ * was computed from a full-year contract.
+ */
+export function readInputBasis(source: Record<string, unknown>): InputBasis {
+  return source[INPUT_BASIS_KEY] === "WORKING_MONTHS" ? "WORKING_MONTHS" : "TWELVE";
+}
+
+/** Σ seasonality. A missing vector reads as a full year, not as zero: every
+ *  default in the system is twelve 1s (the column default, the seed's month
+ *  family), and reading absence as "works no months" would scale every yearly
+ *  figure on the row to nothing rather than leaving it alone. */
+function totalWorkingMonths(seasonality: readonly number[] | undefined): number {
+  if (!Array.isArray(seasonality) || seasonality.length === 0) return MONTHS;
+  let twm = 0;
+  for (let m = 0; m < MONTHS; m++) twm += seasonality[m] ?? 0;
+  return twm;
+}
+
+/**
+ * The number of months the row's yearly figures are stated over: a flat 12 when
+ * they describe a full-year contract, or Σ seasonality when they already cover
+ * only the months worked.
+ *
+ * This is the divisor for the annual salary face (Annual Basic ÷ this = Monthly
+ * Basic) and the denominator inside deriveFte. 0 is possible under
+ * WORKING_MONTHS — a position that never works — and callers must guard, since
+ * the engine's own twm/twd normalization would be dividing by zero in the same
+ * situation.
+ */
+export function basisMonthsFor(
+  source: Record<string, unknown>,
+  seasonality: readonly number[]
+): number {
+  return readInputBasis(source) === "TWELVE" ? MONTHS : totalWorkingMonths(seasonality);
+}
+
+/**
+ * What every yearly QUANTITY on the row is multiplied by before the engine
+ * spreads it: `twm / basisMonths`.
+ *
+ * 1 under WORKING_MONTHS (the figures are already contract-sized, so they pass
+ * through untouched) and twm/12 under TWELVE (a full-year figure earned over
+ * only the months actually worked). Applies to vacation days, the derived and
+ * overridden man-hours, and the manual yearly increase — see applyInputBasis,
+ * which is the one place the order of those scalings is fixed.
+ *
+ * Returns 0 rather than NaN/Infinity when the row works no months at all.
+ */
+export function basisScaleFor(
+  source: Record<string, unknown>,
+  seasonality: readonly number[]
+): number {
+  const months = basisMonthsFor(source, seasonality);
+  return months > 0 ? totalWorkingMonths(seasonality) / months : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,16 +253,23 @@ export function deriveYearlyHoursWorked(
  * override entered on the grid; unset (≤ 0) derives, so a freshly added row
  * still spreads hours. Both engine-input paths call this with the same calendar
  * → identical results (pinned by liveSimParity).
+ *
+ * The Input Basis scale lands on BOTH branches. A typed override is as much a
+ * yearly figure as a derived one — the switch says what period every number on
+ * the row covers, and exempting the override would mean the same 1,800 hours
+ * meant two different things depending on where it came from.
  */
 export function resolveYearlyHoursWorked(
   storedYearlyHoursWorked: number,
-  position: Pick<Position, "vacationDays" | "dailyContractHours">,
+  position: Pick<Position, "vacationDays" | "dailyContractHours" | "seasonality">,
   source: Record<string, unknown>,
   calendar: Pick<CalendarContext, "realDays">
 ): number {
-  return storedYearlyHoursWorked > 0
-    ? storedYearlyHoursWorked
-    : deriveYearlyHoursWorked(position, readContractDays(source), calendar);
+  const yearly =
+    storedYearlyHoursWorked > 0
+      ? storedYearlyHoursWorked
+      : deriveYearlyHoursWorked(position, readContractDays(source), calendar);
+  return yearly * basisScaleFor(source, position.seasonality);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,20 +281,30 @@ export function resolveYearlyHoursWorked(
  * never entered (VBA Associate Details column P):
  *
  *   hours worked   (Yearly Days − Vacation − Days Off − Public Holidays)
- *                  × Daily Hours ÷ 12 × Working Months
+ *                  × Daily Hours ÷ Basis Months × Working Months
  *   ─────────────  ────────────────────────────────────────────────────────
- *   full-timer's   (FT productive days − Vacation) × (FT weekly hours ÷ 5)
+ *   full-timer's   (FT productive days − Vacation × 12/Basis Months)
+ *                  × (FT weekly hours ÷ 5)
  *
  * Two things about this are deliberate and easy to "fix" wrongly:
  *
  * - Vacation is subtracted on BOTH sides, so a generous entitlement does not
- *   depress a post's FTE — a full-timer with 30 days off is still one FTE. It
- *   is the row's own vacation on both sides, which is what makes the ratio
- *   collapse to 1.00 for anyone on the hotel's standard contract.
- * - The ÷12 × Working Months prorate is what makes a six-month seasonal post
- *   read 0.50. The engine then spreads that figure across the active months by
- *   the same seasonality vector (STAT_FTE), so the yearly total is the FTE and
- *   the monthly line is the FTE while working.
+ *   depress a post's FTE — a full-timer with 30 days off is still one FTE. The
+ *   numerator takes the RAW entitlement, matching the raw contract days it comes
+ *   off; the denominator takes it ANNUALIZED (× 12 ÷ Basis Months), because the
+ *   yardstick is always a full year. On the Full year basis those are the same
+ *   number and this reads exactly as it always did. On the Working months basis
+ *   they are not: a six-month contract states six months' leave, and subtracting
+ *   that from a full year's productive days would credit the post with half a
+ *   year's holiday it never had. Annualizing is what makes the two ways of
+ *   stating one job land on the same FTE.
+ * - The ÷ Basis Months × Working Months prorate is what keeps FTE an ANNUAL
+ *   ratio. A six-month post reads 0.50 whichever way its contract is stated: on
+ *   the Full year basis a twelve-month contract is halved by the six months
+ *   worked; on the Working months basis the contract is already half-sized and
+ *   the divisor cancels the prorate instead. Same job, same 0.50. The engine then
+ *   spreads that figure across the active months by the same seasonality vector
+ *   (STAT_FTE), so the monthly line is the FTE while working.
  *
  * A row with NO Yearly Days at all falls back to the full-time productive year
  * rather than reading 0. Those three columns arrived with the hotel-year safe
@@ -238,31 +321,97 @@ export function resolveYearlyHoursWorked(
 export function deriveFte(
   position: Pick<Position, "vacationDays" | "dailyContractHours" | "seasonality">,
   contract: ContractDays,
-  reference: FullTimeReference
+  reference: FullTimeReference,
+  /** Months the contract figures are stated over — basisMonthsFor. Defaults to a
+   *  flat 12, the behaviour before Input Basis governed the whole row. */
+  basisMonths: number = MONTHS
 ): number {
   const productiveDays = contractProductiveDays(contract, reference.productiveDays);
   const workedDays = productiveDays - position.vacationDays;
-  if (workedDays <= 0 || position.dailyContractHours <= 0) return 0;
+  if (workedDays <= 0 || position.dailyContractHours <= 0 || basisMonths <= 0) return 0;
 
-  let workingMonths = 0;
-  for (let m = 0; m < MONTHS; m++) workingMonths += position.seasonality[m] ?? 0;
+  const workingMonths = totalWorkingMonths(position.seasonality);
 
   const worked =
-    ((workedDays * position.dailyContractHours) / MONTHS) * workingMonths;
+    ((workedDays * position.dailyContractHours) / basisMonths) * workingMonths;
 
-  const fullTimeDays = reference.productiveDays - position.vacationDays;
+  // The yardstick is a full year, so the entitlement coming off it has to be one
+  // too — see the note above on why this is annualized and the numerator's is not.
+  const annualizedVacation = (position.vacationDays * MONTHS) / basisMonths;
+  const fullTimeDays = reference.productiveDays - annualizedVacation;
   const fullTime = fullTimeDays * reference.dailyHours;
   return fullTime > 0 ? worked / fullTime : 0;
 }
 
 /** deriveFte straight off a flat bag of contract values — the form both engine
- *  paths and the grid actually hold. */
+ *  paths and the grid actually hold. The bag carries the Input Basis too, so the
+ *  prorate cannot be applied with one reading and the day counts with another. */
 export function resolveFte(
   position: Pick<Position, "vacationDays" | "dailyContractHours" | "seasonality">,
   source: Record<string, unknown>,
   reference: FullTimeReference
 ): number {
-  return deriveFte(position, readContractDays(source), reference);
+  return deriveFte(
+    position,
+    readContractDays(source),
+    reference,
+    basisMonthsFor(source, position.seasonality)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Input Basis — applied to a built position, in the one order that is correct
+// ---------------------------------------------------------------------------
+
+/**
+ * Restate every yearly figure on a freshly assembled Position in the terms the
+ * engine spreads, according to the row's Input Basis.
+ *
+ * The ORDER is the whole point of this being a function rather than five lines
+ * repeated in two files. FTE and the derived man-hours subtract `vacationDays`
+ * from a contract-days numerator, and both of those are RAW — stated over the
+ * same period as each other. Scale the vacation first and they would be netting
+ * a prorated entitlement off a full-year day count, quietly inflating both. So
+ * fte and yearlyHoursWorked resolve from the raw position, and only then does
+ * vacation (and everything derived from it) move.
+ *
+ * Call it EXACTLY ONCE, on a position built with the values exactly as
+ * stored/typed. It is not idempotent — a second call squares the scale — and
+ * TypeScript cannot catch a reintroduced second scaling, because a Position
+ * satisfies every parameter here just as well the second time. Both engine-input
+ * assemblies call it once and neither scales anything itself; liveSimParity is
+ * what pins that, and only because its fixture has a row with twm < 12.
+ */
+export function applyInputBasis(
+  position: Position,
+  /** The flat bag the POSITION_EXTRA contract keys and the basis live in: a
+   *  stored record's extraValues, or the live grid row itself. */
+  source: Record<string, unknown>,
+  calendar: Pick<CalendarContext, "realDays">,
+  reference: FullTimeReference
+): void {
+  // Raw first — these two read the untouched vacation entitlement.
+  position.fte = resolveFte(position, source, reference);
+  position.yearlyHoursWorked = resolveYearlyHoursWorked(
+    position.yearlyHoursWorked,
+    position,
+    source,
+    calendar
+  );
+
+  const scale = basisScaleFor(source, position.seasonality);
+  position.vacationDays *= scale;
+  // The engine divides the manual increase by the months active from the
+  // increase month, so scaling the numerator is the whole change — no opcode
+  // knows this switch exists.
+  position.manualYearlyIncrease *= scale;
+
+  // Earned across the months actually worked, from the now-scaled entitlement.
+  // The engine reads this as an on/off guard only (nonzero = accrue); the
+  // roll-forward derives its own earning leg from the leave actually taken.
+  const workingMonths = totalWorkingMonths(position.seasonality);
+  position.accrualDaysPerMonth =
+    workingMonths > 0 ? position.vacationDays / workingMonths : 0;
 }
 
 // ---------------------------------------------------------------------------

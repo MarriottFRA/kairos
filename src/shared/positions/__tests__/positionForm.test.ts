@@ -461,10 +461,22 @@ describe("field jump", () => {
   });
 
   it("never offers a field the catalog has hidden", () => {
-    const hidden = BUILTIN_CATALOG.fields.filter((def) => !def.visible);
-    expect(hidden.length).toBeGreaterThan(0); // annualDivisorBasis at least
+    // Hidden state is built here rather than looked for in the seed: every
+    // system field is currently visible (annualDivisorBasis, the last one that
+    // was not, came out of hiding as Input Basis in v31), so searching the seed
+    // for one would make this assertion pass by iterating over nothing. Hiding a
+    // column is a user action anyway — the rule has to hold for any field.
+    const hiddenKey = "meritIncreasePct";
+    const catalog = {
+      ...BUILTIN_CATALOG,
+      fields: BUILTIN_CATALOG.fields.map((def) =>
+        def.key === hiddenKey ? { ...def, visible: false } : def
+      ),
+    };
+    const hidden = catalog.fields.filter((def) => !def.visible);
+    expect(hidden.map((def) => def.key)).toEqual([hiddenKey]);
     for (const def of hidden) {
-      expect(matchFormFields(BUILTIN_CATALOG, def.defaultLabel)).not.toContain(def.key);
+      expect(matchFormFields(catalog, def.defaultLabel)).not.toContain(def.key);
     }
   });
 });

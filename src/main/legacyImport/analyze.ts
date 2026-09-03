@@ -1106,6 +1106,16 @@ function planPositions(
       // field being COMPUTED since seed v24. Part-timers stay part-time because
       // their contract comes across, not because the ratio does.
       seasonality,
+      // Stated, not defaulted: the workbook's Yearly Days / Days Off / Public
+      // Holidays are a FULL-YEAR contract shape even on a seasonal row, so the
+      // whole row reads on the Full year basis and Kairos prorates the derived
+      // man-hours and FTE by the working months it also imported. Two figures on
+      // an imported seasonal row therefore differ from the workbook: its derived
+      // man-hours (which the VBA left at a full year's worth, inside however many
+      // months the row worked) and its Manual Yearly Increase (which the VBA
+      // spread whole from the increase month). Both are the correction this basis
+      // exists to make — a nine-month post does not work twelve months of hours.
+      annualDivisorBasis: "TWELVE",
       monthlyBaseSalary: num(row.cells[COL.monthlyBasicSalary]),
       meritIncreasePct: num(row.cells[COL.meritIncreasePct]),
       manualYearlyIncrease: num(row.cells[COL.manualYearlyIncrease]),

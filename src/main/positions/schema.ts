@@ -611,3 +611,94 @@ export function applySsSchemeBaseColumns(
     );
   }
 }
+
+/**
+ * Restate pre-v31 seasonal rows onto the Full year Input Basis (secure v7).
+ *
+ * Until seed v31, `annualDivisorBasis` chose the Annual → Monthly salary divisor
+ * and nothing else: FTE prorated by a hardcoded ÷12, the derived man-hours by
+ * nothing at all, and the vacation weights normalized over all twelve months. A
+ * row's contract days were therefore read as a FULL YEAR everywhere except the
+ * salary. v31 made the switch govern the whole row, which means a row still
+ * saying WORKING_MONTHS would now have its hours, FTE and vacation read as
+ * contract-sized — a budget change on plans nobody touched.
+ *
+ * So every row that works less than a full year is restated as what it actually
+ * meant: basis TWELVE, with the Annual Basic face rewritten to the full-year
+ * equivalent (monthly × 12) wherever Annual is the face the user types. The
+ * ENGINE's only salary input, monthly_base_salary, is never written — which is
+ * what makes this a restatement and not a repricing. A nine-month row that read
+ * 45,000 ÷ 9 now reads 60,000 ÷ 12: same 5,000 a month, same budget, and the
+ * yearly figure finally says what the contract days beside it always said.
+ *
+ * Full-year rows (Σ seasonality ≥ 12) are not touched at all — both bases give
+ * the identical answer there, so there is nothing to restate and no reason to
+ * put them through the sync change feed. Rows that already say TWELVE are
+ * likewise left alone, which is what makes this idempotent.
+ *
+ * updated_at IS bumped on the rows it rewrites. The restatement has to travel:
+ * a peer that pulls one of these rows from the server after running its own
+ * migration would otherwise take the un-restated version at face value and read
+ * it as a contract-period row.
+ */
+export function applyInputBasisRestatement(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(positions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+  if (!present.has("extra_values") || !present.has("seasonality")) return;
+
+  const rows = handle
+    .prepare(
+      `SELECT id, seasonality, monthly_base_salary, extra_values FROM positions`
+    )
+    .all() as Array<{
+    id: string;
+    seasonality: string;
+    monthly_base_salary: number;
+    extra_values: string;
+  }>;
+
+  const update = handle.prepare(
+    `UPDATE positions SET extra_values = ?, updated_at = ? WHERE id = ?`
+  );
+  const stamp = new Date().toISOString();
+
+  for (const row of rows) {
+    let seasonality: unknown;
+    let extras: Record<string, unknown>;
+    try {
+      seasonality = JSON.parse(row.seasonality);
+      extras = JSON.parse(row.extra_values) as Record<string, unknown>;
+    } catch {
+      continue; // unreadable blob — leave it exactly as found
+    }
+    if (!Array.isArray(seasonality) || !extras || typeof extras !== "object") continue;
+    if (extras.annualDivisorBasis === "TWELVE") continue;
+
+    let workingMonths = 0;
+    for (const value of seasonality) {
+      const month = Number(value);
+      if (Number.isFinite(month)) workingMonths += month;
+    }
+    // Epsilon, not `>= 12`: the twelve cells are JSON reals, so a full-year row
+    // can add up to 11.999999999 and would otherwise be restated — and every
+    // restated row is a row this device then has to publish.
+    if (workingMonths >= 12 - 1e-9) continue;
+
+    const next: Record<string, unknown> = {
+      ...extras,
+      annualDivisorBasis: "TWELVE",
+    };
+    // Only the typed face is rewritten. A MONTHLY row's Annual figure is derived
+    // at load (rowModel.hydrateBasicSalary), so it re-derives on the new basis
+    // by itself and storing it here would be writing a number nobody typed.
+    if (extras.salaryEntryMode === "ANNUAL") {
+      next.annualBaseSalary = row.monthly_base_salary * 12;
+    }
+    update.run(JSON.stringify(next), stamp, row.id);
+  }
+}

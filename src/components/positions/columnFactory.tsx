@@ -72,7 +72,9 @@ import {
   basicSalaryCellLocked,
   COMPUTES,
   PositionRow,
+  rowVector,
 } from "../../shared/positions/rowModel";
+import { basisScaleFor } from "../../shared/positions/engineInput";
 import {
   headcountAccountForJobType,
   positionCountAccountForJobType,
@@ -1117,7 +1119,21 @@ function buildColumn(
   // can be overridden; an untouched commit echoes the derived value back, which
   // the valueSetter drops so the cell stays auto (mirrors the Cluster Multiplier
   // override). An empty cell persists as 0 → the loaders re-derive it.
+  //
+  // The column reads and writes in ENGINE space: the Input Basis prorate is
+  // applied to an override on the way out and undone on the way in, so every
+  // cell in this column means the same thing whether it is derived or typed, and
+  // the "committed the derived value back" test below compares like with like.
+  // Storage keeps the raw statement — engineInput.resolveYearlyHoursWorked scales
+  // the stored override exactly as it scales a derived one.
   if (def.key === "yearlyHoursWorked") {
+    // A row that works no months has no prorate to apply and nothing to recover
+    // one from, so it falls back to 1: the cell then shows exactly what was
+    // typed and stores exactly that, instead of collapsing a real override to
+    // zero and then discarding it. The engine spreads nothing for such a row
+    // either way, so the only thing at stake is not losing the user's number.
+    const scaleOf = (row: PositionRow | undefined): number =>
+      (row ? basisScaleFor(row, rowVector(row, "seasonality")) : 1) || 1;
     const derivedOf = (row: PositionRow | undefined): number | null => {
       if (!row) return null;
       const value = ctx.derived.current.manhoursWorkedById.get(row.id);
@@ -1125,7 +1141,7 @@ function buildColumn(
     };
     const storedOverride = (row: PositionRow | undefined): number | null => {
       const num = Number(row?.yearlyHoursWorked);
-      return Number.isFinite(num) && num > 0 ? num : null;
+      return Number.isFinite(num) && num > 0 ? num * scaleOf(row) : null;
     };
     column.valueGetter = (_value: unknown, row: PositionRow) => {
       if (!row) return null;
@@ -1140,7 +1156,9 @@ function buildColumn(
       if (num === null || num <= 0 || (derived !== null && Math.abs(num - derived) < 0.5)) {
         return { ...row, yearlyHoursWorked: null };
       }
-      return { ...row, yearlyHoursWorked: num };
+      // Back to the row's own statement, the exact inverse of what the getter
+      // showed — so retyping the displayed number stores the same figure again.
+      return { ...row, yearlyHoursWorked: num / scaleOf(row) };
     };
     column.valueFormatter = (value: number | null | undefined) => {
       const num = Number(value);

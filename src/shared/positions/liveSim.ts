@@ -43,7 +43,6 @@ import {
   KpiSeriesSlice,
   readPositionAccounts,
   resolveBlockValues,
-  resolveYearlyHoursWorked,
 } from "./engineInput";
 import { serviceDaysFor } from "./serviceDays";
 import {
@@ -181,10 +180,15 @@ export function runLiveSim(args: {
   const positions = rows
     .filter((row) => row.active !== false)
     .map((row) => {
+      // The calendar makes this the FULL engine-input assembly: rowToEnginePosition
+      // runs applyInputBasis, which restates the row's yearly figures (fte, worked
+      // hours, vacation, manual increase, accrual rate) for its Input Basis —
+      // the mirror of loadScenarioInput that liveSimParity pins.
       const position = rowToEnginePosition(
         row,
         scenarioId,
-        args.fullTime ?? EMPTY_FULL_TIME_REFERENCE
+        args.fullTime ?? EMPTY_FULL_TIME_REFERENCE,
+        calendar
       );
       const resolved = resolveHotelClusterWeight(
         args.ou,
@@ -204,15 +208,6 @@ export function runLiveSim(args: {
       );
       position.cluster = resolved.clusterName;
       position.hotelClusterWeight = resolved.weight;
-      // Auto-derive worked hours from the row's Contract columns (override-aware)
-      // — mirror of loadScenarioInput, which reads the same keys out of
-      // extraValues. The live row IS the flat bag, so it passes straight in.
-      position.yearlyHoursWorked = resolveYearlyHoursWorked(
-        position.yearlyHoursWorked,
-        position,
-        row,
-        calendar
-      );
       // Length of service from the row's hiring date, for the SERVICE bases.
       // Mirror of loadScenarioInput; serviceDaysParity pins the two.
       const service = serviceDaysFor(

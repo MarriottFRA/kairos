@@ -48,6 +48,7 @@ import {
   COLLAPSIBLE_MONTH_FAMILIES,
   collapsibleMonthKeys,
   FieldCatalog,
+  INPUT_BASIS_KEY,
   SectionId,
   vectorKey,
 } from "../../shared/positions/fields";
@@ -83,7 +84,11 @@ import {
   buildBlockGroupingEntries,
   poolWeightGate,
 } from "./blockColumns";
-import { healCollapsedFamilies, healNewColumn } from "./gridLayout";
+import {
+  healCollapsedFamilies,
+  healMovedColumn,
+  healNewColumn,
+} from "./gridLayout";
 
 export const ROW_HEIGHT = 36;
 /** Two lines: the short name (up to 2 rows) over the muted unit tag. */
@@ -1241,7 +1246,11 @@ function PositionsGrid({
     // Standard Title arrived with seed v22, so any layout saved before it lists
     // every other column and not this one — which strands it at the far right,
     // past Vacation, instead of beside the Job Title it belongs to.
-    return healNewColumn(healed, "standardJobTitle", "payType");
+    healed = healNewColumn(healed, "standardJobTitle", "payType");
+    // Input Basis moved bands in v31 (end of Basic Salary → head of Contract).
+    // Only relocated in layouts that still have it in its old slot, right after
+    // Hourly Rate; anyone who dragged it keeps where they put it.
+    return healMovedColumn(healed, INPUT_BASIS_KEY, "contractYearlyDays", "hourlyRate");
   }, []);
 
   // The wrapper exists only to anchor the selection readout, which is absolutely

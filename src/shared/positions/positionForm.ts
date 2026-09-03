@@ -28,6 +28,7 @@ import {
 import {
   BASIC_SALARY_ANNUAL_KEY,
   COLLAPSIBLE_MONTH_FAMILIES,
+  INPUT_BASIS_KEY,
   FieldCatalog,
   FieldDef,
   fieldLabel,
@@ -314,6 +315,7 @@ export const ESSENTIAL_FIELD_KEYS: ReadonlySet<string> = new Set([
   "headcount",
   "cluster",
   // Contract
+  INPUT_BASIS_KEY,
   "contractYearlyDays",
   "contractDaysOff",
   "contractPubHolidays",

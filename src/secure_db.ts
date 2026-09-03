@@ -7,6 +7,7 @@ import {
   POSITIONS_VALUE_TABLES_SQL,
   applyClusterSnapshotColumns,
   applyComponentValueDepartment,
+  applyInputBasisRestatement,
   applyOutputLineProvenance,
   applyValueStoreV12,
 } from "./main/positions/schema";
@@ -70,7 +71,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -263,6 +264,11 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   // plus the per-row divisor/factor, so monthly Stats can be derived from the
   // KPI cache the way Amounts are already derived from a rate.
   6: applyManualInputKpiStats,
+  // Input Basis (seed v31) went from choosing the salary divisor to declaring
+  // what period ALL of a row's yearly figures cover. Seasonal rows are restated
+  // as the full-year contracts they were already being read as, so no budget
+  // number moves. Data only — no DDL. See applyInputBasisRestatement.
+  7: applyInputBasisRestatement,
 };
 
 function createSchema(handle: SecureDb): void {

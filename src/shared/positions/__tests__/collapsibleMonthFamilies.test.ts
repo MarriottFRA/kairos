@@ -20,6 +20,7 @@ import {
 import { COMPUTES, PositionRow, rowToEnginePosition } from "../rowModel";
 import {
   healCollapsedFamilies,
+  healMovedColumn,
   healNewColumn,
 } from "../../../components/positions/gridLayout";
 
@@ -150,5 +151,79 @@ describe("the saved layout", () => {
       "cluster",
       "vacationEstimate",
     ]);
+  });
+
+  // Input Basis moved bands in seed v31 (end of Basic Salary → head of
+  // Contract). Unlike Standard Title it is already IN every saved layout, so
+  // healNewColumn cannot help: without a repair the grid would draw the Basic
+  // Salary banner, a lone Contract banner, then Basic Salary again.
+  describe("a column a seed bump moved to another band", () => {
+    const OLD_SLOT = [
+      "contractYearlyDays",
+      "dailyContractHours",
+      "salaryEntryMode",
+      "hourlyRate",
+      "annualDivisorBasis",
+      "additionalCostsTotal",
+    ];
+
+    it("moves it in front of its new band when nobody has touched it", () => {
+      const saved: GridInitialState = { columns: { orderedFields: OLD_SLOT } };
+      const ordered = healMovedColumn(
+        saved,
+        "annualDivisorBasis",
+        "contractYearlyDays",
+        "hourlyRate"
+      ).columns?.orderedFields;
+      expect(ordered).toEqual([
+        "annualDivisorBasis",
+        "contractYearlyDays",
+        "dailyContractHours",
+        "salaryEntryMode",
+        "hourlyRate",
+        "additionalCostsTotal",
+      ]);
+    });
+
+    it("leaves a column the user dragged somewhere else exactly where it is", () => {
+      // A default, not a reset. The test is the old left-hand neighbour: this
+      // layout has the column parked after Daily Hours, which is not where the
+      // old seed put it, so somebody moved it on purpose.
+      const saved: GridInitialState = {
+        columns: {
+          orderedFields: [
+            "contractYearlyDays",
+            "dailyContractHours",
+            "annualDivisorBasis",
+            "salaryEntryMode",
+            "hourlyRate",
+          ],
+        },
+      };
+      expect(healMovedColumn(saved, "annualDivisorBasis", "contractYearlyDays", "hourlyRate")).toBe(saved);
+    });
+
+    it("does nothing when the layout predates the column or has no order", () => {
+      const withoutKey: GridInitialState = {
+        columns: { orderedFields: ["contractYearlyDays", "hourlyRate"] },
+      };
+      expect(healMovedColumn(withoutKey, "annualDivisorBasis", "contractYearlyDays", "hourlyRate")).toBe(withoutKey);
+
+      const noOrder: GridInitialState = { columns: {} };
+      expect(healMovedColumn(noOrder, "annualDivisorBasis", "contractYearlyDays", "hourlyRate")).toBe(noOrder);
+    });
+
+    it("does nothing when the anchor is missing from the layout", () => {
+      const saved: GridInitialState = {
+        columns: { orderedFields: ["hourlyRate", "annualDivisorBasis"] },
+      };
+      expect(healMovedColumn(saved, "annualDivisorBasis", "contractYearlyDays", "hourlyRate")).toBe(saved);
+    });
+
+    it("is idempotent — a second mount does not move it again", () => {
+      const saved: GridInitialState = { columns: { orderedFields: OLD_SLOT } };
+      const once = healMovedColumn(saved, "annualDivisorBasis", "contractYearlyDays", "hourlyRate");
+      expect(healMovedColumn(once, "annualDivisorBasis", "contractYearlyDays", "hourlyRate")).toBe(once);
+    });
   });
 });

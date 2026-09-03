@@ -78,7 +78,11 @@ function overlaid(position: Position): Position {
 }
 
 describe("live-sim overlays do not move the derived columns", () => {
-  const perUnit = rowToEnginePosition(trickyRow(), "scn");
+  // WITH the calendar, so this is the same position vacationCostById and
+  // manhoursWorkedById actually value — Input Basis restatement included. Built
+  // without one it would take the raw branch, and every claim below would be
+  // about an object no caller ever sees.
+  const perUnit = rowToEnginePosition(trickyRow(), "scn", undefined, CALENDAR);
 
   it("vacation cost is identical before and after the overlay", () => {
     const before = referenceVacation(perUnit, CALENDAR);
@@ -112,7 +116,12 @@ describe("live-sim overlays do not move the derived columns", () => {
     // Vacation Cost is what ONE person's leave costs, like the Headcount column
     // is one row's people. A row of 2 at a 0.4 cluster share must not show 0.8×
     // or 2× anything — the multipliers belong to the budget, not the cell.
-    const single = rowToEnginePosition({ ...trickyRow(), headcount: 1 }, "scn");
+    const single = rowToEnginePosition(
+      { ...trickyRow(), headcount: 1 },
+      "scn",
+      undefined,
+      CALENDAR
+    );
     expect(Array.from(referenceVacation(perUnit, CALENDAR))).toEqual(
       Array.from(referenceVacation(single, CALENDAR))
     );

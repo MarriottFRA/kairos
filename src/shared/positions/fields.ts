@@ -210,28 +210,49 @@ export const BASIC_SALARY_HOURLY_KEY = "hourlyRate";
  * Annual salary entry. Contracts are written per year, so Annual Basic is the
  * figure most users actually hold — but the engine's base is per active month
  * and stays that way (monthlyBaseSalary is the only salary input it reads).
- * These three keys are the pairing that lets one be typed and the other derived:
+ * These keys are the pairing that lets one be typed and the other derived:
  *
  *   salaryEntryMode      which face the user typed; the other is read-only
  *   annualBaseSalary     the yearly contract figure
- *   annualDivisorBasis   how the two convert — Σ working months (the contract
- *                        covers only the months worked) or a flat 12
  *
- * The divisor lives on the ROW, not in a global setting, so a row's monthly
- * figure is always reproducible from the row itself — flipping the preference
- * can never silently re-base positions nobody touched. Shared by the grid
- * (read-only gating + muting) and rowModel (derivation + hydration).
+ * The conversion between them is Input Basis (below), which lives on the ROW,
+ * not in a global setting, so a row's monthly figure is always reproducible
+ * from the row itself — flipping a preference can never silently re-base
+ * positions nobody touched. Shared by the grid (read-only gating + muting) and
+ * rowModel (derivation + hydration).
  */
 export const BASIC_SALARY_ANNUAL_KEY = "annualBaseSalary";
 export const SALARY_ENTRY_MODE_KEY = "salaryEntryMode";
-export const ANNUAL_DIVISOR_KEY = "annualDivisorBasis";
+
+/**
+ * Input Basis — what PERIOD every yearly figure on the row is stated for.
+ *
+ * Shipped in v19 as "Annual Basis", a hidden switch that only chose the Annual
+ * → Monthly salary divisor. It always asked the more general question, and as
+ * of v31 it answers it for the whole row: contract days, vacation days, the
+ * manual yearly increase and the derived man-hours/FTE all read through it.
+ *
+ *   TWELVE          the figures describe a full 12-month contract. The post
+ *                   works Σ seasonality months anyway (a new starter, a
+ *                   mid-year leaver), so each yearly quantity prorates by
+ *                   twm/12 and the annual salary divides by a flat 12.
+ *   WORKING_MONTHS  the figures already cover only the months worked. A real
+ *                   six-month contract states six months' pay, ~182 contract
+ *                   days and its own leave; everything is taken as typed.
+ *
+ * The key STRING is unchanged from v19 so no stored row has to be rewritten to
+ * be read correctly — see engineInput.basisMonthsFor for the arithmetic and
+ * secure_db MIGRATIONS[7] for the one-time restatement of pre-v31 rows.
+ */
+export const INPUT_BASIS_KEY = "annualDivisorBasis";
 
 /** Which of the two basic-salary faces the user types. Absent = MONTHLY, the
  *  behaviour of every row written before the Annual column existed. */
 export type SalaryEntryMode = "MONTHLY" | "ANNUAL";
 
-/** What Annual Basic is divided by to reach the monthly base. */
-export type AnnualDivisorBasis = "WORKING_MONTHS" | "TWELVE";
+/** What period the row's yearly figures cover. Absent = TWELVE: every derived
+ *  quantity on a pre-v19 row was computed from a full-year contract. */
+export type InputBasis = "WORKING_MONTHS" | "TWELVE";
 
 /** The hotel-cluster pair on a position: the assignment (stores a cluster id,
  *  "" = none) and the manual multiplier override (only honored while the
