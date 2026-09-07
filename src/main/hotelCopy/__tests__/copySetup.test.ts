@@ -206,6 +206,24 @@ function seedSourceHotel(): { bonusId: string } {
     },
     NOW
   );
+  // Books the movement of Bonus with its per-row multiplier off and its
+  // opening balance typed per row — all three ride the config blob and must
+  // survive the copy verbatim.
+  saveBlock(
+    db,
+    SRC,
+    {
+      blockType: "MULTIPLIER",
+      label: "Charge",
+      accountCode: "510600",
+      accountLocked: true,
+      base: { kind: "BLOCK", blockId: bonusId },
+      movement: true,
+      useRowRate: false,
+      autoOpeningBalance: false,
+    },
+    NOW
+  );
   // Scheme membership names a block's cost def — the deferred-remap case.
   db.prepare(
     `UPDATE ss_schemes SET base_component_ids = ? WHERE id = 'scheme-src'`
@@ -226,7 +244,7 @@ describe("copyHotelSetup", () => {
 
     const counts = copyHotelSetup(db, TGT, SRC, NOW);
     expect(counts).toEqual({
-      blocks: 6,
+      blocks: 7,
       ssSchemes: 1,
       kpiDrivers: 1,
       allocations: 1,
@@ -243,6 +261,7 @@ describe("copyHotelSetup", () => {
       "NI",
       "Meals",
       "Tips",
+      "Charge",
     ]);
     const sourceIds = new Set(listBlocks(db, SRC).map((block) => block.id));
     for (const block of copied) expect(sourceIds.has(block.id)).toBe(false);
@@ -284,6 +303,20 @@ describe("copyHotelSetup", () => {
     // Rate-rule outcome → the copied block.
     expect(targetBlock("Tips").rateRules?.rules[0]?.rateBlockId).toBe(bonus.id);
 
+    // Movement flag, the switched-off per-row multiplier and the typed opening
+    // balance travel verbatim, and the flag reaches the compiled definition on
+    // the target too.
+    const charge = targetBlock("Charge");
+    expect(charge.base).toEqual({ kind: "BLOCK", blockId: bonus.id });
+    expect(charge.movement).toBe(true);
+    expect(charge.useRowRate).toBe(false);
+    expect(charge.autoOpeningBalance).toBe(false);
+    expect(
+      db
+        .prepare(`SELECT movement FROM cost_component_definitions WHERE id = ? AND ou = ?`)
+        .get(blockCostDefId(charge.id), TGT.ou)
+    ).toEqual({ movement: 1 });
+
     // Dual-output block keeps both defs, derived from its NEW id.
     const meals = targetBlock("Meals");
     expect(meals.costDefId).toBe(blockCostDefId(meals.id));
@@ -313,7 +346,7 @@ describe("copyHotelSetup", () => {
     ).toEqual({ weekly_hours: 42 });
 
     // The source hotel is untouched.
-    expect(listBlocks(db, SRC)).toHaveLength(6);
+    expect(listBlocks(db, SRC)).toHaveLength(7);
     expect(listBlocks(db, SRC).some((block) => block.id === bonusId)).toBe(true);
     const srcScheme = db
       .prepare(`SELECT ou, base_component_ids FROM ss_schemes WHERE id = 'scheme-src'`)
@@ -366,7 +399,7 @@ describe("copyHotelSetup", () => {
   it("lists only OTHER hotels with live blocks as sources", () => {
     seedSourceHotel();
     expect(listLocalSetupSources(db, TGT)).toEqual([
-      { ou: SRC.ou, blockCount: 6 },
+      { ou: SRC.ou, blockCount: 7 },
     ]);
     // From the source's own point of view there is nothing to copy.
     expect(listLocalSetupSources(db, SRC)).toEqual([]);

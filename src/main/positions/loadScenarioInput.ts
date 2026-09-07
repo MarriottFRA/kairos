@@ -31,6 +31,7 @@ import type {
 import {
   applyInputBasis,
   applyPositionAccounts,
+  applyPinnedRowRates,
   applyRateRules,
   applyRuleRateDependencies,
   applySocialSecurityBase,
@@ -61,6 +62,7 @@ import { getComponentDefinitions, getSsSchemes } from "./structureRepo";
 import { getSeries } from "../kpiDrivers/repo";
 import { getHiringDates, getPii, loadScenarioValues } from "./positionsRepo";
 import { serviceDaysFor } from "../../shared/positions/serviceDays";
+import { applyAutoOpeningBalances } from "../../shared/positions/autoOpeningBalances";
 
 type Db = InstanceType<typeof Database>;
 
@@ -294,17 +296,22 @@ export async function loadScenarioInput(
   const ruledValues = applyRateRules(ruleSpecs, positions, ruleBags, componentValues, {
     kpiSeries: (driverId) => getSeries(structureDb, scope.ou, driverId),
   });
+  // Pin rate 1 on the multiplier blocks that switched their per-row column
+  // off on a simple base (a movement block that IS its balance). After the
+  // rules, before the KPI injection. Mirror in runLiveSim — liveSimParity
+  // pins the two.
+  const pinnedValues = applyPinnedRowRates(blocks, positions, ruledValues);
 
   // Resolve KPI-driven blocks to absolute monthly values (the KPI precalc cache
   // lives in the same plaintext store as the structure). Positions carry the
   // per-position multiplier as ComponentValue.rate. Then synthesize the
   // yearly slots dual "Count × Rate" blocks read (shared resolution).
-  injectKpiSeries(definitions, positions, ruledValues, (driverId) =>
+  injectKpiSeries(definitions, positions, pinnedValues, (driverId) =>
     getSeries(structureDb, scope.ou, driverId)
   );
   const resolvedValues = resolveBlockValues(
     definitions,
-    ruledValues,
+    pinnedValues,
     blocks.map((block) => ({
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,
@@ -344,7 +351,7 @@ export async function loadScenarioInput(
       )
   );
 
-  return {
+  const input: ScenarioInput = {
     scenario,
     calendar,
     definitions,
@@ -357,4 +364,18 @@ export async function loadScenarioInput(
     ),
     buyouts,
   };
+
+  // Last of all: each worked-out movement block's blank opening balances,
+  // from a base run of this year and a shadow run of last year — it needs
+  // every value the real run will see, so nothing may follow it. Compiles its
+  // own phase A here (one extra per recalc, never per keystroke); a structure
+  // that does not compile is left untouched for the caller to report. The
+  // same narrow hiring-date read as the service overlay above. Mirror in
+  // runLiveSim — liveSimParity pins the two.
+  const auto = applyAutoOpeningBalances({
+    input,
+    blocks,
+    hiringDateOf: (id) => hiringDates.get(id),
+  });
+  return { ...input, componentValues: auto.componentValues };
 }

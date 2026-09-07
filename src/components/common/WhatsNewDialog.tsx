@@ -190,8 +190,10 @@ export default function WhatsNewDialog({ open, onClose }: WhatsNewDialogProps) {
   const note = LATEST_UPDATE;
   // Everything ever announced, still reachable. A note is only "latest" for as
   // long as the next one takes to arrive, and a one-line improvement pushing ten
-  // features out of the app for good is not what the bell is for. Collapsed, so
-  // the note the bell is actually about is still the thing you see.
+  // features out of the app for good is not what the bell is for. Open, not
+  // folded behind a date: people do not click a folded heading, and a release
+  // nobody has read yet should not be buried by the next small one. Each can
+  // still be collapsed by hand.
   const earlier = UPDATE_NOTES.slice(1);
 
   return (
@@ -235,10 +237,7 @@ export default function WhatsNewDialog({ open, onClose }: WhatsNewDialogProps) {
             {earlier.map((old) => (
               <Accordion
                 key={old.id}
-                // Per note, so an older release that still deserves reading is
-                // open on arrival rather than folded away behind a date nobody
-                // clicks. See UpdateNote.startOpen.
-                defaultExpanded={old.startOpen ?? false}
+                defaultExpanded
                 disableGutters
                 elevation={0}
                 square

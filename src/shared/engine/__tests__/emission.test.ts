@@ -359,6 +359,72 @@ describe("COLLAPSE_LINE emission", () => {
   });
 });
 
+describe("MOVEMENT_LINE emission", () => {
+  const movementDef = (movement?: boolean) =>
+    makeDef({ id: "pct", spreadMethod: "PERCENT_OF", ...(movement ? { movement } : {}) });
+
+  it("appends the post-op with the row's opening balance, right after the spread", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), movementDef(true)],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [makeValue("p1", "pct", { rate: 1, ssOpeningBase: 500 })],
+      })
+    );
+    const decoded = decode(plan, 0);
+    const at = decoded.findIndex((instr) => instr.name === "PCT_OF_ACC");
+    // Exact params pin the one-slot arity: the next instruction's slice starts
+    // right after the opening.
+    expect(decoded[at + 1]).toMatchObject({
+      name: "MOVEMENT_LINE",
+      outLine: lineOf(plan, 0, "pct"),
+      params: [500],
+    });
+  });
+
+  it("reads a missing opening balance as 0", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), movementDef(true)],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [makeValue("p1", "pct", { rate: 1 })],
+      })
+    );
+    const movement = decode(plan, 0).find((instr) => instr.name === "MOVEMENT_LINE");
+    expect(movement?.params).toEqual([0]);
+  });
+
+  it("follows a DIRECT_ABS lowering too — the post-op covers every spread", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), makeDef({ id: "abs", spreadMethod: "DIRECT_ABS", movement: true })],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [
+          makeValue("p1", "abs", { monthlyValues: new Array(MONTHS).fill(10), ssOpeningBase: 3 }),
+        ],
+      })
+    );
+    const decoded = decode(plan, 0);
+    const at = decoded.findIndex((instr) => instr.name === "DIRECT_ABS");
+    expect(decoded[at + 1]).toMatchObject({
+      name: "MOVEMENT_LINE",
+      outLine: lineOf(plan, 0, "abs"),
+      params: [3],
+    });
+  });
+
+  it("emits nothing extra when the def carries no movement", () => {
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), movementDef()],
+        positions: [makePosition({ id: "p1" })],
+        componentValues: [makeValue("p1", "pct", { rate: 1, ssOpeningBase: 500 })],
+      })
+    );
+    expect(decode(plan, 0).some((instr) => instr.name === "MOVEMENT_LINE")).toBe(false);
+  });
+});
+
 // Keep the Op import meaningful: the decode helper relies on OP_NAMES covering
 // every opcode — fail loudly here if someone adds an op without a name.
 describe("opcode table", () => {

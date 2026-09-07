@@ -37,21 +37,28 @@ export interface UpdateNote {
   improved: UpdateItem[];
   /** One-liners. Kept modest on purpose. */
   fixes: string[];
-  /** Older note only: open it in the dialog rather than collapsed behind its
-   *  date. For a note still worth reading when the next one lands on top of it —
-   *  people do not click a folded heading, and a small improvement should not
-   *  bury a release nobody has read yet. Drop the flag once it has had its run;
-   *  collapsed is the resting state. Ignored on the newest note, which is always
-   *  open. */
-  startOpen?: boolean;
 }
 
 /** Newest first — index 0 is the one the bell is about, and the rest stay in the
- *  dialog underneath it (collapsed unless the note sets `startOpen`). Nothing is
- *  ever removed from this list: a note is the only place a feature is announced,
- *  so deleting one un-announces it. A note may leave any of its three sections
+ *  dialog underneath it, open (each can be folded by hand). Nothing is ever
+ *  removed from this list: a note is the only place a feature is announced, so
+ *  deleting one un-announces it. A note may leave any of its three sections
  *  empty. */
 export const UPDATE_NOTES: UpdateNote[] = [
+  {
+    id: 3,
+    date: "2026-09-07",
+    new: [
+      {
+        title: "Books the movement",
+        where: "Positions › Blocks › Multiplier › How it books",
+        body:
+          "A multiplier can book only how much its result MOVED from one month to the next. Build a balance with a chain of blocks — an end-of-service provision from salary × service, say — then add a multiplier on it and switch it to Books the movement. Every month books the balance less the previous worked month's, and the year adds up to closing minus opening. Each row's Opening balance is worked out for you — the same block run for last year, with last year's length of service and this year's pay before any increase — and a row with no balance in January starts from nothing, so a post that opens mid-year books its whole balance in its first month. Type a figure in the cell to use it instead (0 means nothing brought forward), or untick it on the block to type every row. A January pay rise restates the whole balance by itself, in January.",
+      },
+    ],
+    improved: [],
+    fixes: [],
+  },
   {
     id: 2,
     date: "2026-09-03",
@@ -68,9 +75,6 @@ export const UPDATE_NOTES: UpdateNote[] = [
   {
     id: 1,
     date: "2026-09-02",
-    // Still open: note 2 is a single improvement and this one is the release
-    // most people have not read yet. Remove when note 3 lands.
-    startOpen: true,
     new: [
       {
         title: "Rates by rules",

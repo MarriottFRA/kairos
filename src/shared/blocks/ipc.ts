@@ -263,10 +263,12 @@ export interface BlockInput {
   statsAccountLocked?: boolean;
   /** MULTIPLIER only. */
   base?: BlockBaseRef;
-  /** MULTIPLIER + COMBINE base: keep a per-row multiplier column as well as the
-   *  two combined sides. False = the block is pure calculation with no grid
-   *  input. Ignored for every other base kind, which always has a rate.
-   *  Defaults to true. */
+  /** MULTIPLIER + COMBINE base, or MULTIPLIER with `movement`: keep a per-row
+   *  multiplier column as well as the base. False = no grid input; the block
+   *  is its base as it is (a compound pins rate 1 on the selector at save, a
+   *  movement block on a simple base gets rate 1 pinned by the loaders —
+   *  applyPinnedRowRates). Ignored for every other case, which always has a
+   *  rate. Defaults to true. */
   useRowRate?: boolean;
   /** MULTIPLIER + COMBINE base: exempt the line from the engine's headcount
    *  multiplier because it is a ratio. Defaults to true for DIV, false
@@ -282,6 +284,23 @@ export interface BlockInput {
    *  in; a chosen month the position is inactive in gets nothing, and when
    *  none is active the cost is dropped. Absent = spread with the base. */
   collapseMonths?: number[];
+  /** MULTIPLIER only: book the MOVEMENT of the block's result instead of the
+   *  result — the computed series is read as a balance; each active month
+   *  books balance − previous active month, January against the row's opening
+   *  balance (the grid's "Opening balance" column, stored in ss_opening_base).
+   *  Inactive months book nothing and carry the balance forward, so the year
+   *  adds up to closing − opening. Mutually exclusive with collapseMonths.
+   *  Absent = book the result as is. */
+  movement?: boolean;
+  /** MULTIPLIER with `movement` only: what a BLANK "Opening balance" cell
+   *  means. Absent or true = worked out by the loaders (applyAutoOpeningBalances
+   *  — the plan shadow-run for LAST year with last year's service and this
+   *  year's pay before any increase, read at last year's last worked month,
+   *  per person; a row with no balance in January starts from nothing) and
+   *  shown muted in the cell, while a figure typed on the row is used as it
+   *  is. False = blank is 0. The column (ss_opening_base) is the same in both
+   *  modes. Ignored without `movement`. */
+  autoOpeningBalance?: boolean;
   /** COUNT_RATE and FLAT_MONTHLY; defaults to ACTIVE_MONTHS. For FLAT_MONTHLY
    *  the choice also decides the amount's unit — see BlockSpread. */
   spread?: BlockSpread;
@@ -324,8 +343,9 @@ export interface BlockDto {
   statsAccountCode: string;
   statsAccountLocked: boolean;
   base?: BlockBaseRef;
-  /** MULTIPLIER + COMBINE base — see BlockInput. Defaults to true; drives
-   *  whether the grid shows a multiplier column (blockInputSlots). */
+  /** MULTIPLIER + COMBINE base, or with `movement` — see BlockInput. Defaults
+   *  to true; drives whether the grid shows a multiplier column
+   *  (blockInputSlots). */
   useRowRate?: boolean;
   /** MULTIPLIER + COMBINE base — see BlockInput. */
   ratioNoHeadcount?: boolean;
@@ -336,6 +356,14 @@ export interface BlockDto {
   /** MULTIPLIER only — see BlockInput. Def-level: the grid's per-row columns
    *  are unchanged (blockInputSlots does not read this). */
   collapseMonths?: number[];
+  /** MULTIPLIER only — see BlockInput. Drives the grid's "Opening balance"
+   *  column (blockInputSlots). */
+  movement?: boolean;
+  /** MULTIPLIER with `movement` only — see BlockInput. Present (true or
+   *  false) whenever `movement` is; true = the loaders fill each row's blank
+   *  opening (applyAutoOpeningBalances) and the grid shows it muted, false =
+   *  blank is 0. Drives the "Opening balance" column's header and cell. */
+  autoOpeningBalance?: boolean;
   spread: BlockSpread;
   /** WEEKDAYS spread only — see BlockInput.weekdayMask. */
   weekdayMask?: number;

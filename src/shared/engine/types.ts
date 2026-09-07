@@ -288,6 +288,24 @@ export interface CostComponentDefinition extends SyncMeta {
    */
   collapseMonths?: number[];
   /**
+   * Book the MOVEMENT of the line rather than the line itself. The series the
+   * def computes is read as a BALANCE (an end-of-service provision built from
+   * salary × service, say) and each active month books balance[m] − previous,
+   * where `previous` starts at the row's opening balance
+   * (ComponentValue.ssOpeningBase — the SS column, reused) and then tracks the
+   * balance of the last ACTIVE month. Inactive months book 0 and do not
+   * advance `previous` (the ACCRUAL hold policy), so Σ over the year = balance
+   * at the last active month − opening, and a January salary rise restates the
+   * whole balance in January by itself. A line post-op like collapseMonths
+   * (with which it is mutually exclusive — the blocks repo refuses both; if
+   * both ever arrive by sync, collapse runs first). Runs before the count ×
+   * cluster-weight tail, with which it commutes, so the opening is per person
+   * like the balance — except on a DIRECT_ABS (KPI) lowering, which is
+   * count-exempt, where the opening is a whole-line figure too. Absent =
+   * today's behaviour, untouched. See Op.MOVEMENT_LINE.
+   */
+  movement?: boolean;
+  /**
    * Which weekdays a WEEKDAY_COUNT spread books on — a 7-bit mask in the
    * Sunday-first bit order of CalendarYear.weekendMask (bit 0 = Sunday …
    * bit 6 = Saturday; `1 << 5` = Fridays). Required when spreadMethod ===
@@ -584,12 +602,18 @@ export interface ComponentValue extends SyncMeta {
   /** QTY_TIMES_RATE (yearly qty × unit rate). */
   qty?: number;
   unitRate?: number;
-  /** SOCIAL_SECURITY defs only: the position's cumulative NI/SS contribution
+  /** SOCIAL_SECURITY defs: the position's cumulative NI/SS contribution
    *  base already accrued into the current tax year before its first simulated
    *  month (a non-January tax year straddles the prior calendar year). Seeds the
    *  SS accumulator; only consulted for a CUMULATIVE scheme with
    *  taxYearStartMonth > 1. Defaults to 0. Per (position, scheme) since each SS
-   *  block is its own component def. */
+   *  block is its own component def.
+   *
+   *  SPREAD defs with `movement` set: the balance brought forward at the start
+   *  of the year, per person, which January's movement is measured against
+   *  (see CostComponentDefinition.movement). The column is REUSED rather than
+   *  added — one per (position, def) is exactly the shape both need, and it
+   *  spares the secure store a migration; the POOL_WEIGHT_SLOT precedent. */
   ssOpeningBase?: number;
   /** Per-line account override: when defined, this line's dept×account key
    *  uses it instead of the definition's account. Loaders populate it only

@@ -943,10 +943,16 @@ export default function BlockDialog({
   >([]);
   const [otherwiseRate, setOtherwiseRate] = useState("0");
   const [otherwiseBlockId, setOtherwiseBlockId] = useState<string | undefined>(undefined);
-  // MULTIPLIER timing: spread with the base as usual, or land the whole
-  // yearly figure in chosen months (13th-month salary).
-  const [collapseMode, setCollapseMode] = useState<"SPREAD" | "MONTHS">("SPREAD");
+  // MULTIPLIER booking: spread with the base as usual, land the whole yearly
+  // figure in chosen months (13th-month salary), or book the month-on-month
+  // movement of the result (a provision charge).
+  const [collapseMode, setCollapseMode] = useState<"SPREAD" | "MONTHS" | "MOVEMENT">(
+    "SPREAD"
+  );
   const [collapseMonths, setCollapseMonths] = useState<number[]>([]);
+  // MOVEMENT only: the opening balance worked out from last year (the
+  // default) or typed per row.
+  const [autoOpening, setAutoOpening] = useState(true);
   const [spread, setSpread] = useState<BlockSpread>("ACTIVE_MONTHS");
   // WEEKDAYS spread only: 7-bit Sunday-first mask (calendar.ts convention).
   const [weekdayMask, setWeekdayMask] = useState(0);
@@ -995,8 +1001,11 @@ export default function BlockDialog({
     );
     setOtherwiseRate(String(block?.rateRules?.otherwise ?? 0));
     setOtherwiseBlockId(block?.rateRules?.otherwiseBlockId);
-    setCollapseMode(block?.collapseMonths?.length ? "MONTHS" : "SPREAD");
+    setCollapseMode(
+      block?.movement ? "MOVEMENT" : block?.collapseMonths?.length ? "MONTHS" : "SPREAD"
+    );
     setCollapseMonths(block?.collapseMonths ?? []);
+    setAutoOpening(block?.autoOpeningBalance ?? true);
     setUseRowRate(block?.useRowRate ?? true);
     setRatioNoHeadcount(
       block?.ratioNoHeadcount ??
@@ -1151,6 +1160,14 @@ export default function BlockDialog({
     !poolWeightError &&
     !departmentError;
 
+  // The formula read-out under a built base. Outside movement mode a simple or
+  // composite base always has its multiplier column, so the text there is
+  // unchanged; a compound base already reads `useRowRate`.
+  const formulaText = (inner: string) => {
+    const core = `${useRowRate ? "multiplier × " : ""}(${inner})`;
+    return collapseMode === "MOVEMENT" ? `movement of ${core}` : core;
+  };
+
   const handleSave = () => {
     if (!type || !valid) return;
     onSave({
@@ -1191,6 +1208,11 @@ export default function BlockDialog({
       // Omitted entirely in SPREAD mode so the stored config stays minimal.
       ...(type === "MULTIPLIER" && collapseMode === "MONTHS"
         ? { collapseMonths: [...collapseMonths].sort((a, b) => a - b) }
+        : {}),
+      // The per-row multiplier is a real choice for a movement block on any
+      // base (it is the balance ×1 almost always), so it travels with the flag.
+      ...(type === "MULTIPLIER" && collapseMode === "MOVEMENT"
+        ? { movement: true, useRowRate, autoOpeningBalance: autoOpening }
         : {}),
       spread: spreadActive ? spread : undefined,
       weekdayMask: spreadActive && spread === "WEEKDAYS" ? weekdayMask : undefined,
@@ -1456,7 +1478,7 @@ export default function BlockDialog({
                 <Box sx={{ pt: 1 }}>
                   <FormulaLine
                     error={baseError}
-                    text={`multiplier × (${describeBase(base, baseNames)})`}
+                    text={formulaText(describeBase(base, baseNames))}
                   />
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{ pt: 0.75 }}>
@@ -1538,10 +1560,7 @@ export default function BlockDialog({
                 />
                 <FormulaLine
                   error={isIncompleteCombine(base)}
-                  text={`${useRowRate ? "multiplier × " : ""}(${describeBase(
-                    base,
-                    baseNames
-                  )})`}
+                  text={formulaText(describeBase(base, baseNames))}
                 />
                 <Typography variant="caption" color="text.secondary">
                   {base.op === "DIV"
@@ -1574,7 +1593,9 @@ export default function BlockDialog({
                 <Typography variant="caption" color="text.secondary">
                   {rateMode === "RULES"
                     ? "The rules below set each row's multiplier from its own fields — the grid shows the result read-only. Rules are checked top to bottom; the first match wins."
-                    : "A multiplier column is typed on each row in the grid."}
+                    : useRowRate
+                      ? "A multiplier column is typed on each row in the grid."
+                      : "No multiplier column: the block is its base as it is."}
                 </Typography>
 
                 {rateMode === "RULES" && (
@@ -1832,18 +1853,74 @@ export default function BlockDialog({
 
             {type === "MULTIPLIER" && (
               <Stack spacing={1}>
-                <Typography variant="subtitle2">When it lands</Typography>
+                <Typography variant="subtitle2">How it books</Typography>
                 <ToggleButtonGroup
                   exclusive
                   size="small"
                   value={collapseMode}
-                  onChange={(_event, next: "SPREAD" | "MONTHS" | null) =>
-                    next && setCollapseMode(next)
-                  }
+                  onChange={(_event, next: "SPREAD" | "MONTHS" | "MOVEMENT" | null) => {
+                    if (!next) return;
+                    // The movement is almost always the balance itself (×1):
+                    // drop the per-row multiplier on the way in and restore
+                    // the default on the way out, so a simple base never ends
+                    // up without a column. A compound base keeps its own
+                    // checkbox in the builder panel and is left alone.
+                    if (base?.kind !== "COMBINE") {
+                      if (next === "MOVEMENT" && collapseMode !== "MOVEMENT") {
+                        setUseRowRate(false);
+                      } else if (next !== "MOVEMENT" && collapseMode === "MOVEMENT") {
+                        setUseRowRate(true);
+                      }
+                    }
+                    // Leaving the movement puts the opening back on its
+                    // default, so coming back later starts worked-out again.
+                    if (next !== "MOVEMENT") setAutoOpening(true);
+                    setCollapseMode(next);
+                  }}
+                  sx={{ flexWrap: "wrap" }}
                 >
                   <ToggleButton value="SPREAD">Spreads with the base</ToggleButton>
                   <ToggleButton value="MONTHS">Lands in chosen months</ToggleButton>
+                  <ToggleButton value="MOVEMENT">Books the movement</ToggleButton>
                 </ToggleButtonGroup>
+                {collapseMode === "MOVEMENT" &&
+                  rateMode !== "RULES" &&
+                  base?.kind !== "COMBINE" && (
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={useRowRate}
+                          onChange={(event) => setUseRowRate(event.target.checked)}
+                        />
+                      }
+                      label="Also use a per-row multiplier"
+                    />
+                  )}
+                {collapseMode === "MOVEMENT" && (
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={autoOpening}
+                        onChange={(event) => setAutoOpening(event.target.checked)}
+                      />
+                    }
+                    label={
+                      <Typography variant="body2">
+                        Work out each row's opening balance from last year
+                        <Typography
+                          component="span"
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ ml: 1 }}
+                        >
+                          {autoOpening ? "" : "— typed on each row instead"}
+                        </Typography>
+                      </Typography>
+                    }
+                  />
+                )}
                 {collapseMode === "MONTHS" && (
                   <ToggleButtonGroup
                     size="small"
@@ -1865,11 +1942,19 @@ export default function BlockDialog({
                 >
                   {collapseMode === "SPREAD"
                     ? "The result follows the base's own months — a bigger base month means a bigger figure."
-                    : collapseError
-                      ? "Choose at least one month."
-                      : `The year's whole figure is booked in ${formatMonthRanges(
-                          collapseMonths.map((month) => month - 1)
-                        )}${collapseMonths.length > 1 ? ", split evenly" : ""}.`}
+                    : collapseMode === "MOVEMENT"
+                      ? `The result is read as a balance and only its change is booked: each month is the balance less the previous worked month's, January less the row's opening balance. ${
+                          autoOpening
+                            ? "A blank Opening balance cell is worked out for you — the same block run for last year, with last year's length of service and this year's pay before any increase, read at last year's last worked month — and a row with no balance in January starts from nothing. Type a figure on a row to use it instead; 0 means nothing brought forward."
+                            : "The opening is typed on each row in the Opening balance column; blank = 0."
+                        } The year adds up to closing balance minus opening. A month the position is out of the plan books nothing; the next worked month picks up the whole change.${
+                          useRowRate ? "" : " No multiplier column: the block is the balance as it is."
+                        }`
+                      : collapseError
+                        ? "Choose at least one month."
+                        : `The year's whole figure is booked in ${formatMonthRanges(
+                            collapseMonths.map((month) => month - 1)
+                          )}${collapseMonths.length > 1 ? ", split evenly" : ""}.`}
                 </Typography>
               </Stack>
             )}

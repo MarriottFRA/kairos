@@ -35,6 +35,7 @@ import {
 } from "../engine/types";
 import {
   applyPositionAccounts,
+  applyPinnedRowRates,
   applyRateRules,
   applyRuleRateDependencies,
   applySocialSecurityBase,
@@ -55,6 +56,7 @@ import {
   resolveHotelClusterWeight,
 } from "../hotelClusters/resolve";
 import { applyPoolSpread, buildPoolSpecs } from "./poolSpread";
+import { applyAutoOpeningBalances } from "./autoOpeningBalances";
 import { rowToComponentValues } from "./blockRows";
 import {
   HOTEL_CLUSTER_KEY,
@@ -67,6 +69,12 @@ import { PositionRow, rowToEnginePosition } from "./rowModel";
 export interface BlockLineResult {
   months: number[];
   total: number;
+  /** Movement blocks in worked-out mode (autoOpeningBalance): the per-person
+   *  opening the line was measured against — the row's typed figure where it
+   *  has one, otherwise last year's closing from the shadow run, or 0 for a
+   *  row with nothing brought forward (applyAutoOpeningBalances). Absent on
+   *  every other line. Shown muted in a blank "Opening balance" cell. */
+  opening?: number;
 }
 
 /** rowId → componentDefId → line result (cost AND stat defs of each block). */
@@ -93,6 +101,10 @@ export interface LiveSimTimings {
   /** True when the cached structure was reused — i.e. this was a value-only
    *  edit and only the params were repacked. */
   structureReused: boolean;
+  /** The worked-out opening balances (two more pack + simulate on the same
+   *  structure: this year for the nothing-brought-forward rule, last year for
+   *  the closing), 0 when no movement block works its opening out. */
+  shadowMs: number;
   execMs: number;
   aggMs: number;
   totalMs: number;
@@ -275,10 +287,13 @@ export function runLiveSim(args: {
     componentValues,
     { kpiSeries: args.kpiSeries }
   );
-  injectKpiSeries(defs, positions, ruledValues, args.kpiSeries);
+  // Pin rate 1 where the per-row multiplier column is switched off on a simple
+  // base (mirror of loadScenarioInput — liveSimParity pins the two).
+  const pinnedValues = applyPinnedRowRates(blocks, positions, ruledValues);
+  injectKpiSeries(defs, positions, pinnedValues, args.kpiSeries);
   const resolvedValues = resolveBlockValues(
     defs,
-    ruledValues,
+    pinnedValues,
     blocks.map((block) => ({
       costDefId: block.costDefId,
       accountLocked: block.accountLocked,
@@ -375,8 +390,27 @@ export function runLiveSim(args: {
     if (cache) cache.entry = { key, structure, scope };
   }
 
-  const plan = packPlan(input, structure);
-  const compileMs = performance.now() - compileStart;
+  // Each worked-out movement block's blank opening balances, from a base run
+  // of this year and a shadow run of last year on the SAME structure (value-
+  // only twins: the cache key above was computed on `input` and nothing they
+  // change is in it). Reads the live rows' hiring dates exactly like the
+  // service overlay above. Mirror of loadScenarioInput — liveSimParity pins
+  // the two.
+  const shadowStart = performance.now();
+  const auto = applyAutoOpeningBalances({
+    input,
+    blocks,
+    structure,
+    hiringDateOf: (id) => {
+      const date = rowById.get(id)?.hiringDate;
+      return typeof date === "string" ? date : null;
+    },
+  });
+  const shadowMs = performance.now() - shadowStart;
+
+  const plan = packPlan({ ...input, componentValues: auto.componentValues }, structure);
+  // Structure + the real pack only; the shadow reports on its own line.
+  const compileMs = performance.now() - compileStart - shadowMs;
   const simulation = simulate(plan);
 
   const blockDefIds = new Set<string>();
@@ -388,13 +422,15 @@ export function runLiveSim(args: {
   const results: BlockResultsById = new Map();
   for (const position of positions) {
     const perDef = new Map<string, BlockLineResult>();
+    const openings = auto.openings.get(position.id as string);
     for (const line of simulation.positionLines(position.id)) {
       const defId = line.component.id as string;
       if (!blockDefIds.has(defId)) continue;
       const months = Array.from(line.months);
       let total = 0;
       for (const value of months) total += value;
-      perDef.set(defId, { months, total });
+      const opening = openings?.get(defId);
+      perDef.set(defId, opening === undefined ? { months, total } : { months, total, opening });
     }
     results.set(position.id as string, perDef);
   }
@@ -410,6 +446,7 @@ export function runLiveSim(args: {
       inputMs: compileStart - startedAt,
       compileMs,
       structureReused,
+      shadowMs,
       execMs: simulation.timings.execMs,
       aggMs: simulation.timings.aggMs,
       totalMs: performance.now() - startedAt,

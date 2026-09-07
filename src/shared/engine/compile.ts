@@ -1236,6 +1236,15 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
             const at = emitter.emitInto(Op.COLLAPSE_LINE, line, 0, MONTHS);
             for (let m = 0; m < MONTHS; m++) emitter.paramPool[at + m] = w[m];
           }
+          // Book the movement of the line just written (balance → charge): a
+          // post-op like COLLAPSE_LINE, so it covers every lowering above,
+          // DIRECT_ABS included. The opening balance is the row's
+          // ssOpeningBase (the SS column reused — see ComponentValue), 0 when
+          // the row carries none. Mutually exclusive with collapseMonths at
+          // save; if both arrive, collapse runs first here and in reference.
+          if (def.movement) {
+            emitter.emit(Op.MOVEMENT_LINE, line, 0, [value?.ssOpeningBase ?? 0]);
+          }
           break;
         }
       }

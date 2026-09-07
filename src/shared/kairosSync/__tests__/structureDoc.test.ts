@@ -364,6 +364,32 @@ describe("child ordering", () => {
     expect(def.collapse_months).toBeNull();
   });
 
+  it("round-trips a multiplier's movement flag", () => {
+    // A column of its own (like count_exempt); forgetting the key in either
+    // mapper would silently turn a provision charge back into the balance on
+    // the other device.
+    const doc = componentDefToDoc(
+      {
+        id: "d1",
+        ou: OU,
+        kind: "SPREAD",
+        spread_method: "PERCENT_OF",
+        label: "Indemnity Charge",
+        movement: 1,
+      },
+      []
+    );
+    expect(doc.movement).toBe(true);
+
+    const { def } = componentDefFromDoc(doc);
+    expect(def.movement).toBe(1);
+  });
+
+  it("reads a document without movement as 0 — books the result as it is", () => {
+    const { def } = componentDefFromDoc({ id: "d1", ou: OU, kind: "SPREAD" });
+    expect(def.movement).toBe(0);
+  });
+
   it("round-trips a weekday spread's mask", () => {
     // Forgetting the key in either mapper would silently zero the mask on the
     // other device — a WEEKDAY_COUNT def with no mask books nothing at all.

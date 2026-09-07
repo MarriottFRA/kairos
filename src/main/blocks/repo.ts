@@ -71,7 +71,7 @@ interface StoredConfig {
   statsAccountCode: string;
   statsAccountLocked: boolean;
   base?: BlockBaseRef;
-  /** MULTIPLIER + COMBINE base only — see BlockInput.useRowRate. */
+  /** MULTIPLIER + COMBINE base, or with movement — see BlockInput.useRowRate. */
   useRowRate?: boolean;
   /** MULTIPLIER + COMBINE base only — see BlockInput.ratioNoHeadcount. */
   ratioNoHeadcount?: boolean;
@@ -81,6 +81,14 @@ interface StoredConfig {
   /** MULTIPLIER only — land the whole yearly result in these months (1-based,
    *  sorted). Absent = spread with the base. See BlockInput.collapseMonths. */
   collapseMonths?: number[];
+  /** MULTIPLIER only — book the movement of the result (balance → charge).
+   *  Absent = off. See BlockInput.movement. */
+  movement?: boolean;
+  /** MULTIPLIER with movement only — false when the opening balance is typed
+   *  per row. Absent = worked out from last year (the default); only the
+   *  exception is stored, so a blob hashes the same whether the tick was left
+   *  alone or re-ticked. See BlockInput.autoOpeningBalance. */
+  autoOpeningBalance?: boolean;
   spread: BlockSpread;
   /** WEEKDAYS spread only — 7-bit Sunday-first weekday mask (the
    *  CalendarYear.weekendMask convention). Absent for every other spread. */
@@ -195,8 +203,14 @@ function rowToDto(row: BlockRow): BlockDto {
     ...(blockType === "MULTIPLIER" && normCollapseMonths(config.collapseMonths)
       ? { collapseMonths: normCollapseMonths(config.collapseMonths) }
       : {}),
-    // Only meaningful for a compound base; defaults keep every existing block
-    // (which has no COMBINE base) reading exactly as before.
+    // The opening-balance source rides with the movement flag: resolved here
+    // (absent = auto) so the grid and both loaders read one boolean, never
+    // the absent-means-true rule each.
+    ...(blockType === "MULTIPLIER" && config.movement === true
+      ? { movement: true, autoOpeningBalance: config.autoOpeningBalance !== false }
+      : {}),
+    // Only meaningful for a compound base or a movement block; defaults keep
+    // every existing block (which has neither) reading exactly as before.
     useRowRate: config.useRowRate ?? true,
     ratioNoHeadcount:
       config.ratioNoHeadcount ??
@@ -542,6 +556,17 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
     }
   }
 
+  if (input.movement && input.blockType !== "MULTIPLIER") {
+    throw new Error("Only a Multiplier block can book the movement of its result.");
+  }
+  if (input.movement && input.collapseMonths !== undefined) {
+    // Two post-ops on one line: the engine would run collapse first and then
+    // book the swing in and out of the chosen month — never what anyone wants.
+    throw new Error(
+      "A block can either book the movement or land in chosen months, not both."
+    );
+  }
+
   if (input.blockType === "POOL_SPREAD") {
     const source = input.poolSource ?? "KPI";
     if (source === "KPI" && !String(input.poolKpiDriverId ?? "").trim()) {
@@ -622,6 +647,8 @@ interface DefRow {
   collapseMonths: number[] | null;
   /** WEEKDAY_COUNT only — the 7-bit Sunday-first weekday mask. */
   weekdayMask: number | null;
+  /** MULTIPLIER only — book the movement of the result (balance → charge). */
+  movement: boolean;
 }
 
 /**
@@ -751,6 +778,7 @@ export function compileBlockDefs(
     countExempt: false,
     collapseMonths: null as number[] | null,
     weekdayMask: null as number | null,
+    movement: false,
   };
 
   switch (input.blockType) {
@@ -786,9 +814,10 @@ export function compileBlockDefs(
         accountCode: input.accountCode ?? "",
         // PERCENT_OF inherits any merit increase through its base series.
         increaseAware: false,
-        // Set before the base-kind branches so it rides every one of them —
-        // the engine applies it as a line post-op, KPI/DIRECT_ABS included.
+        // Set before the base-kind branches so they ride every one of them —
+        // the engine applies both as line post-ops, KPI/DIRECT_ABS included.
         collapseMonths: normCollapseMonths(input.collapseMonths) ?? null,
+        movement: input.movement === true,
       };
       if (base.kind === "KPI") {
         // The engine-load path resolves kpi_driver_id → DIRECT_ABS monthly
@@ -1002,6 +1031,19 @@ export function saveBlock(
           ratioNoHeadcount: input.ratioNoHeadcount ?? input.base.op === "DIV",
         }
       : {}),
+    // The movement is almost always the balance itself, so the per-row
+    // multiplier is a real choice here too — persisted so the grid drops the
+    // column and the loaders pin the rate (applyPinnedRowRates). A COMBINE base
+    // already wrote useRowRate above; the same value lands twice, harmlessly.
+    ...(input.blockType === "MULTIPLIER" && input.movement
+      ? {
+          movement: true,
+          useRowRate: input.useRowRate ?? true,
+          // Only the exception (typed per row) is stored; auto is the absent
+          // default, and the key never outlives the movement flag.
+          ...(input.autoOpeningBalance === false ? { autoOpeningBalance: false } : {}),
+        }
+      : {}),
     // Stored normalized so the blob hashes identically however it was typed.
     ...(input.blockType === "MULTIPLIER" && input.rateRules
       ? { rateRules: normalizeRateRules(input.rateRules) }
@@ -1083,8 +1125,8 @@ export function saveBlock(
            id, ou, kind, spread_method, stat_kind, label, account_code,
            department_mode, fixed_department, increase_aware, sort_order,
            base_selector_kind, ss_scheme_id, kpi_driver_id, block_id, base_ref,
-           count_exempt, collapse_months, weekday_mask, updated_at, deleted_at
-         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           count_exempt, collapse_months, weekday_mask, movement, updated_at, deleted_at
+         ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(id) DO UPDATE SET
            spread_method = excluded.spread_method,
            label = excluded.label,
@@ -1100,6 +1142,7 @@ export function saveBlock(
            count_exempt = excluded.count_exempt,
            collapse_months = excluded.collapse_months,
            weekday_mask = excluded.weekday_mask,
+           movement = excluded.movement,
            updated_at = excluded.updated_at,
            deleted_at = NULL
          WHERE cost_component_definitions.ou = excluded.ou`
@@ -1127,6 +1170,7 @@ export function saveBlock(
         def.countExempt ? 1 : 0,
         def.collapseMonths ? JSON.stringify(def.collapseMonths) : null,
         def.weekdayMask,
+        def.movement ? 1 : 0,
         opts.now
       );
 

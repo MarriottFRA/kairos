@@ -131,12 +131,17 @@ export function staticDerivedRowValues(
 }
 
 /**
- * Row ids whose block TOTAL differs between two live-sim results.
+ * Row ids whose displayed block figures differ between two live-sim results.
  *
- * Only `.total` is compared because only `.total` is displayed (see
- * blockColumns' Total column) — the monthly vectors behind it are read by the
- * form dialog, which re-renders on its own. Rows present in one map and not the
- * other count as changed, so a row appearing or disappearing refreshes too.
+ * `.total` and `.opening` are compared because those are what the grid shows
+ * (blockColumns' Total column and the read-only Opening balance of an auto
+ * movement block) — the monthly vectors behind them are read by the form
+ * dialog, which re-renders on its own. The opening is not implied by the total:
+ * a balance that does not depend on pay or service (a pooled share, say) has
+ * shadow ≡ real, so every row's total is a constant 0 while row Y's opening
+ * still moves when row X's pool weight is edited. Rows present in one map and
+ * not the other count as changed, so a row appearing or disappearing refreshes
+ * too.
  *
  * Exact equality, not an epsilon: these are two runs of the same deterministic
  * engine, so "changed" means a different double, and rounding a comparison here
@@ -159,7 +164,11 @@ export function rowIdsWithChangedTotals(
     }
     for (const [defId, afterLine] of afterLines) {
       const beforeLine = beforeLines.get(defId);
-      if (!beforeLine || beforeLine.total !== afterLine.total) {
+      if (
+        !beforeLine ||
+        beforeLine.total !== afterLine.total ||
+        beforeLine.opening !== afterLine.opening
+      ) {
         changed.push(rowId);
         break;
       }

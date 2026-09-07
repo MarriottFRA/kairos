@@ -143,6 +143,18 @@
  *                just sums and multiplies. Reads/writes only its own line —
  *                no scratch. Runs before the count × cluster-weight tail,
  *                with which it commutes.
+ *  MOVEMENT_LINE params: opening
+ *                prev = opening; for each m with seas[m] ≠ 0:
+ *                  bal = line[m]; line[m] = bal − prev; prev = bal
+ *                seas[m] = 0 → line[m] = 0, prev untouched (the ACCRUAL hold
+ *                policy). A line POST-op like COLLAPSE_LINE, emitted right
+ *                after its def's normal emission when the def carries
+ *                `movement`: the series just written is read as a BALANCE and
+ *                the line becomes the charge — Σ = closing − opening. The
+ *                opening is the row's ssOpeningBase, folded into params at
+ *                compile time. Reads/writes only its own line, no scratch;
+ *                runs before the count × cluster-weight tail, with which it
+ *                commutes (the opening is per person, like the balance).
  */
 
 export const Op = {
@@ -174,6 +186,7 @@ export const Op = {
   ACC_ADD_SERVICE: 25,
   PCT_OF_ACC_M: 26,
   COLLAPSE_LINE: 27,
+  MOVEMENT_LINE: 28,
 } as const;
 
 export type OpCode = (typeof Op)[keyof typeof Op];

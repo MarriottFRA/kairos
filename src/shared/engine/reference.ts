@@ -675,6 +675,27 @@ export function referencePosition(
           for (let m = 0; m < MONTHS; m++) total += out[m];
           for (let m = 0; m < MONTHS; m++) out[m] = w[m] * total;
         }
+        // Book the movement of the series just computed (balance → charge):
+        // January against the row's opening balance, every later active month
+        // against the balance of the last ACTIVE month. Inactive months book 0
+        // without advancing `previous` — the same hold policy as
+        // holidayAccrual's prevRate. After collapse (mutually exclusive at
+        // save; if both ever arrive, collapse first on both sides), before the
+        // line is published so a downstream base reads the movement, and
+        // before the count × weight tail, with which it commutes. Mirror of
+        // the MOVEMENT_LINE emission in compile.ts / case in execute.ts.
+        if (def.movement) {
+          let previous = value?.ssOpeningBase ?? 0;
+          for (let m = 0; m < MONTHS; m++) {
+            if (seas[m] === 0) {
+              out[m] = 0;
+              continue;
+            }
+            const balance = out[m];
+            out[m] = balance - previous;
+            previous = balance;
+          }
+        }
         break;
       }
       default:

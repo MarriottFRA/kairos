@@ -53,6 +53,7 @@ import { loadScenarioInput } from "../../../main/positions/loadScenarioInput";
 import { applyComponentValuesToRow } from "../blockRows";
 import { buildFieldMap, toRow } from "../rowModel";
 import { createLiveSimCache, runLiveSim } from "../liveSim";
+import { serviceDaysFor } from "../serviceDays";
 
 type Db = InstanceType<typeof Database>;
 
@@ -181,6 +182,43 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   const multServiceTotalId = saveBlock(
     structureDb, SCOPE,
     { blockType: "MULTIPLIER", label: "Indemnity Liability", accountCode: "516600", accountLocked: true, base: { kind: "SERVICE", mode: "TOTAL" } },
+    NOW
+  );
+  // Books the movement of the running Indemnity Liability balance against a
+  // per-row opening balance TYPED per row, per-row multiplier OFF: the rate
+  // only lands if BOTH loaders pin it (applyPinnedRowRates), and the opening
+  // only lands if both carry ss_opening_base for a non-SS def.
+  const multMovementId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Indemnity Charge", accountCode: "516650",
+      accountLocked: true, base: { kind: "BLOCK", blockId: multServiceTotalId },
+      movement: true, useRowRate: false, autoOpeningBalance: false,
+    },
+    NOW
+  );
+  // The same movement with its opening WORKED OUT (the default): both loaders
+  // must shadow-run the plan for last year and agree on the figure to the bit,
+  // or January differs (applyAutoOpeningBalances).
+  const multAutoMovementId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Indemnity Charge (auto)", accountCode: "516660",
+      accountLocked: true, base: { kind: "BLOCK", blockId: multServiceTotalId },
+      movement: true, useRowRate: false,
+    },
+    NOW
+  );
+  // …and once more with a figure TYPED on pos-1's row, which both loaders
+  // must use as it is — the per-row override on a worked-out block — while
+  // pos-2's blank is still filled.
+  const multTypedRowMovementId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Indemnity Charge (typed row)", accountCode: "516670",
+      accountLocked: true, base: { kind: "BLOCK", blockId: multServiceTotalId },
+      movement: true, useRowRate: false,
+    },
     NOW
   );
   const multVacId = saveBlock(
@@ -442,6 +480,13 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         { positionId: "pos-1", componentDefId: `${multServiceTotalId}:cost`, fields: { rate: 0.0125 } },
         { positionId: "pos-2", componentDefId: `${multServiceId}:cost`, fields: { rate: 2.5 } },
         { positionId: "pos-2", componentDefId: `${multServiceTotalId}:cost`, fields: { rate: 0.004 } },
+        // Opening balances for the movement block, deliberately with NO rate:
+        // the per-row multiplier is off, so the pinned 1 is what both paths
+        // must agree on.
+        { positionId: "pos-1", componentDefId: `${multMovementId}:cost`, fields: { ssOpeningBase: 900 } },
+        { positionId: "pos-2", componentDefId: `${multMovementId}:cost`, fields: { ssOpeningBase: 120 } },
+        // The override on the worked-out block: pos-1 typed, pos-2 left blank.
+        { positionId: "pos-1", componentDefId: `${multTypedRowMovementId}:cost`, fields: { ssOpeningBase: 777 } },
         // Per-row department override on pos-1; pos-2 leaves it blank and falls
         // back to its own department.
         {
@@ -551,8 +596,8 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 21 blocks + 2 dual stat lines, × 2 positions.
-  expect(comparedLines).toBe(46);
+  // 24 blocks + 2 dual stat lines, × 2 positions.
+  expect(comparedLines).toBe(52);
 
   // Teeth for the weekday blocks — two identical zero lines would also
   // "match". pos-1's Friday fixture books amount × Friday-count in January
@@ -612,6 +657,65 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   expect(collapse2[4]).toBeGreaterThan(0);
   expect(collapse2[4]).toBeCloseTo(collapse2[11], 9);
   expect(collapse2.filter((v) => v !== 0)).toHaveLength(2);
+  // Teeth for the movement block — two identical zero lines would also
+  // "match", and so would a line that never saw the pinned rate or the opening.
+  // pos-1 counts two heads, so January restates against 2 × 900; its dark May
+  // books nothing and June catches up from April (the hold policy); the year
+  // adds up to closing less opening on both rows. pos-2 has no service before
+  // its March hire, so its January is purely the opening reversing out.
+  const liability1 = live.results.get("pos-1")!.get(`${multServiceTotalId}:cost`)!;
+  const movement1 = live.results.get("pos-1")!.get(`${multMovementId}:cost`)!;
+  expect(liability1.months[11]).toBeGreaterThan(0);
+  expect(movement1.months[0]).toBeCloseTo(liability1.months[0] - 2 * 900, 9);
+  expect(movement1.months[4]).toBe(0);
+  expect(movement1.months[5]).toBeCloseTo(liability1.months[5] - liability1.months[3], 9);
+  expect(movement1.total).toBeCloseTo(liability1.months[11] - 2 * 900, 9);
+  const liability2 = live.results.get("pos-2")!.get(`${multServiceTotalId}:cost`)!;
+  const movement2 = live.results.get("pos-2")!.get(`${multMovementId}:cost`)!;
+  expect(movement2.months[0]).toBeCloseTo(liability2.months[0] - 120, 9);
+  expect(movement2.total).toBeCloseTo(liability2.months[11] - 120, 9);
+  // Teeth for the worked-out opening: pos-1's service to the end of LAST year
+  // at the liability's 0.0125, per person — under this year's months, so last
+  // year's dark May accrues nothing either (the service series' own rule);
+  // pos-2 was hired in the plan year and starts at 0. Neither is stored
+  // anywhere, so a matching pair of lines proves both loaders ran the shadow.
+  const pos1Months = [1, 1, 1, 0.5, 0, 1, 1, 1, 1, 1, 1, 1];
+  const priorService = serviceDaysFor("2019-06-01", YEAR - 1);
+  const priorDays =
+    priorService.opening +
+    priorService.perMonth.reduce((days, month, m) => days + (pos1Months[m] > 0 ? month : 0), 0);
+  const expectedOpening1 = 0.0125 * priorDays;
+  const auto1 = live.results.get("pos-1")!.get(`${multAutoMovementId}:cost`)!;
+  expect(auto1.opening).toBeCloseTo(expectedOpening1, 9);
+  expect(auto1.months[0]).toBeCloseTo(liability1.months[0] - 2 * expectedOpening1, 9);
+  expect(auto1.months[4]).toBe(0);
+  expect(auto1.total).toBeCloseTo(liability1.months[11] - 2 * expectedOpening1, 9);
+  const auto2 = live.results.get("pos-2")!.get(`${multAutoMovementId}:cost`)!;
+  expect(auto2.opening).toBe(0);
+  expect(auto2.months[0]).toBeCloseTo(liability2.months[0], 9);
+  expect(auto2.total).toBeCloseTo(liability2.months[11], 9);
+  // The typed-mode twin never sees the shadow, and the main loader carried the
+  // very same figure into the engine input.
+  expect(movement1.opening).toBeUndefined();
+  const mainOpening = (positionId: string, blockId: string) =>
+    input.componentValues.find(
+      (value) =>
+        (value.positionId as string) === positionId &&
+        (value.componentDefId as string) === `${blockId}:cost`
+    )?.ssOpeningBase;
+  expect(mainOpening("pos-1", multAutoMovementId)).toBe(auto1.opening);
+  // The per-row override on a worked-out block: pos-1's typed 777 is used as
+  // it is by both loaders (× 2 heads on the line), pos-2's blank is filled —
+  // 0, hired this year — exactly as on the worked-out twin.
+  const typedRow1 = live.results.get("pos-1")!.get(`${multTypedRowMovementId}:cost`)!;
+  expect(typedRow1.opening).toBe(777);
+  expect(typedRow1.months[0]).toBeCloseTo(liability1.months[0] - 2 * 777, 9);
+  expect(typedRow1.total).toBeCloseTo(liability1.months[11] - 2 * 777, 9);
+  expect(mainOpening("pos-1", multTypedRowMovementId)).toBe(777);
+  const typedRow2 = live.results.get("pos-2")!.get(`${multTypedRowMovementId}:cost`)!;
+  expect(typedRow2.opening).toBe(0);
+  expect(typedRow2.months[0]).toBeCloseTo(liability2.months[0], 9);
+  expect(mainOpening("pos-2", multTypedRowMovementId)).toBe(0);
 
   // ── The structure cache must not change a single number ──
   // Same call, twice, through a cache: the first run compiles and fills it, the
@@ -648,6 +752,10 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         Array.from(reused.get(defId)!.months),
         `cached line ${positionId} ${defId}`
       ).toEqual(Array.from(uncached.get(defId)!.months));
+      // The shadow runs on the reused structure too.
+      expect(reused.get(defId)!.opening, `cached opening ${positionId} ${defId}`).toBe(
+        uncached.get(defId)!.opening
+      );
     }
   }
 

@@ -162,6 +162,51 @@ describe("conservation invariants", () => {
     }
   });
 
+  it("movement lines telescope to the last active balance less the opening", () => {
+    // Twin scenarios off the same seed: the only difference is `movement` on
+    // def-eosmovement, so the twin's line IS the balance the movement restates.
+    // Both lines pass the count × weight tail, so the opening scales too.
+    for (const seed of [1, 42, 2024]) {
+      const movementInput = randomScenario(seed, 12);
+      const balanceInput = randomScenario(seed, 12);
+      for (const def of balanceInput.definitions) delete def.movement;
+
+      const a = compile(movementInput);
+      const b = compile(balanceInput);
+      if (!("plan" in a) || !("plan" in b)) throw new Error("compile failed");
+      const movementSim = simulate(a.plan);
+      const balanceSim = simulate(b.plan);
+
+      for (const position of movementInput.positions) {
+        const movement = movementSim
+          .positionLines(position.id)
+          .find((l) => (l.component.id as string) === "def-eosmovement")!.months;
+        const balance = balanceSim
+          .positionLines(position.id)
+          .find((l) => (l.component.id as string) === "def-eosmovement")!.months;
+        const opening =
+          movementInput.componentValues.find(
+            (value) =>
+              value.positionId === position.id &&
+              (value.componentDefId as string) === "def-eosmovement"
+          )?.ssOpeningBase ?? 0;
+
+        const label = `seed ${seed} ${position.id as string}`;
+        let lastActive = -1;
+        for (let m = 0; m < MONTHS; m++) {
+          if (position.seasonality[m] > 0) lastActive = m;
+          else expect(movement[m], `${label} month ${m + 1}`).toBe(0);
+        }
+        const coeff = position.headcount * position.hotelClusterWeight;
+        if (lastActive < 0) {
+          expect(sum(movement), label).toBe(0);
+        } else {
+          expect(sum(movement), label).toBeCloseTo(balance[lastActive] - opening * coeff, 6);
+        }
+      }
+    }
+  });
+
   it("WEEKDAY_COUNT books the per-occurrence value once per masked weekday", () => {
     // Deliberately NOT in the yearly-conservation test above: the spread is
     // per-occurrence, so its yearly total follows the calendar, not the input.

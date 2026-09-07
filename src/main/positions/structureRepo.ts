@@ -481,7 +481,7 @@ export function getComponentDefinitions(
     `SELECT id, ou, kind, spread_method, stat_kind, label, account_code,
             department_mode, fixed_department, increase_aware, sort_order,
             base_selector_kind, ss_scheme_id, kpi_driver_id, base_ref,
-            count_exempt, collapse_months, weekday_mask, updated_at
+            count_exempt, collapse_months, weekday_mask, movement, updated_at
        FROM cost_component_definitions
       WHERE ou = ? AND deleted_at IS NULL
       ORDER BY sort_order, id`
@@ -550,6 +550,10 @@ export function getComponentDefinitions(
         Number.isInteger(row.weekday_mask) && (row.weekday_mask as number) > 0
           ? (row.weekday_mask as number) & 127
           : undefined,
+      // Absent rather than false when off: the structure fingerprint serialises
+      // definitions whole (undefined dropped), so every existing plan keeps a
+      // byte-identical key.
+      ...(row.movement === 1 ? { movement: true } : {}),
       updatedAt: row.updated_at as string,
       deletedAt: null,
     };

@@ -12,6 +12,12 @@
  *   blk:<defId>:unitRate   COUNT_RATE — the rate
  *   blk:<defId>:m1..m12    CUSTOM_MONTHLY — exploded months (monthlyValues)
  *   blk:<defId>:poolWeight POOL_SPREAD — how many shares of the pot
+ *   blk:<defId>:openingBase  SOCIAL_SECURITY — the prior-year contribution
+ *                          base; MULTIPLIER with movement — the balance
+ *                          brought forward (one column, ssOpeningBase, for
+ *                          both). On a movement block the mode only decides
+ *                          what BLANK means: worked out by the loaders
+ *                          (autoOpeningBalance, the default) or 0
  *
  * One source of truth: grid editing, optimistic updates and the live
  * simulation all read the row; the write path diffs these keys back into
@@ -56,12 +62,23 @@ export function blockFieldKey(defId: string, slot: BlockSlot): string {
 /** The editable input slots a block type puts on each row. */
 export function blockInputSlots(block: BlockDto): BlockSlot[] {
   switch (block.blockType) {
-    case "MULTIPLIER":
+    case "MULTIPLIER": {
+      const slots: BlockSlot[] = [];
       // Rate rules own the rate while they are on — the editable column gives
-      // way to the read-only derived display (blockRuleRateKey). A compound
-      // block can also drop its per-row multiplier entirely — the two combined
-      // sides are then the whole calculation and there is nothing to type.
-      return block.rateRules || block.useRowRate === false ? [] : ["rate"];
+      // way to the read-only derived display (blockRuleRateKey). A block can
+      // also drop its per-row multiplier entirely: a compound base (the two
+      // combined sides are the whole calculation) or a movement block that IS
+      // its balance — the loaders then pin the rate to 1 (applyPinnedRowRates).
+      if (!block.rateRules && block.useRowRate !== false) slots.push("rate");
+      // Booking the movement: January is measured against a per-row opening
+      // balance, carried in the (otherwise SS-only) ss_opening_base column —
+      // the POOL_WEIGHT_SLOT precedent, no secure-store migration. The slot is
+      // there in BOTH modes; a worked-out block (autoOpeningBalance, the
+      // default) reads a typed figure as an override and has the loaders fill
+      // the blanks (applyAutoOpeningBalances), a typed block reads blank as 0.
+      if (block.movement) slots.push("openingBase");
+      return slots;
+    }
     case "FLAT_MONTHLY":
       return ["amount"];
     case "COUNT_RATE":

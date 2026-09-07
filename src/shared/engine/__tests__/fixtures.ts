@@ -545,6 +545,19 @@ export function randomScenario(
       label: "Live Music",
       accountCode: "628970",
       sortOrder: 26,
+    }),
+    // Movement of the running indemnity liability (SERVICE TOTAL × rate) — the
+    // end-of-service-charge shape, MOVEMENT_LINE. Fixed flag, no rand() draws;
+    // its opening balance below is derived from the position index for the
+    // same reason. The ~25%-inactive-month positions fuzz the hold policy.
+    makeDef({
+      id: "def-eosmovement",
+      spreadMethod: "PERCENT_OF",
+      label: "Indemnity Charge",
+      accountCode: "628990",
+      sortOrder: 27,
+      movement: true,
+      baseSelector: { kind: "COMPONENTS", componentIds: [defId("def-multservicetotal")] },
     })
   );
   const definitions =
@@ -693,7 +706,11 @@ export function randomScenario(
       makeValue(id, "def-fourteenth", { rate: Math.round(rand() * 200) / 1200 }),
       // Appended after the collapse draws for the same reason they sit last:
       // every draw above keeps its old within-position stream position.
-      makeValue(id, "def-weekdays", { yearlyValue: Math.round(rand() * 500 * 100) / 100 })
+      makeValue(id, "def-weekdays", { yearlyValue: Math.round(rand() * 500 * 100) / 100 }),
+      // No rand() draw: the opening balance follows the position index so every
+      // draw above keeps its stream position (the collapse/weekday discipline).
+      // A ×1 of the liability, so the twin without `movement` IS the balance.
+      makeValue(id, "def-eosmovement", { rate: 1, ssOpeningBase: (i % 7) * 250 })
     );
 
     // Width-axis extras. Appended AFTER the standard values so the RNG stream

@@ -138,6 +138,9 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
       case Op.COLLAPSE_LINE:
         detail = `weights=${fmtVector(pool, pp, MONTHS)}`;
         break;
+      case Op.MOVEMENT_LINE:
+        detail = `opening=${fmt(pool[pp])}`;
+        break;
     }
 
     rows.push(

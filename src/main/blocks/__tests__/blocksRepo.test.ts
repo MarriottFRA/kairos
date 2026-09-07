@@ -1826,3 +1826,136 @@ describe("saveBlock â€” collapse months (lands in chosen months)", () => {
     expect(listBlocks(db, OU_A)[0].collapseMonths).toEqual([6, 12]);
   });
 });
+
+describe("saveBlock — movement (books the movement)", () => {
+  const charge = (overrides: Partial<BlockInput> = {}): BlockInput => ({
+    blockType: "MULTIPLIER",
+    label: "Indemnity Charge",
+    accountCode: "628990",
+    accountLocked: true,
+    base: { kind: "BASE_SALARY" },
+    movement: true,
+    ...overrides,
+  });
+  const defOf = (id: string) =>
+    getComponentDefinitions(db, OU_A).find((def) => def.id === blockCostDefId(id))!;
+
+  it("round-trips through DTO and compiled def, per-row multiplier included", () => {
+    const id = saveBlock(db, OU_A, charge({ useRowRate: false }), NOW);
+
+    const [dto] = listBlocks(db, OU_A);
+    expect(dto.movement).toBe(true);
+    expect(dto.useRowRate).toBe(false);
+    const def = defOf(id);
+    expect(def.movement).toBe(true);
+    // A simple base carries no selector pin — the loaders pin the rate
+    // (applyPinnedRowRates), so the selector is exactly what it always was.
+    expect(def.baseSelector).toEqual({ kind: "BASE_SALARY" });
+  });
+
+  it("keeps the per-row multiplier on by default", () => {
+    saveBlock(db, OU_A, charge(), NOW);
+    expect(listBlocks(db, OU_A)[0].useRowRate).toBe(true);
+  });
+
+  it("works the opening balance out by default, storing only the typed exception", () => {
+    const id = saveBlock(db, OU_A, charge(), NOW);
+    const blob = () =>
+      JSON.parse(
+        (db.prepare(`SELECT config FROM block_configs WHERE id = ?`).get(id) as { config: string })
+          .config
+      ) as Record<string, unknown>;
+    expect(listBlocks(db, OU_A)[0].autoOpeningBalance).toBe(true);
+    expect("autoOpeningBalance" in blob()).toBe(false);
+
+    saveBlock(db, OU_A, { ...charge(), id, autoOpeningBalance: false }, NOW);
+    expect(listBlocks(db, OU_A)[0].autoOpeningBalance).toBe(false);
+    expect(blob().autoOpeningBalance).toBe(false);
+
+    // Re-ticked: the blob is back to what a never-touched tick writes.
+    saveBlock(db, OU_A, { ...charge(), id, autoOpeningBalance: true }, NOW);
+    expect(listBlocks(db, OU_A)[0].autoOpeningBalance).toBe(true);
+    expect("autoOpeningBalance" in blob()).toBe(false);
+  });
+
+  it("drops the opening-balance choice with the movement flag", () => {
+    const id = saveBlock(db, OU_A, charge({ autoOpeningBalance: false }), NOW);
+    saveBlock(db, OU_A, { ...charge(), id, movement: undefined, autoOpeningBalance: false }, NOW);
+    const [dto] = listBlocks(db, OU_A);
+    expect(dto.movement).toBeUndefined();
+    expect(dto.autoOpeningBalance).toBeUndefined();
+  });
+
+  it("clears the flag when a re-save goes back to booking the result as it is", () => {
+    const id = saveBlock(db, OU_A, charge({ useRowRate: false }), NOW);
+    saveBlock(db, OU_A, { ...charge(), id, movement: undefined }, NOW);
+
+    const [dto] = listBlocks(db, OU_A);
+    expect(dto.movement).toBeUndefined();
+    // No compound base and no movement: the per-row column is back.
+    expect(dto.useRowRate).toBe(true);
+    expect(defOf(id).movement).toBeUndefined();
+  });
+
+  it("rejects the flag on a non-multiplier block", () => {
+    expect(() => saveBlock(db, OU_A, flatMonthly({ movement: true }), NOW)).toThrow(
+      /Only a Multiplier block can book the movement/
+    );
+  });
+
+  it("refuses to pair the movement with landing in chosen months", () => {
+    expect(() => saveBlock(db, OU_A, charge({ collapseMonths: [6] }), NOW)).toThrow(
+      /either book the movement or land in chosen months/
+    );
+  });
+
+  it("projects DIRECT_ABS and the flag together for a KPI base", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      charge({ base: { kind: "KPI", kpiDriverId: "kpi-1" } }),
+      NOW
+    );
+    const def = defOf(id);
+    expect(def.spreadMethod).toBe("DIRECT_ABS");
+    expect(def.kpiDriverId).toBe("kpi-1");
+    expect(def.movement).toBe(true);
+  });
+
+  it("keeps a compound base's own rate pin alongside the flag", () => {
+    const id = saveBlock(
+      db,
+      OU_A,
+      charge({
+        base: {
+          kind: "COMBINE",
+          op: "MUL",
+          left: { kind: "BASE_SALARY" },
+          right: { kind: "SERVICE", mode: "TOTAL" },
+        },
+        useRowRate: false,
+      }),
+      NOW
+    );
+    const def = defOf(id);
+    expect(def.movement).toBe(true);
+    expect(def.baseSelector?.kind).toBe("COMBINE");
+    expect((def.baseSelector as { rate?: number }).rate).toBe(1);
+    expect(listBlocks(db, OU_A)[0].useRowRate).toBe(false);
+  });
+
+  it("ignores the flag on a synced blob of another block type", () => {
+    const id = saveBlock(db, OU_A, flatMonthly(), NOW);
+    const row = db
+      .prepare(`SELECT config FROM block_configs WHERE id = ?`)
+      .get(id) as { config: string };
+    const config = JSON.parse(row.config) as Record<string, unknown>;
+    config.movement = true;
+    db.prepare(`UPDATE block_configs SET config = ? WHERE id = ?`).run(
+      JSON.stringify(config),
+      id
+    );
+
+    expect(listBlocks(db, OU_A)[0].movement).toBeUndefined();
+  });
+});

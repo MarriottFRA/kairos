@@ -285,6 +285,10 @@ export function componentDefToDoc(row: Row, baseRefs: Row[]): Row {
     // WEEKDAY_COUNT weekday mask. Additive like countExempt — an older
     // client's document omits the key and reads back as NULL.
     weekdayMask: nullableNum(row.weekday_mask),
+    // MULTIPLIER "books the movement". Additive like countExempt — an older
+    // client's document omits the key and reads back as 0, the pre-existing
+    // "book the result as is".
+    movement: bool(row.movement),
     baseRefs: baseRefs
       .map((ref) => ({
         referencedDefId: str(ref.referenced_def_id),
@@ -325,6 +329,7 @@ export function componentDefFromDoc(row: Row): { def: Row; baseRefs: Row[] } {
       count_exempt: bool(row.countExempt) ? 1 : 0,
       collapse_months: row.collapseMonths == null ? null : text(row.collapseMonths),
       weekday_mask: nullableNum(row.weekdayMask),
+      movement: bool(row.movement) ? 1 : 0,
       updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
       deleted_at: nullableStr(row.deletedAt),
     },

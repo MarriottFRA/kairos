@@ -233,7 +233,17 @@ export function slotPresentation(
     };
   }
   if (slot === "unitRate") return { short: "Rate", unit: "per unit" };
-  if (slot === "openingBase") return { short: "Opening base", unit: "prior year" };
+  if (slot === "openingBase") {
+    // One slot, two meanings: an NI/SS block's prior-year contribution base,
+    // a movement block's balance brought forward. On the latter the unit has
+    // to carry what blank means, because that is the one thing the two modes
+    // disagree on: worked out for you, or nothing.
+    if (block.blockType !== "MULTIPLIER") return { short: "Opening base", unit: "prior year" };
+    return {
+      short: "Opening balance",
+      unit: block.autoOpeningBalance !== false ? "blank = worked out" : "brought forward",
+    };
+  }
   if (slot === POOL_WEIGHT_SLOT) {
     return {
       short: "Share weight",
@@ -409,10 +419,69 @@ export function buildBlockColumns(
         return;
       }
 
+      if (slot === "openingBase" && block.movement && block.autoOpeningBalance !== false) {
+        // The opening balance of a movement block in worked-out mode. Typed,
+        // the cell is the figure the engine uses (0 says nothing brought
+        // forward); blank, it shows the figure the loaders worked out — read
+        // off the live-sim line itself, the very number January was measured
+        // against — muted like every other derived cell (the pool share
+        // weight's "blank takes the default" treatment).
+        const numClass = index === 0 ? "pos-cell--num pos-cell--sectionStart" : "pos-cell--num";
+        const mutedClass = `${numClass} pos-cell--derived`;
+        const isTyped = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+        columns.push({
+          field: key,
+          headerName: `${block.label} — ${short}`,
+          description: `${block.label}: the balance brought forward, per person. Blank is worked out for you — this block run for last year, with last year's length of service and this year's pay before any increase, read at last year's last worked month; a row with no balance in January starts from nothing. Type a figure to use it instead; 0 means nothing brought forward.`,
+          width: 104,
+          type: "number",
+          align: "right",
+          headerAlign: "right",
+          editable: true,
+          sortable: true,
+          headerClassName: headerClasses.join(" "),
+          cellClassName: (params) => (isTyped(params.value) ? numClass : mutedClass),
+          renderHeader: renderBlockHeader(short, unit),
+          valueFormatter: (value: number | null | undefined) => {
+            if (value === null || value === undefined) return "";
+            const num = Number(value);
+            return Number.isFinite(num) ? ctx.numberFormat.format(num) : "";
+          },
+          renderCell: (params) => {
+            if (isTyped(params.value)) {
+              return <span>{ctx.numberFormat.format(Number(params.value))}</span>;
+            }
+            const row = params.row as PositionRow | undefined;
+            const workedOut = row
+              ? ctx.derived.current.blockResults.get(row.id)?.get(block.costDefId)?.opening
+              : undefined;
+            if (workedOut === undefined) return <span />;
+            return (
+              <Tooltip
+                title={
+                  workedOut === 0
+                    ? "Nothing brought forward: this row has no balance in January (or was hired this year), so its first month books the whole balance. Type a figure here to use it instead."
+                    : "Worked out from last year's closing, per person. Type a figure here to use it instead — 0 means nothing brought forward."
+                }
+              >
+                <Box component="span" sx={{ color: "text.disabled" }}>
+                  {ctx.numberFormat.format(workedOut)}
+                </Box>
+              </Tooltip>
+            );
+          },
+          pastedValueParser: parsePastedNumber,
+        });
+        return;
+      }
+
       columns.push({
         field: key,
         headerName: `${block.label} — ${short}`,
-        description: `${block.label}: ${short.toLowerCase()} (${unit})`,
+        description:
+          slot === "openingBase" && block.movement
+            ? `${block.label}: the balance already standing at the start of the year, per person. January books the block's January balance less this; blank = 0.`
+            : `${block.label}: ${short.toLowerCase()} (${unit})`,
         width: slot.startsWith("m") ? 84 : 104,
         type: "number",
         align: "right",
@@ -578,7 +647,11 @@ export function buildBlockColumns(
     columns.push({
       field: blockTotalKey(block),
       headerName: `${block.label} — Total`,
-      description: `${block.label}: full-year total from the simulation${
+      description: `${block.label}: ${
+        block.movement
+          ? "full-year movement (closing balance less opening)"
+          : "full-year total"
+      } from the simulation${
         block.accountCode ? ` (account ${block.accountCode})` : " (calculation only)"
       }`,
       width: 122,

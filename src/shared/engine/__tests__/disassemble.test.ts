@@ -86,6 +86,30 @@ describe("disassemble", () => {
     );
   });
 
+  it("renders MOVEMENT_LINE with its opening balance", () => {
+    const input = makeInput({
+      definitions: [
+        ...standardDefinitions(),
+        makeDef({
+          id: "def-eos",
+          spreadMethod: "PERCENT_OF",
+          label: "Indemnity Charge",
+          accountCode: "628990",
+          sortOrder: 24,
+          movement: true,
+        }),
+      ],
+      ssSchemes: [standardScheme()],
+      positions: [makePosition({ id: "p1" })],
+      componentValues: [makeValue("p1", "def-eos", { rate: 1, ssOpeningBase: 500 })],
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    const text = disassemble(compiled.plan, posId("p1"));
+
+    expect(text).toContain('MOVEMENT_LINE out="Indemnity Charge" → 1010|628990  opening=500');
+  });
+
   it("reports an unknown position instead of throwing", () => {
     const input = makeInput({
       definitions: standardDefinitions(),

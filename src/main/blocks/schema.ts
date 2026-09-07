@@ -156,6 +156,33 @@ export function applyWeekdayMaskColumn(
 }
 
 /**
+ * cost_component_definitions.movement — a MULTIPLIER that books the movement
+ * of its result (balance → charge) against a per-row opening balance, the
+ * MOVEMENT_LINE post-op.
+ *
+ * 0 = the def books its result as it always has, which is why this upgrades in
+ * place — every existing row keeps its exact behaviour. Additive,
+ * column-guarded ALTER like the helpers above; must stay in step with the
+ * baseline DDL in main/positions/schema.ts (the schema-drift test asserts a
+ * migrated store and a fresh one end up identical).
+ */
+export function applyMovementColumn(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(cost_component_definitions)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // structure tables not created yet
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("movement")) {
+    handle.exec(
+      `ALTER TABLE cost_component_definitions ADD COLUMN movement INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+}
+
+/**
  * Every guarded column cost_component_definitions needs beyond its CREATE
  * TABLE, in the order applyBaselineSchema applies them.
  *
@@ -172,4 +199,5 @@ export function applyStructureColumns(
   applyCountExemptV3(handle);
   applyCollapseMonthsColumn(handle);
   applyWeekdayMaskColumn(handle);
+  applyMovementColumn(handle);
 }

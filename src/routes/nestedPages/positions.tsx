@@ -948,6 +948,7 @@ export default function Positions() {
         `[liveSim] ${t.positions}/${t.rows} rows × ${t.blocks} blocks — ` +
           `input ${t.inputMs.toFixed(1)} + ` +
           `${t.structureReused ? "repack" : "COMPILE"} ${t.compileMs.toFixed(1)} + ` +
+          `shadow ${t.shadowMs.toFixed(1)} + ` +
           `exec ${t.execMs.toFixed(1)} + agg ${t.aggMs.toFixed(1)} = ${t.totalMs.toFixed(1)} ms`
       );
     }

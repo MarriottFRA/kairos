@@ -87,9 +87,12 @@ export interface ComponentValueRecord {
   monthlyValues: number[] | null;
   qty: number | null;
   unitRate: number | null;
-  /** SOCIAL_SECURITY blocks only: this position's prior-year contribution base
-   *  for the scheme's cumulative, non-January tax year. null = 0 (the engine
-   *  default). Seeded by the opening-balance pre-sim; overrideable per row. */
+  /** SOCIAL_SECURITY blocks: this position's prior-year contribution base for
+   *  the scheme's cumulative, non-January tax year. null = 0 (the engine
+   *  default). Seeded by the opening-balance pre-sim; overrideable per row.
+   *  MULTIPLIER blocks that book the movement: the balance brought forward at
+   *  the start of the year, typed per row (the "Opening balance" column). One
+   *  column for both — see engine/types ComponentValue.ssOpeningBase. */
   ssOpeningBase: number | null;
   /** Per-row account override for an "unlocked" block; null = the block's
    *  configured default. Empty string = calculation-only for this row. */

@@ -555,6 +555,60 @@ export function applyRuleRateDependencies(
 }
 
 /**
+ * Pin rate 1 on every position of a MULTIPLIER whose per-row multiplier column
+ * is switched off on a SIMPLE base (useRowRate false, no rules, not COMBINE —
+ * a compound base pins its 1 on the selector at save time, see the blocks
+ * repo). With no column there is no stored rate, and an absent value reads as
+ * rate 0 in the engine, which would zero exactly the lines meant to be "the
+ * base as it is" — a movement block booking the change in a balance, typically.
+ *
+ * Stored rows are shallow-cloned (their ssOpeningBase, account and department
+ * overrides survive); positions with none get a row synthesized, like
+ * applyRateRules. Runs AFTER the rules (which own the rate while they are on
+ * and are skipped here) and BEFORE injectKpiSeries so a KPI base multiplies by
+ * 1. Returns the input array itself when no block qualifies, a NEW array
+ * otherwise. Call in BOTH loaders; liveSimParity pins the two.
+ */
+export function applyPinnedRowRates(
+  blocks: readonly BlockDto[],
+  positions: Position[],
+  componentValues: ComponentValue[]
+): ComponentValue[] {
+  const pinned = blocks.filter(
+    (block) =>
+      block.blockType === "MULTIPLIER" &&
+      block.useRowRate === false &&
+      !block.rateRules &&
+      block.base?.kind !== "COMBINE"
+  );
+  if (pinned.length === 0) return componentValues;
+
+  const out = componentValues.slice();
+  const indexByKey = new Map<string, number>();
+  for (let i = 0; i < componentValues.length; i++) {
+    const value = componentValues[i];
+    indexByKey.set(`${value.positionId}|${value.componentDefId}`, i);
+  }
+  for (const block of pinned) {
+    for (const position of positions) {
+      const index = indexByKey.get(`${position.id}|${block.costDefId}`);
+      if (index !== undefined) {
+        out[index] = { ...out[index], rate: 1, monthlyRates: undefined, rateDefId: undefined };
+      } else {
+        out.push({
+          positionId: position.id,
+          componentDefId: block.costDefId as ComponentDefId,
+          rate: 1,
+          updatedAt: position.updatedAt,
+          deletedAt: null,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Derive each position's rate for every rules-driven multiplier block, BEFORE
  * injectKpiSeries (so a rules block on a KPI base gets its multiplier) and
  * before resolveBlockValues (which shallow-clones values and must carry the

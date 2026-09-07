@@ -88,6 +88,7 @@ const OP_STAT_HOURS_PAID = Op.STAT_HOURS_PAID;
 const OP_ACC_PUSH = Op.ACC_PUSH;
 const OP_COMBINE_ACC = Op.COMBINE_ACC;
 const OP_COLLAPSE_LINE = Op.COLLAPSE_LINE;
+const OP_MOVEMENT_LINE = Op.MOVEMENT_LINE;
 
 export function executePosition(
   plan: CompiledPlan,
@@ -524,6 +525,26 @@ export function executePosition(
         let total = 0;
         for (let m = 0; m < MONTHS; m++) total += values[out + m];
         for (let m = 0; m < MONTHS; m++) values[out + m] = paramPool[pp + m] * total;
+        break;
+      }
+
+      case OP_MOVEMENT_LINE: {
+        // Restate the line just written as its month-on-month movement, seeded
+        // from the per-position opening balance. Inactive months book 0 and do
+        // NOT advance `previous` (the ACCRUAL hold policy). Mirrors the
+        // movement block of reference's SPREAD case term for term — one
+        // subtraction, same operand order.
+        const out = outLine[i] * MONTHS;
+        let previous = paramPool[pp];
+        for (let m = 0; m < MONTHS; m++) {
+          if (seasonality[posOfs + m] === 0) {
+            values[out + m] = 0;
+            continue;
+          }
+          const balance = values[out + m];
+          values[out + m] = balance - previous;
+          previous = balance;
+        }
         break;
       }
     }
