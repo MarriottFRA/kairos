@@ -5,7 +5,7 @@
  * are reproducible and readable.
  */
 
-import { makeCalendarContext } from "../calendarContext";
+import { CalendarPolicyOptions, makeCalendarContext } from "../calendarContext";
 import {
   BuyoutRow,
   BuyoutRowId,
@@ -84,6 +84,34 @@ export function makeScenario(): Scenario {
  *  WEEKDAY_COUNT parity runs on the same real calendar the scenario names. */
 export function makeCalendar(realDays?: number[], holidayDays?: number[]): CalendarContext {
   return makeCalendarContext(realDays ?? new Array(MONTHS).fill(20), holidayDays, FIXTURE_YEAR);
+}
+
+/** The four vacation-policy combinations a hotel-year can be on. The first is
+ *  the default every other fixture assumes; suites that must hold under every
+ *  policy loop over all four. */
+export const VACATION_POLICIES: readonly CalendarPolicyOptions[] = [
+  {},
+  { vacationWorkingDays: true },
+  { vacationAdditive: true },
+  { vacationWorkingDays: true, vacationAdditive: true },
+] as const;
+
+/** The same scenario on a different vacation policy — the calendar is the only
+ *  thing that changes, so the RNG stream (and therefore every other number) is
+ *  untouched. Kept out of randomScenario itself so the golden-plan digests,
+ *  which are taken on the default policy, stay byte-stable. */
+export function withVacationPolicy(
+  input: ScenarioInput,
+  policy: CalendarPolicyOptions
+): ScenarioInput {
+  return {
+    ...input,
+    calendar: {
+      ...input.calendar,
+      vacationWorkingDays: !!policy.vacationWorkingDays,
+      vacationAdditive: !!policy.vacationAdditive,
+    },
+  };
 }
 
 /** Builder override shape: everything optional except a plain-string id. */

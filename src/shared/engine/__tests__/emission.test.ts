@@ -6,7 +6,15 @@
 
 import { describe, expect, it } from "vitest";
 import { compile, CompiledPlan } from "../compile";
-import { FLAG_INCREASE_AWARE, LINE_NONE, Op, OP_NAMES, OpCode } from "../opcodes";
+import { makeCalendarContext } from "../calendarContext";
+import {
+  FLAG_INCREASE_AWARE,
+  FLAG_VAC_WORKING_DAYS,
+  LINE_NONE,
+  Op,
+  OP_NAMES,
+  OpCode,
+} from "../opcodes";
 import { MONTHS, SsSchemeId } from "../types";
 import { defId, makeDef, makeInput, makePosition, makeScheme, makeValue } from "./fixtures";
 
@@ -91,6 +99,48 @@ describe("instruction emission", () => {
       params: [12, ...weights],
     });
     expect(deduct).toMatchObject({ name: "BASE_DEDUCT", outLine: line });
+    // Default policy: flat day rate, so no arg0 flag on the base op.
+    expect(base.arg0).toBe(0);
+  });
+
+  it("omits BASE_DEDUCT when the calendar books vacation on top of salary", () => {
+    // vacationAdditive: the base line stays gross and the permanent Vacation
+    // Cost line lands on top. VACATION is still emitted — ACC_ADD_VAC bases,
+    // ACCRUAL and the SS base all read the scratch series it writes.
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef(), makeDef({ id: "acc", kind: "HOLIDAY_ACCRUAL" })],
+        positions: [makePosition({ id: "p1", vacationDays: 12, accrualDaysPerMonth: 1 })],
+        calendar: makeCalendarContext(new Array(MONTHS).fill(20), undefined, 2026, {
+          vacationAdditive: true,
+        }),
+      })
+    );
+    const names = decode(plan, 0).map((instr) => instr.name);
+    expect(names).toEqual(["DERIVE", "BASE_SALARY", "VACATION", "ACCRUAL"]);
+  });
+
+  it("flags BASE_SALARY — and only BASE_SALARY — on the working-days day basis", () => {
+    // vacationWorkingDays rides arg0 of the salaried base op (÷ twd2 instead of
+    // ÷ twd). The hourly op prices a day as its coeff, so it must NOT carry the
+    // flag — the VM ignores it there, but a stray bit would still be a lie in
+    // the disassembly.
+    const plan = mustCompile(
+      makeInput({
+        definitions: [baseDef()],
+        positions: [
+          makePosition({ id: "p1", monthlyBaseSalary: 3000 }),
+          makePosition({ id: "p2", payType: "HOURLY", hourlyRate: 12, monthlyBaseSalary: 0 }),
+        ],
+        calendar: makeCalendarContext(new Array(MONTHS).fill(20), undefined, 2026, {
+          vacationWorkingDays: true,
+        }),
+      })
+    );
+    const [, salaried] = decode(plan, 0);
+    const [, hourly] = decode(plan, 1);
+    expect(salaried).toMatchObject({ name: "BASE_SALARY", arg0: FLAG_VAC_WORKING_DAYS });
+    expect(hourly).toMatchObject({ name: "BASE_SALARY_HOURLY", arg0: 0 });
   });
 
   it("emits ACCRUAL with the days-per-month param", () => {

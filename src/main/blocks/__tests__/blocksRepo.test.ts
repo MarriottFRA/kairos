@@ -933,6 +933,98 @@ describe("saveBlock â€” update semantics", () => {
   });
 });
 
+describe("a block's account follows another block / a position column", () => {
+  const follower = (
+    accountSource: BlockInput["accountSource"],
+    overrides: Partial<BlockInput> = {}
+  ): BlockInput =>
+    flatMonthly({
+      label: "Employer Pension",
+      accountCode: "",
+      accountLocked: false,
+      accountSource,
+      ...overrides,
+    });
+
+  it("round-trips the source, forces the lock and stamps the snapshot account", () => {
+    const targetId = saveBlock(db, OU_A, flatMonthly({ label: "Pension", accountCode: "560123" }), NOW);
+    const id = saveBlock(db, OU_A, follower({ kind: "BLOCK", blockId: targetId }), NOW);
+
+    const block = listBlocks(db, OU_A).find((entry) => entry.id === id)!;
+    expect(block.accountSource).toEqual({ kind: "BLOCK", blockId: targetId });
+    // The source decides per row, so the follower can never be unlocked …
+    expect(block.accountLocked).toBe(true);
+    // … and carries the followed account as a literal, for older clients and
+    // for the definition projection.
+    expect(block.accountCode).toBe("560123");
+    const def = getComponentDefinitions(db, OU_A).find((entry) => entry.id === blockCostDefId(id))!;
+    expect(def.accountCode).toBe("560123");
+  });
+
+  it("stamps a blank snapshot for a position column (the row supplies it)", () => {
+    const id = saveBlock(db, OU_A, follower({ kind: "POSITION_FIELD", field: "salary" }), NOW);
+    const block = listBlocks(db, OU_A).find((entry) => entry.id === id)!;
+    expect(block.accountSource).toEqual({ kind: "POSITION_FIELD", field: "salary" });
+    expect(block.accountCode).toBe("");
+    expect(block.accountLocked).toBe(true);
+  });
+
+  it("rejects following itself, a missing block, or a block that follows", () => {
+    const targetId = saveBlock(db, OU_A, flatMonthly({ label: "Pension" }), NOW);
+    const followerId = saveBlock(db, OU_A, follower({ kind: "BLOCK", blockId: targetId }), NOW);
+
+    expect(() =>
+      saveBlock(db, OU_A, { ...follower({ kind: "BLOCK", blockId: followerId }), id: followerId }, NOW)
+    ).toThrow(/cannot follow its own account/);
+    expect(() =>
+      saveBlock(db, OU_A, follower({ kind: "BLOCK", blockId: "nope" }, { label: "Levy" }), NOW)
+    ).toThrow(/no longer exists/);
+    // Depth one: the follower is not itself followable.
+    expect(() =>
+      saveBlock(db, OU_A, follower({ kind: "BLOCK", blockId: followerId }, { label: "Levy" }), NOW)
+    ).toThrow(/already follows another block's account/);
+    // … and in the other direction: a followed block may not start following.
+    expect(() =>
+      saveBlock(
+        db,
+        OU_A,
+        { ...flatMonthly({ label: "Pension", accountSource: { kind: "POSITION_FIELD", field: "salary" } }), id: targetId },
+        NOW
+      )
+    ).toThrow(/followed by: Employer Pension/);
+    expect(() =>
+      saveBlock(db, OU_A, follower({ kind: "POSITION_FIELD", field: "bogus" as never }, { label: "Levy" }), NOW)
+    ).toThrow(/Choose what the account should follow/);
+  });
+
+  it("normalizes a malformed synced source on read", () => {
+    const id = saveBlock(db, OU_A, flatMonthly(), NOW);
+    const row = db.prepare(`SELECT config FROM block_configs WHERE id = ?`).get(id) as { config: string };
+    const config = JSON.parse(row.config) as Record<string, unknown>;
+    config.accountSource = { kind: "SOMETHING_ELSE", blockId: "x" };
+    config.accountLocked = false;
+    db.prepare(`UPDATE block_configs SET config = ? WHERE id = ?`).run(JSON.stringify(config), id);
+
+    const block = listBlocks(db, OU_A).find((entry) => entry.id === id)!;
+    expect(block.accountSource).toBeUndefined();
+    // With no usable source the stored lock state stands.
+    expect(block.accountLocked).toBe(false);
+  });
+
+  it("refuses deleting a followed block, naming the follower", () => {
+    const targetId = saveBlock(db, OU_A, flatMonthly({ label: "Pension" }), NOW);
+    saveBlock(db, OU_A, follower({ kind: "BLOCK", blockId: targetId }), NOW);
+    expect(() => deleteBlock(db, OU_A, targetId, NOW)).toThrow(
+      /account is followed by: Employer Pension/
+    );
+    // The follower itself deletes freely, and then so does the target.
+    const followerId = listBlocks(db, OU_A).find((block) => block.label === "Employer Pension")!.id;
+    deleteBlock(db, OU_A, followerId, NOW);
+    deleteBlock(db, OU_A, targetId, NOW);
+    expect(listBlocks(db, OU_A)).toHaveLength(0);
+  });
+});
+
 describe("deleteBlock / restoreBlock", () => {
   it("refuses deletion while another block uses it as a base", () => {
     const baseId = saveBlock(db, OU_A, flatMonthly(), NOW);
@@ -1518,6 +1610,8 @@ describe("scoping + engine round trip", () => {
         year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
+        vacationWorkingDays: false,
+        vacationAdditive: false,
         holidayDays: new Float64Array(12),
       },
       definitions: defs,
@@ -1593,6 +1687,8 @@ describe("scoping + engine round trip", () => {
         year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
+        vacationWorkingDays: false,
+        vacationAdditive: false,
         holidayDays: new Float64Array(12),
       },
       definitions: defs,
@@ -1702,6 +1798,8 @@ describe("scoping + engine round trip", () => {
         year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
+        vacationWorkingDays: false,
+        vacationAdditive: false,
         holidayDays: new Float64Array(12),
       },
       definitions: defs,

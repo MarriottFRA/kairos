@@ -384,7 +384,7 @@ describe("readOutputs over mixed sources", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 1 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 1, year: 2027 },
       [
         {
           positionId: "p1",
@@ -426,7 +426,7 @@ describe("readOutputs over mixed sources", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 1 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 1, year: 2027 },
       [
         {
           positionId: "p1",
@@ -472,7 +472,7 @@ describe("readOutputs over mixed sources", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 0 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 0, year: 2027 },
       [
         ...projectAllocationLines(
           [
@@ -515,7 +515,7 @@ describe("readOutputs over mixed sources", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 2 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 2, year: 2027 },
       [
         // Two positions on the same block: one label, the contributions summed.
         {
@@ -579,7 +579,7 @@ describe("readOutputs over mixed sources", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 1 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 1, year: 2027 },
       [
         {
           positionId: "p1",
@@ -642,7 +642,7 @@ describe("readOutputLines", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 3 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 3, year: 2027 },
       [
         {
           positionId: "p1",
@@ -715,7 +715,7 @@ describe("readOutputLines", () => {
       valuesDb,
       scope,
       SCENARIO,
-      { fingerprint: "fp", computedAt: NOW, positionCount: 0 },
+      { fingerprint: "fp", computedAt: NOW, positionCount: 0, year: 2027 },
       projectManualLines([manualRow({ statsAccount: "" })])
     );
     const lines = readOutputLines(valuesDb, scope, SCENARIO, "D0410", "A500100");

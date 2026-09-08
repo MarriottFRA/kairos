@@ -46,6 +46,20 @@ export interface UpdateNote {
  *  empty. */
 export const UPDATE_NOTES: UpdateNote[] = [
   {
+    id: 4,
+    date: "2026-09-08",
+    new: [
+      {
+        title: "Vacation settings",
+        where: "Positions › Vacation › cog",
+        body:
+          "Two policy switches now sit behind the cog on the Vacation band, kept with the hotel's calendar year so they apply to every position in the plan. Day rate says what a vacation day is worth for salaried staff — 1/30 of the month, or the monthly salary ÷ that month's working days (calendar days less weekends and public holidays, read from the hotel calendar). Booking says whether vacation is carved out of salary — Base Salary = salary − vacation with Vacation Cost adding it back, so the year totals the salary — or booked on top of it, leaving Base Salary whole so the year totals salary + vacation. Hourly staff's day rate is unaffected either way: it is already rate × contract hours. Plans you already have keep exactly the figures they have — both switches start where they have always effectively been.",
+      },
+    ],
+    improved: [],
+    fixes: [],
+  },
+  {
     id: 3,
     date: "2026-09-07",
     new: [

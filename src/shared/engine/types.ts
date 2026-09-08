@@ -666,6 +666,15 @@ export interface CalendarContext {
    *  realDays, kept here so the BANK_HOLIDAY component can value it. Zero-filled
    *  when the calendar carries no holidays. */
   holidayDays: Float64Array;
+  /** Salaried vacation-day price: false = monthly salary / 30 (the flatDays
+   *  basis the salary spreads on); true = monthly salary / that month's
+   *  realDays. Only the DAY PRICE moves — the monthly salary spread stays flat
+   *  either way. Hourly staff ignore it (their day is rate × contract hours). */
+  vacationWorkingDays: boolean;
+  /** true = vacation is booked ON TOP of the base salary line rather than
+   *  carved out of it (BASE_DEDUCT is not emitted). The permanent Vacation Cost
+   *  line is unchanged, so the year totals salary + vacation instead of salary. */
+  vacationAdditive: boolean;
 }
 
 // ---------------------------------------------------------------------------

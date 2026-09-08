@@ -644,6 +644,29 @@ export function buildBlockColumns(
 
     // The Total: the engine's own figure for this row's line, full year. Blank
     // (not zero) while the position is inactive or the simulation is loading.
+    // Where the line posts, as the header's unit text. A block that FOLLOWS
+    // another block / a position column says so (the read model stamped the
+    // resolved picture on `accountLink`), so the user sees the link, not just
+    // the snapshot literal it happens to carry today.
+    const link = block.accountLink;
+    const postsTo = link
+      ? link.issue
+        ? `→ ${link.targetLabel} (unresolved)`
+        : `→ ${link.targetLabel}${
+            link.perRow ? " · per row" : link.account ? ` · ${link.account}` : " · calc only"
+          }`
+      : block.accountCode
+        ? `→ ${block.accountCode}`
+        : "calc only";
+    const postsToLong = link
+      ? link.issue
+        ? ` (${link.issue})`
+        : ` (posts wherever ${link.targetLabel} posts${
+            link.perRow ? ", row by row" : link.account ? `: ${link.account}` : ""
+          })`
+      : block.accountCode
+        ? ` (account ${block.accountCode})`
+        : " (calculation only)";
     columns.push({
       field: blockTotalKey(block),
       headerName: `${block.label} — Total`,
@@ -651,9 +674,7 @@ export function buildBlockColumns(
         block.movement
           ? "full-year movement (closing balance less opening)"
           : "full-year total"
-      } from the simulation${
-        block.accountCode ? ` (account ${block.accountCode})` : " (calculation only)"
-      }`,
+      } from the simulation${postsToLong}`,
       width: 122,
       type: "number",
       align: "right",
@@ -662,10 +683,7 @@ export function buildBlockColumns(
       sortable: true,
       headerClassName: "pos-col--blocks",
       cellClassName: "pos-cell--num pos-cell--derived",
-      renderHeader: renderBlockHeader(
-        "Total",
-        block.accountCode ? `→ ${block.accountCode}` : "calc only"
-      ),
+      renderHeader: renderBlockHeader("Total", postsTo),
       valueGetter: (_value: unknown, row: PositionRow) => {
         if (!row) return null;
         const result = ctx.derived.current.blockResults.get(row.id)?.get(block.costDefId);

@@ -34,6 +34,7 @@ import {
   SCRATCH_TWM,
   SCRATCH_VAC,
   SCRATCH_VACDAYS,
+  FLAG_VAC_WORKING_DAYS,
 } from "./opcodes";
 import { MONTHS } from "./types";
 
@@ -145,9 +146,13 @@ export function executePosition(
         const manualMonthly = scratch[SCRATCH_MANUAL];
         const incMonth = scratch[SCRATCH_INCMONTH];
         // Per-working-day base pay (pre-increase) — what one vacation/accrual day
-        // is worth. twd = 0 only when the position never works, and then no
+        // is worth: ÷ the flat day basis, or ÷ the calendar's working days when
+        // the hotel's WORKING_DAYS policy set the flag (reference.derive). The
+        // denominator is 0 only when the position never works, and then no
         // vacation is emitted anyway, so a guard keeps it finite.
-        scratch[SCRATCH_DAYRATE] = twd > 0 ? (base * twm) / twd : 0;
+        const dayDenominator =
+          (arg0[i] & FLAG_VAC_WORKING_DAYS) !== 0 ? scratch[SCRATCH_TWD2] : twd;
+        scratch[SCRATCH_DAYRATE] = dayDenominator > 0 ? (base * twm) / dayDenominator : 0;
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           let gross = 0;

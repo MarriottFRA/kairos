@@ -24,7 +24,7 @@
  * a block graph.
  */
 
-import type { BlockBaseRef, BlockInput } from "./ipc";
+import type { BlockAccountSource, BlockBaseRef, BlockInput } from "./ipc";
 import { POOL_MONTHS } from "./ipc";
 
 /** Marks a blockId as a reference to another step of the same preset. */
@@ -109,6 +109,31 @@ export function resolvePresetRefs(
     default:
       return base;
   }
+}
+
+/**
+ * The same rewrite for a step whose ACCOUNT follows an earlier step (`$key`
+ * as the followed block id) — two steps that post to one account, kept in
+ * step. A position-column source has nothing to resolve.
+ */
+export function resolvePresetAccountSource(
+  source: BlockAccountSource | undefined,
+  idByKey: ReadonlyMap<string, string>
+): BlockAccountSource | undefined {
+  if (!source || source.kind !== "BLOCK" || !isPresetRef(source.blockId)) return source;
+  const key = presetRefKey(source.blockId);
+  const id = idByKey.get(key);
+  if (!id) {
+    throw new Error(`Preset step "${key}" is referenced before it is created.`);
+  }
+  return { kind: "BLOCK", blockId: id };
+}
+
+/** The step key a preset step's account source references, if any. */
+export function presetAccountRefKeys(source: BlockAccountSource | undefined): string[] {
+  return source?.kind === "BLOCK" && isPresetRef(source.blockId)
+    ? [presetRefKey(source.blockId)]
+    : [];
 }
 
 /** Every step key a preset's bases reference, in the order they are reached. */

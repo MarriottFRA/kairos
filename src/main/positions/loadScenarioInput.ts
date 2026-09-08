@@ -29,6 +29,7 @@ import type {
   ScenarioInput,
 } from "../../shared/engine/types";
 import {
+  applyAccountLinks,
   applyInputBasis,
   applyPositionAccounts,
   applyPinnedRowRates,
@@ -351,16 +352,21 @@ export async function loadScenarioInput(
       )
   );
 
+  // Then any block whose account FOLLOWS another block or one of those
+  // position columns — after the accounts above, since a follower of the
+  // Salary column reads the rows they just produced. Mirror in runLiveSim.
   const input: ScenarioInput = {
     scenario,
     calendar,
     definitions,
     ssSchemes,
     positions,
-    componentValues: applyPositionAccounts(
+    componentValues: applyAccountLinks(
       scope.ou,
-      pooledValues,
-      accountsByPosition
+      definitions,
+      blocks,
+      positions,
+      applyPositionAccounts(scope.ou, pooledValues, accountsByPosition)
     ),
     buyouts,
   };

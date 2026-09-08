@@ -221,6 +221,8 @@ describe("applyBlockPreset â€” overtime, simulated", () => {
         year: 2026,
         realDays: new Float64Array(12).fill(21),
         flatDays: new Float64Array(12).fill(30),
+        vacationWorkingDays: false,
+        vacationAdditive: false,
         holidayDays: new Float64Array(12),
       },
       definitions: getComponentDefinitions(db, OU),

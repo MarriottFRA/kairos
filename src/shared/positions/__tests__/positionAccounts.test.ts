@@ -16,7 +16,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  BlockDto,
   baseSalaryDefId,
+  blockCostDefId,
   holidayAccrualDefId,
   positionCountDefId,
   systemStatDefId,
@@ -26,6 +28,7 @@ import { compile } from "../../engine/compile";
 import { simulate } from "../../engine/simulate";
 import {
   ComponentDefId,
+  ComponentValue,
   MONTHS,
   Position,
   PositionId,
@@ -34,9 +37,11 @@ import {
 } from "../../engine/types";
 import { makeCalendarContext } from "../../engine/calendarContext";
 import {
+  applyAccountLinks,
   applyPositionAccounts,
   PositionAccounts,
   readPositionAccounts,
+  resolveBlockValues,
 } from "../engineInput";
 import {
   BUILTIN_CATALOG,
@@ -485,5 +490,153 @@ describe("a new row's A5 accounts start filled in (seed v28)", () => {
     expect(accountOf("Base Salary")).toBe(DEFAULT_SALARY_ACCOUNT);
     expect(accountOf("Vacation Cost")).toBe(DEFAULT_BENEFITS_ACCOUNT);
     expect(posted.some((line) => line.label === "Vacation Accrual")).toBe(false);
+  });
+});
+
+describe("a block's account follows another block / a position column", () => {
+  // The blocks as blocks:list hands them to both loaders. Only the fields
+  // applyAccountLinks reads matter; the rest is the DTO's required shape.
+  function blockDto(over: Partial<BlockDto> & { id: string }): BlockDto {
+    return {
+      ou: OU,
+      blockType: "FLAT_MONTHLY",
+      label: over.id,
+      accountCode: "",
+      accountLocked: true,
+      statsAccountCode: "",
+      statsAccountLocked: true,
+      spread: "ACTIVE_MONTHS",
+      increaseAware: false,
+      departmentMode: "POSITION",
+      sortOrder: 0,
+      updatedAt: SYNC.updatedAt,
+      costDefId: blockCostDefId(over.id),
+      ...over,
+    };
+  }
+  function blockDef(block: BlockDto): ScenarioInput["definitions"][number] {
+    return {
+      ou: OU,
+      id: block.costDefId as ComponentDefId,
+      kind: "SPREAD",
+      spreadMethod: "FLAT_MONTHLY",
+      label: block.label,
+      accountCode: block.accountCode,
+      departmentMode: "POSITION",
+      increaseAware: false,
+      sortOrder: 5,
+      ...SYNC,
+    };
+  }
+  const value = (positionId: string, defId: string, over: Partial<ComponentValue> = {}): ComponentValue => ({
+    positionId: positionId as PositionId,
+    componentDefId: defId as ComponentDefId,
+    yearlyValue: 1200,
+    ...SYNC,
+    ...over,
+  });
+  const keyOf = (v: ComponentValue) => `${v.positionId as string}|${v.componentDefId as string}`;
+
+  it("returns the same array when nothing follows", () => {
+    const pension = blockDto({ id: "pension", accountCode: "A560123" });
+    const values = [value("p1", pension.costDefId)];
+    const defs = [blockDef(pension)];
+    expect(applyAccountLinks(OU, defs, [pension], [position("p1")], values)).toBe(values);
+  });
+
+  it("copies a locked block's account onto the follower's definition, no rows", () => {
+    const pension = blockDto({ id: "pension", accountCode: "A560123" });
+    const levy = blockDto({ id: "levy", accountSource: { kind: "BLOCK", blockId: "pension" } });
+    const defs = [blockDef(pension), blockDef(levy)];
+    const values = [value("p1", levy.costDefId)];
+
+    const out = applyAccountLinks(OU, defs, [pension, levy], [position("p1")], values);
+    expect(defs[1].accountCode).toBe("A560123");
+    // The target is locked, so no per-row override is needed or made.
+    expect(out.map(keyOf)).toEqual(values.map(keyOf));
+    expect(out[0].accountCode).toBeUndefined();
+  });
+
+  it("follows an unlocked block row for row — merging onto existing rows, synthesizing the rest", () => {
+    const meals = blockDto({ id: "meals", accountCode: "A517000", accountLocked: false });
+    const levy = blockDto({ id: "levy", accountSource: { kind: "BLOCK", blockId: "meals" } });
+    const defs = [blockDef(meals), blockDef(levy)];
+    const positions = [position("p1"), position("p2"), position("p3")];
+    // p1 overrides Meals' account, p2 is on the default, p3 has no Meals row.
+    const values = [
+      value("p1", meals.costDefId, { accountCode: "A517999" }),
+      value("p2", meals.costDefId),
+      value("p1", levy.costDefId), // the follower already has a row for p1
+    ];
+
+    const out = applyAccountLinks(OU, defs, [meals, levy], positions, values);
+    expect(defs[1].accountCode).toBe("A517000");
+    const byKey = new Map(out.map((v) => [keyOf(v), v]));
+    // p1: merged onto the existing follower row, values intact.
+    expect(byKey.get(`p1|${levy.costDefId}`)).toMatchObject({ yearlyValue: 1200, accountCode: "A517999" });
+    // p2 / p3: no override on the source → the definition's default applies,
+    // so nothing is synthesized (the compiler falls back to def.accountCode).
+    expect(byKey.has(`p2|${levy.costDefId}`)).toBe(false);
+    expect(byKey.has(`p3|${levy.costDefId}`)).toBe(false);
+    // No key appears twice — compile is last-write-wins on it.
+    expect(new Set(out.map(keyOf)).size).toBe(out.length);
+    // The source's own rows are untouched.
+    expect(byKey.get(`p1|${meals.costDefId}`)?.accountCode).toBe("A517999");
+  });
+
+  it("follows a position column by reading the rows applyPositionAccounts produced", () => {
+    const ni = blockDto({ id: "ni", accountSource: { kind: "POSITION_FIELD", field: "salary" } });
+    const defs = [...systemDefs(), blockDef(ni)];
+    const positions = [position("p1"), position("p2")];
+    const accounts = new Map<string, PositionAccounts>([
+      ["p1", { salary: "A511000" }],
+      ["p2", { salary: "" }], // no salary account picked
+    ]);
+
+    const withAccounts = applyPositionAccounts(OU, [], accounts);
+    const out = applyAccountLinks(OU, defs, [ni], positions, withAccounts);
+    const byKey = new Map(out.map((v) => [keyOf(v), v]));
+    expect(defs.find((def) => def.id === ni.costDefId)!.accountCode).toBe("");
+    expect(byKey.get(`p1|${ni.costDefId}`)?.accountCode).toBe("A511000");
+    // p2's salary line has no row (blank skipped), so the NI line posts
+    // nowhere for p2 — exactly like its salary.
+    expect(byKey.has(`p2|${ni.costDefId}`)).toBe(false);
+    // Run in the other order it would read nothing: the ordering IS the design.
+    const wrongOrder = applyAccountLinks(OU, [...systemDefs(), blockDef(ni)], [ni], positions, []);
+    expect(wrongOrder.some((v) => (v.componentDefId as string) === ni.costDefId)).toBe(false);
+  });
+
+  it("degrades a missing or chained target to no account, never a throw or a loop", () => {
+    const a = blockDto({ id: "a", accountCode: "A1", accountSource: { kind: "BLOCK", blockId: "b" } });
+    const b = blockDto({ id: "b", accountCode: "A2", accountSource: { kind: "BLOCK", blockId: "a" } });
+    const gone = blockDto({ id: "gone", accountCode: "A3", accountSource: { kind: "BLOCK", blockId: "nope" } });
+    const defs = [blockDef(a), blockDef(b), blockDef(gone)];
+    const out = applyAccountLinks(OU, defs, [a, b, gone], [position("p1")], []);
+    expect(out).toEqual([]);
+    for (const def of defs) expect(def.accountCode).toBe("");
+  });
+
+  it("wins over the follower's own stored per-row accounts, which the lock has already dropped", () => {
+    // A follower is always locked, so resolveBlockValues strips whatever
+    // per-row account it carried before it followed; the link then supplies
+    // the source's. Pinned because the order of the two steps is what makes
+    // that true.
+    const meals = blockDto({ id: "meals", accountCode: "A517000", accountLocked: false });
+    const levy = blockDto({ id: "levy", accountSource: { kind: "BLOCK", blockId: "meals" } });
+    const defs = [blockDef(meals), blockDef(levy)];
+    const stored = [
+      value("p1", meals.costDefId, { accountCode: "A517999" }),
+      value("p1", levy.costDefId, { accountCode: "A999999" }), // stale, pre-follow
+    ];
+    const policies = [meals, levy].map((block) => ({
+      costDefId: block.costDefId,
+      accountLocked: block.accountLocked,
+      statsAccountLocked: true,
+      departmentPerRow: false,
+    }));
+    const resolved = resolveBlockValues(defs, stored, policies);
+    const out = applyAccountLinks(OU, defs, [meals, levy], [position("p1")], resolved);
+    const row = out.find((v) => keyOf(v) === `p1|${levy.costDefId}`)!;
+    expect(row.accountCode).toBe("A517999");
   });
 });

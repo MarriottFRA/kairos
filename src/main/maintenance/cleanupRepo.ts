@@ -32,6 +32,7 @@ import type Database from "better-sqlite3-multiple-ciphers";
 import { prepared } from "../positions/stmtCache";
 import { resolveOuScope } from "../positions/ouScope";
 import { scrubExtraValueKeys } from "../positions/positionsRepo";
+import { rebuildResultsCache } from "../positions/resultsCache";
 import {
   CleanupTally,
   EMPTY_CLEANUP_TALLY,
@@ -198,8 +199,41 @@ function positionIdsInScenario(secure: Db, scenario: ScenarioRef): string[] {
   ).map((row) => row.id);
 }
 
+/**
+ * Plans whose engine lines a purge is about to thin out, keyed `ou|id`.
+ *
+ * The results cache is the aggregate of a plan's lines and is written beside
+ * them; a line removed here without a run leaves the cache saying more than the
+ * lines do. So every line delete that is narrower than "the whole plan" notes
+ * the plan first, and the caller rebuilds those caches once the deletes are
+ * done (see rebuildAffectedCaches). A plan being purged outright needs no
+ * rebuild — its cache goes with it in deleteScenarioTail.
+ */
+type AffectedScenarios = Map<string, ScenarioRef>;
+
+function noteAffectedScenarios(
+  secure: Db,
+  affected: AffectedScenarios,
+  sql: string,
+  ...params: unknown[]
+): void {
+  if (!hasTable(secure, "engine_output_lines")) return;
+  const rows = prepared(secure, sql).all(...params) as Array<{
+    ou: string;
+    scenario_id: string;
+  }>;
+  for (const row of rows) {
+    affected.set(`${row.ou}|${row.scenario_id}`, { id: row.scenario_id, ou: row.ou });
+  }
+}
+
 /** A position and everything that hangs off it. */
-function deletePositionTree(secure: Db, id: string, tally: CleanupTally): void {
+function deletePositionTree(
+  secure: Db,
+  id: string,
+  tally: CleanupTally,
+  affected: AffectedScenarios
+): void {
   tally.componentValues += del(
     secure,
     "component_values",
@@ -212,6 +246,12 @@ function deletePositionTree(secure: Db, id: string, tally: CleanupTally): void {
     "DELETE FROM position_pii WHERE position_id = ?",
     id
   );
+  noteAffectedScenarios(
+    secure,
+    affected,
+    "SELECT DISTINCT ou, scenario_id FROM engine_output_lines WHERE position_id = ?",
+    id
+  );
   tally.engineOutputLines += del(
     secure,
     "engine_output_lines",
@@ -219,6 +259,41 @@ function deletePositionTree(secure: Db, id: string, tally: CleanupTally): void {
     id
   );
   tally.positions += del(secure, "positions", "DELETE FROM positions WHERE id = ?", id);
+}
+
+/**
+ * Recompute the results cache of every plan whose lines were thinned out and
+ * that is not itself being purged. The year comes from the plaintext store
+ * (the cache denormalises it); a plan whose row is already gone, or whose OU
+ * the validator no longer accepts, keeps its lines and loses its cache on the
+ * next Recalculate instead — a read of an absent cache falls back to the lines.
+ */
+function rebuildAffectedCaches(
+  local: Db,
+  secure: Db,
+  affected: AffectedScenarios,
+  purged: readonly ScenarioRef[],
+  now: string
+): void {
+  if (affected.size === 0) return;
+  const purgedKeys = new Set(purged.map((scenario) => `${scenario.ou}|${scenario.id}`));
+  for (const [key, scenario] of affected) {
+    if (purgedKeys.has(key)) continue;
+    let scope;
+    try {
+      scope = resolveOuScope(scenario.ou);
+    } catch {
+      continue;
+    }
+    const row = hasTable(local, "scenarios")
+      ? (prepared(local, "SELECT year FROM scenarios WHERE id = ? AND ou = ?").get(
+          scenario.id,
+          scenario.ou
+        ) as { year: number } | undefined)
+      : undefined;
+    if (!row) continue;
+    rebuildResultsCache(secure, scope, scenario.id, Number(row.year), now);
+  }
 }
 
 /**
@@ -251,8 +326,9 @@ function deleteScenarioTail(secure: Db, scenario: ScenarioRef, tally: CleanupTal
     scenario.ou,
     scenario.id
   );
-  // The run header is a cache row with no deleted_at of its own; it is
-  // meaningless once its lines are gone, so it is dropped untallied.
+  // The run header and the dept × account cache are derived rows with no
+  // deleted_at of their own; they are meaningless once the lines are gone, so
+  // both are dropped untallied.
   del(
     secure,
     "engine_runs",
@@ -260,14 +336,24 @@ function deleteScenarioTail(secure: Db, scenario: ScenarioRef, tally: CleanupTal
     scenario.ou,
     scenario.id
   );
+  del(
+    secure,
+    "results_cache",
+    "DELETE FROM results_cache WHERE ou = ? AND scenario_id = ?",
+    scenario.ou,
+    scenario.id
+  );
 }
 
 function purgeSecureRows(
+  local: Db,
   secure: Db,
   targets: CleanupTargets,
   window: DeletedWindow,
-  tally: CleanupTally
+  tally: CleanupTally,
+  now: string
 ): void {
+  const affected: AffectedScenarios = new Map();
   // ── Positions: soft-deleted anywhere, plus every row filed under a deleted
   // plan. A deleted plan only ever soft-deletes the `scenarios` row, so its
   // positions are still live rows — invisible, but stored.
@@ -283,7 +369,7 @@ function purgeSecureRows(
     for (const row of orphans) positionIds.add(row.id);
   }
 
-  for (const id of positionIds) deletePositionTree(secure, id, tally);
+  for (const id of positionIds) deletePositionTree(secure, id, tally, affected);
 
   // ── Values whose block/definition is gone. No cross-file FK exists, so these
   // would otherwise sit in the encrypted store forever with nothing to read them.
@@ -292,6 +378,13 @@ function purgeSecureRows(
       secure,
       "component_values",
       "DELETE FROM component_values WHERE ou = ? AND component_def_id = ?",
+      definition.ou,
+      definition.id
+    );
+    noteAffectedScenarios(
+      secure,
+      affected,
+      "SELECT DISTINCT ou, scenario_id FROM engine_output_lines WHERE ou = ? AND component_def_id = ?",
       definition.ou,
       definition.id
     );
@@ -334,6 +427,10 @@ function purgeSecureRows(
     `DELETE FROM manual_input_rows WHERE ${window.clause}`,
     ...window.params
   );
+
+  // ── Every surviving plan whose lines were thinned out above gets its cache
+  // recomputed, so the cache keeps saying exactly what the lines say.
+  rebuildAffectedCaches(local, secure, affected, targets.scenarios, now);
 }
 
 /** Plaintext store: plans, blocks, definitions, columns, schemes, clusters. */
@@ -459,6 +556,9 @@ export interface PurgeOptions {
    * undoable; the manual button passes none.
    */
   olderThan?: string;
+  /** ISO timestamp stamped on any results cache the purge rebuilds. Injectable
+   *  for tests; defaults to now. */
+  now?: string;
 }
 
 /**
@@ -477,6 +577,7 @@ export function purgeSoftDeleted(
   const tally: CleanupTally = { ...EMPTY_CLEANUP_TALLY };
   const window = deletedWindow(opts.olderThan);
   const targets = collectTargets(local, window);
+  const now = opts.now ?? new Date().toISOString();
 
   if (opts.dryRun) {
     try {
@@ -485,7 +586,7 @@ export function purgeSoftDeleted(
       local.transaction(() => {
         secure.transaction(() => {
           scrubRemovedFieldValues(secure, targets);
-          purgeSecureRows(secure, targets, window, tally);
+          purgeSecureRows(local, secure, targets, window, tally, now);
           purgeLocalRows(local, targets, window, tally);
           throw new DryRunRollback();
         })();
@@ -498,7 +599,7 @@ export function purgeSoftDeleted(
 
   secure.transaction(() => {
     scrubRemovedFieldValues(secure, targets);
-    purgeSecureRows(secure, targets, window, tally);
+    purgeSecureRows(local, secure, targets, window, tally, now);
   })();
   local.transaction(() => {
     purgeLocalRows(local, targets, window, tally);
@@ -538,8 +639,10 @@ export function purgeScenario(
   const tally: CleanupTally = { ...EMPTY_CLEANUP_TALLY };
 
   secure.transaction(() => {
+    // The whole plan goes, cache included, so nothing here needs rebuilding.
+    const affected: AffectedScenarios = new Map();
     for (const id of positionIdsInScenario(secure, scenario)) {
-      deletePositionTree(secure, id, tally);
+      deletePositionTree(secure, id, tally, affected);
     }
     deleteScenarioTail(secure, scenario, tally);
   })();

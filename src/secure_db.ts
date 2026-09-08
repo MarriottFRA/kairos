@@ -9,6 +9,7 @@ import {
   applyComponentValueDepartment,
   applyInputBasisRestatement,
   applyOutputLineProvenance,
+  applyResultsCacheV8,
   applyValueStoreV12,
 } from "./main/positions/schema";
 import {
@@ -71,7 +72,7 @@ const securePath = SECURE_DB_PATH;
 // Migrations for this store can only ever run inside createSchema() — that is
 // the one moment the file is decryptable (post-unlock). Each step runs in its
 // own transaction and stamps its version as it lands.
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 type SecureDb = InstanceType<typeof Database>;
 
@@ -269,6 +270,11 @@ const MIGRATIONS: Record<number, (handle: SecureDb) => void> = {
   // as the full-year contracts they were already being read as, so no budget
   // number moves. Data only — no DDL. See applyInputBasisRestatement.
   7: applyInputBasisRestatement,
+  // The results cache: a dept × account × month table written beside the
+  // engine lines, plus the `encoding` each line needs so that cache can be
+  // rebuilt from lines alone. Runs predating it read as stale until the next
+  // Recalculate. See applyResultsCacheV8.
+  8: applyResultsCacheV8,
 };
 
 function createSchema(handle: SecureDb): void {

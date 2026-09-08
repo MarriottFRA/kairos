@@ -116,6 +116,7 @@ import {
 } from "../../shared/mappingTables/types";
 import AccountAutocomplete from "../common/AccountAutocomplete";
 import DepartmentAutocomplete from "../common/DepartmentAutocomplete";
+import BlockAccountSection from "./BlockAccountSection";
 import FieldConditionPicker from "./FieldConditionPicker";
 
 export interface BlockDialogProps {
@@ -929,6 +930,8 @@ export default function BlockDialog({
   const [label, setLabel] = useState("");
   const [accountCode, setAccountCode] = useState("");
   const [accountLocked, setAccountLocked] = useState(true);
+  // Follow another block / a position column instead of typing an account.
+  const [accountSource, setAccountSource] = useState<BlockInput["accountSource"]>(undefined);
   const [statsAccountCode, setStatsAccountCode] = useState("");
   const [base, setBase] = useState<BlockBaseRef | undefined>(undefined);
   // Compound-base options; ignored for every other base kind.
@@ -989,6 +992,7 @@ export default function BlockDialog({
     setLabel(block?.label ?? "");
     setAccountCode(block?.accountCode ?? "");
     setAccountLocked(block?.accountLocked ?? true);
+    setAccountSource(block?.accountSource);
     setStatsAccountCode(block?.statsAccountCode ?? "");
     setBase(block?.base);
     setRateMode(block?.rateRules ? "RULES" : "ROW");
@@ -1175,7 +1179,9 @@ export default function BlockDialog({
       blockType: type,
       label: label.trim(),
       accountCode,
-      accountLocked,
+      // A follower is always locked — the source decides per row.
+      accountLocked: accountSource ? true : accountLocked,
+      accountSource,
       statsAccountCode: type === "COUNT_RATE" ? statsAccountCode : undefined,
       // Echoed rather than edited — there is no switch for it, and omitting it
       // silently re-locked every per-row stats account on save.
@@ -2280,39 +2286,20 @@ export default function BlockDialog({
 
             <Divider />
 
-            <Stack spacing={1}>
-              <Typography variant="subtitle2">
-                {type === "COUNT_RATE" ? "Cost account" : "Account"}
-              </Typography>
-              <AccountAutocomplete
-                options={accounts}
-                value={accountCode}
-                onChange={setAccountCode}
-                size="small"
-              />
-              <Typography variant="caption" color="text.secondary">
-                {accountCode
-                  ? "The generated line posts to this account."
-                  : "No account: the block still calculates (and other blocks can use it) but it is not included in the output."}
-              </Typography>
-              <FormControlLabel
-                control={
-                  <Switch
-                    size="small"
-                    checked={accountLocked}
-                    onChange={(event) => setAccountLocked(event.target.checked)}
-                  />
-                }
-                label={
-                  <Typography variant="body2">
-                    Same account for every row
-                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                      {accountLocked ? "" : "— each row gets its own account dropdown"}
-                    </Typography>
-                  </Typography>
-                }
-              />
-            </Stack>
+            <BlockAccountSection
+              title={type === "COUNT_RATE" ? "Cost account" : "Account"}
+              accountCode={accountCode}
+              accountLocked={accountLocked}
+              accountSource={accountSource}
+              blocks={blocks}
+              selfId={block?.id}
+              accounts={accounts}
+              onChange={(patch) => {
+                if ("accountCode" in patch) setAccountCode(patch.accountCode ?? "");
+                if ("accountLocked" in patch) setAccountLocked(patch.accountLocked ?? true);
+                if ("accountSource" in patch) setAccountSource(patch.accountSource);
+              }}
+            />
 
             {/* Department and account are the two halves of one output key, so
                 this sits directly under the account section. Multiplier only —

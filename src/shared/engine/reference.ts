@@ -80,12 +80,17 @@ function derive(position: Position, calendar: CalendarContext, days: number[]): 
 
   // Per-working-day base pay a vacation/accrual day is valued at. Hourly staff
   // use the raw per-day coeff; monthly staff use the seasonally-normalized rate
-  // twd = 0 only when the position never works (then no vacation is emitted).
+  // over their day basis — flat 30s (1/30 of the month) or, on the hotel's
+  // WORKING_DAYS policy, the calendar's net productive days (twd2), so a day
+  // off is worth monthly salary ÷ that month's working days. Only this price
+  // moves: the salary spread itself stays on `days`. twd = 0 only when the
+  // position never works (then no vacation is emitted).
+  const dayDenominator = calendar.vacationWorkingDays ? twd2 : twd;
   const dayRate =
     position.hourlyRate > 0
       ? position.hourlyRate * position.dailyContractHours
-      : twd > 0
-        ? (position.monthlyBaseSalary * twm) / twd
+      : dayDenominator > 0
+        ? (position.monthlyBaseSalary * twm) / dayDenominator
         : 0;
 
   return { twm, twd, twd2, incMonth, incMul, manualMonthly, dayRate };
@@ -396,6 +401,14 @@ export function referencePosition(
   const gross = grossBaseSalary(position, calendar, days, d);
   const takenDays = vacationDaysTaken(position);
   const vacation = vacationCost(position, d, takenDays);
+  // The base-salary LINE: gross with vacation carved out, or — on the hotel's
+  // additive policy — gross untouched, so the permanent Vacation Cost line
+  // lands on top of it instead of adding it back. Mirror of BASE_DEDUCT being
+  // emitted or not in compile.ts. SS_BASE reads the same series, so a scheme
+  // that includes both base and vacation sees gross + vacation when additive.
+  const baseLine = calendar.vacationAdditive
+    ? gross.slice()
+    : gross.map((value, m) => value - vacation[m]);
 
   const valueByDef = new Map<string, ComponentValue>();
   for (const value of componentValues) {
@@ -442,11 +455,14 @@ export function referencePosition(
       return base;
     }
     if (selector.kind === "SS_BASE") {
-      // The Social-Security base: NET base salary (gross − vacation) and/or the
-      // vacation series and/or other component lines. Ticking both flags sums to
-      // gross. Custom ids are never the base-salary def, so computeLine is safe.
+      // The Social-Security base: the base-salary LINE (net of vacation, or
+      // gross when the hotel books vacation on top) and/or the vacation series
+      // and/or other component lines. Ticking both flags sums to gross on the
+      // carve-out policy and to gross + vacation on the additive one — the
+      // same total the two lines post. Custom ids are never the base-salary
+      // def, so computeLine is safe.
       for (let m = 0; m < MONTHS; m++) {
-        if (selector.includeBaseSalary) base[m] += gross[m] - vacation[m];
+        if (selector.includeBaseSalary) base[m] += baseLine[m];
         if (selector.includeVacation) base[m] += vacation[m];
       }
       for (const id of selector.componentIds) {
@@ -497,7 +513,7 @@ export function referencePosition(
 
     switch (def.kind) {
       case "BASE_SALARY": {
-        out = gross.map((value, m) => value - vacation[m]);
+        out = baseLine.slice();
         break;
       }
       case "HOLIDAY_ACCRUAL": {

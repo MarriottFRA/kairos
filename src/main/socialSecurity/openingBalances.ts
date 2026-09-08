@@ -97,8 +97,10 @@ export async function computeNiOpeningBalances(
     const yearlyCap = scheme.yearlyCap ?? Infinity;
     // The SS base (SS_BASE selector, set by applySocialSecurityBase): the OUTPUT
     // lines to sum are the custom component ids plus, when includeBaseSalary, the
-    // BASE_SALARY def (whose output line is already net of vacation). Vacation has
-    // no output line, so it is added separately below via referenceVacation.
+    // BASE_SALARY def — whose output line is net of vacation, or gross when the
+    // hotel books vacation on top (calendar.vacationAdditive); reading the LINE
+    // means this follows the policy without knowing about it. Vacation has no
+    // output line, so it is added separately below via referenceVacation.
     const base = ssDef.baseSelector;
     const ssBase = base?.kind === "SS_BASE" ? base : undefined;
     const baseSalaryDefId = input.definitions.find((def) => def.kind === "BASE_SALARY")?.id;

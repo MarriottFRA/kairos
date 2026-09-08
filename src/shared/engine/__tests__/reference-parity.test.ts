@@ -10,49 +10,54 @@ import { disassemble } from "../disassemble";
 import { referencePosition } from "../reference";
 import { compile, simulate } from "../simulate";
 import { MONTHS } from "../types";
-import { randomScenario } from "./fixtures";
+import { VACATION_POLICIES, randomScenario, withVacationPolicy } from "./fixtures";
 
 const SEEDS = [1, 42, 20260721];
 
 describe("VM ↔ reference parity", () => {
   for (const seed of SEEDS) {
-    it(`matches the reference bit-for-bit on random scenario (seed ${seed})`, () => {
-      const input = randomScenario(seed, 25);
-      const compiled = compile(input);
-      expect("plan" in compiled).toBe(true);
-      if (!("plan" in compiled)) return;
+    // Every vacation policy a hotel-year can be on: the day-rate denominator
+    // and the carve-out/additive switch each change an emission, so parity
+    // has to hold on all four combinations, not just the default.
+    for (const policy of VACATION_POLICIES) {
+      it(`matches the reference bit-for-bit on random scenario (seed ${seed}, policy ${JSON.stringify(policy)})`, () => {
+        const input = withVacationPolicy(randomScenario(seed, 25), policy);
+        const compiled = compile(input);
+        expect("plan" in compiled).toBe(true);
+        if (!("plan" in compiled)) return;
 
-      const result = simulate(compiled.plan);
+        const result = simulate(compiled.plan);
 
-      for (const position of input.positions) {
-        const reference = referencePosition(
-          position,
-          input.calendar,
-          input.definitions,
-          input.ssSchemes,
-          input.componentValues
-        );
-        const vmLines = result.positionLines(position.id);
-        expect(vmLines.length).toBe(input.definitions.length);
+        for (const position of input.positions) {
+          const reference = referencePosition(
+            position,
+            input.calendar,
+            input.definitions,
+            input.ssSchemes,
+            input.componentValues
+          );
+          const vmLines = result.positionLines(position.id);
+          expect(vmLines.length).toBe(input.definitions.length);
 
-        for (const vmLine of vmLines) {
-          const refMonths = reference.lines.get(vmLine.component.id);
-          expect(refMonths, `reference missing ${vmLine.component.label}`).toBeDefined();
-          for (let m = 0; m < MONTHS; m++) {
-            if (vmLine.months[m] !== refMonths![m]) {
-              throw new Error(
-                [
-                  `parity mismatch: position ${position.id}, component "${vmLine.component.label}", month ${m + 1}`,
-                  `  VM:        ${vmLine.months[m]}`,
-                  `  reference: ${refMonths![m]}`,
-                  disassemble(compiled.plan, position.id),
-                ].join("\n")
-              );
+          for (const vmLine of vmLines) {
+            const refMonths = reference.lines.get(vmLine.component.id);
+            expect(refMonths, `reference missing ${vmLine.component.label}`).toBeDefined();
+            for (let m = 0; m < MONTHS; m++) {
+              if (vmLine.months[m] !== refMonths![m]) {
+                throw new Error(
+                  [
+                    `parity mismatch: position ${position.id}, component "${vmLine.component.label}", month ${m + 1}`,
+                    `  VM:        ${vmLine.months[m]}`,
+                    `  reference: ${refMonths![m]}`,
+                    disassemble(compiled.plan, position.id),
+                  ].join("\n")
+                );
+              }
             }
           }
         }
-      }
-    });
+      });
+    }
   }
 
   it("keeps aggregates equal to the sum of reference lines (seed 7)", () => {

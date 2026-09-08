@@ -413,6 +413,29 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
     },
     NOW
   );
+  // Two blocks whose ACCOUNT follows something else — nothing on the follower
+  // says where it posts, so the dept×account key only lands if BOTH loaders
+  // run applyAccountLinks, after applyPositionAccounts. One follows the
+  // unlocked Meals block (row for row: pos-1's 517999 override, pos-2's
+  // default), one follows each row's Salary account column (pos-1 has one,
+  // pos-2 left it blank → calculation only).
+  const mealsLevyId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "FLAT_MONTHLY", label: "Meals Levy", accountCode: "", accountLocked: false,
+      accountSource: { kind: "BLOCK", blockId: countRateId },
+    },
+    NOW
+  );
+  const salaryNiId = saveBlock(
+    structureDb, SCOPE,
+    {
+      blockType: "MULTIPLIER", label: "Salary NI", accountCode: "", accountLocked: true,
+      base: { kind: "BASE_SALARY" },
+      accountSource: { kind: "POSITION_FIELD", field: "salary" },
+    },
+    NOW
+  );
 
   const blocks = listBlocks(structureDb, SCOPE);
   const lookup = buildFieldMap(getFieldCatalog(structureDb, SCOPE));
@@ -515,6 +538,11 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
         // The pool share weight rides the rate slot: pos-2 takes a double share
         // of the service charge, pos-1 is deliberately out (no row at all).
         { positionId: "pos-2", componentDefId: `${poolManualId}:cost`, fields: { rate: 2 } },
+        // The followers carry values only — never an account of their own.
+        { positionId: "pos-1", componentDefId: `${mealsLevyId}:cost`, fields: { yearlyValue: 60 } },
+        { positionId: "pos-2", componentDefId: `${mealsLevyId}:cost`, fields: { yearlyValue: 36 } },
+        { positionId: "pos-1", componentDefId: `${salaryNiId}:cost`, fields: { rate: 0.12 } },
+        { positionId: "pos-2", componentDefId: `${salaryNiId}:cost`, fields: { rate: 0.12 } },
       ],
     },
     lookup,
@@ -596,8 +624,8 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
       comparedLines++;
     }
   }
-  // 24 blocks + 2 dual stat lines, × 2 positions.
-  expect(comparedLines).toBe(52);
+  // 26 blocks + 2 dual stat lines, × 2 positions.
+  expect(comparedLines).toBe(56);
 
   // Teeth for the weekday blocks — two identical zero lines would also
   // "match". pos-1's Friday fixture books amount × Friday-count in January
@@ -766,6 +794,31 @@ it("live sim matches loadScenarioInput → simulate bit-for-bit on every block t
   expect(aggKeys).toContain("0410|517999"); // pos-1's override
   expect(aggKeys).toContain("1310|517000"); // pos-2 on the default
   expect(aggKeys).toContain("0410|988200"); // stat line on the locked stats account
+
+  // The followers book to their SOURCE's key — and both structures agree on
+  // it. Months alone cannot catch a loader that skipped applyAccountLinks,
+  // because an account only moves the aggregation key, never a value.
+  const bookedTo = (
+    structure: { positionIds: readonly unknown[]; componentDefs: readonly { id: unknown }[]; lineAggRow: ArrayLike<number>; aggKeys: readonly { dept: string; account: string }[] },
+    positionId: string,
+    defId: string
+  ) => {
+    const p = structure.positionIds.findIndex((id) => (id as string) === positionId);
+    const di = structure.componentDefs.findIndex((def) => (def.id as string) === defId);
+    const key = structure.aggKeys[structure.lineAggRow[p * structure.componentDefs.length + di]];
+    return `${key.dept}|${key.account}`;
+  };
+  for (const structure of [compiled.plan, cache.entry!.structure]) {
+    // Row for row off the unlocked Meals block.
+    expect(bookedTo(structure, "pos-1", `${mealsLevyId}:cost`)).toBe("0410|517999");
+    expect(bookedTo(structure, "pos-2", `${mealsLevyId}:cost`)).toBe("1310|517000");
+    // Wherever each row's salary posts: pos-1's A511000, pos-2's blank.
+    expect(bookedTo(structure, "pos-1", `${salaryNiId}:cost`)).toBe("0410|A511000");
+    expect(bookedTo(structure, "pos-2", `${salaryNiId}:cost`)).toBe("1310|");
+  }
+  // And the values are real, so the keys above carry money, not zeros.
+  expect(live.results.get("pos-1")!.get(`${salaryNiId}:cost`)!.total).toBeGreaterThan(0);
+  expect(live.results.get("pos-2")!.get(`${mealsLevyId}:cost`)!.total).toBeGreaterThan(0);
 
   // Sanity on the semantics, not just parity: Uniforms (pos-1) = 120/month ×
   // seasonality × headcount 2, merit ×1.06 from July; total working months

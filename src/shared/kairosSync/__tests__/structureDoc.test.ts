@@ -432,12 +432,16 @@ describe("child ordering", () => {
         bank_holiday_applies_to: "ALL",
         bank_holiday_paid_when_not_worked: 1,
         bank_holiday_coverage_json: '{"1010":0.95,"1910":0}',
+        vacation_day_basis: "WORKING_DAYS",
+        vacation_additive: 1,
         updated_at: "then",
       },
       []
     );
     // Parsed, not passed through as a string, so the document hashes on values.
     expect(doc.bankHolidayCoverageByDepartment).toEqual({ "1010": 0.95, "1910": 0 });
+    expect(doc.vacationDayBasis).toBe("WORKING_DAYS");
+    expect(doc.vacationAdditive).toBe(true);
 
     const { year } = calendarFromDoc(doc);
     expect(year.bank_holiday_applies_to).toBe("ALL");
@@ -448,6 +452,9 @@ describe("child ordering", () => {
     });
     expect(year.bank_holiday_staff_fraction).toBe(0.7);
     expect(year.bank_holiday_premium_multiplier).toBe(1.5);
+    // The v5 vacation policy rides the same hop.
+    expect(year.vacation_day_basis).toBe("WORKING_DAYS");
+    expect(year.vacation_additive).toBe(1);
   });
 
   it("reads a calendar from a client that predates the v4 knobs", () => {
@@ -469,6 +476,10 @@ describe("child ordering", () => {
     expect(year.bank_holiday_coverage_json).toBe("{}");
     // And the hotel's own saved fraction is untouched by the new 0.7 default.
     expect(year.bank_holiday_staff_fraction).toBe(0.5);
+    // A pre-v5 document lands on the flat / carve-out vacation policy — the
+    // engine's historical behaviour — never on undefined.
+    expect(year.vacation_day_basis).toBe("FLAT");
+    expect(year.vacation_additive).toBe(0);
   });
 
   it("orders SS brackets by their ladder index", () => {

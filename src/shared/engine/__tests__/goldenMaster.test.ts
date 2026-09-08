@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { makeCalendarContext } from "../calendarContext";
 import { compile, simulate } from "../simulate";
 import { MONTHS, SsSchemeId } from "../types";
 import {
@@ -182,6 +183,102 @@ describe("golden master 2 — hourly seasonal with mid-year increase, vacation a
       months(lines, "pension"),
       [0, 0, 0, 90, 90, 90, 100.5, 100.5, 100.5, 100.5, 100.5, 100.5]
     );
+  });
+});
+
+describe("golden master 2b — the hotel-year vacation policy", () => {
+  // One salaried position, full year, 20 working days every month, 12 days'
+  // leave all taken in August, no increase. Salary 3000/month → gross 3000
+  // every month on the flat 30/360 spread whatever the policy does.
+  //
+  //   FLAT day rate:          3000 × 12 / (30 × 12) = 100  → Aug vacation 1200
+  //   WORKING_DAYS day rate:  3000 × 12 / (20 × 12) = 150  → Aug vacation 1800
+  //
+  // The spread itself never moves — only what a day off is worth.
+  const definitions = [
+    makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+    makeDef({
+      id: "vacation",
+      spreadMethod: "PERCENT_OF",
+      accountCode: "612000",
+      baseSelector: { kind: "VACATION" },
+    }),
+    makeDef({ id: "accrual", kind: "HOLIDAY_ACCRUAL", accountCode: "611000" }),
+    makeDef({
+      id: "ss",
+      kind: "SOCIAL_SECURITY",
+      accountCode: "630000",
+      ssSchemeId: "sch" as SsSchemeId,
+      baseSelector: {
+        kind: "SS_BASE",
+        includeBaseSalary: true,
+        includeVacation: true,
+        componentIds: [],
+      },
+    }),
+  ];
+  const scheme = makeScheme({ id: "sch", brackets: [{ upTo: null, rate: 0.1 }] });
+  const weights = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+  const position = () =>
+    makePosition({ id: "p1", monthlyBaseSalary: 3000, vacationDays: 12, vacationMonthlyWeights: weights, accrualDaysPerMonth: 1 });
+  const values = [makeValue("p1", "vacation", { rate: 1 })];
+  const flat = (value: number) => new Array(MONTHS).fill(value);
+  const augOnly = (value: number) => flat(0).map((_, m) => (m === 7 ? value : 0));
+
+  function run(policy: { vacationWorkingDays?: boolean; vacationAdditive?: boolean }) {
+    const input = makeInput({
+      definitions,
+      ssSchemes: [scheme],
+      positions: [position()],
+      componentValues: values,
+      calendar: makeCalendarContext(flat(20), undefined, 2026, policy),
+    });
+    const compiled = compile(input);
+    if (!("plan" in compiled)) throw new Error("compile failed");
+    return simulate(compiled.plan).positionLines(posId("p1"));
+  }
+
+  it("prices a day at salary ÷ working days on the WORKING_DAYS basis", () => {
+    const lines = run({ vacationWorkingDays: true });
+    // Base line = 3000 − vacation; Aug = 3000 − 1800.
+    expectMonths(months(lines, "base"), flat(3000).map((v, m) => (m === 7 ? v - 1800 : v)));
+    expectMonths(months(lines, "vacation"), augOnly(1800));
+    // Accrual at the 150 rate: earn 1 day/month = 150, release 12 in Aug:
+    //   Jan–Jul +150, Aug 150 − 1800 = −1650, Sep–Dec +150; sums to zero.
+    const accrual = months(lines, "accrual");
+    expectMonths(accrual, flat(150).map((v, m) => (m === 7 ? v - 1800 : v)));
+    expect(accrual.reduce((a, b) => a + b, 0)).toBeCloseTo(0, 9);
+    // SS on (base + vacation) = gross 3000 → 300 every month, Aug included.
+    expectMonths(months(lines, "ss"), flat(300));
+  });
+
+  it("keeps the flat 1/30 day and the carve-out on the default policy", () => {
+    const lines = run({});
+    expectMonths(months(lines, "base"), flat(3000).map((v, m) => (m === 7 ? v - 1200 : v)));
+    expectMonths(months(lines, "vacation"), augOnly(1200));
+    expectMonths(months(lines, "ss"), flat(300));
+  });
+
+  it("books vacation ON TOP of the base line when additive", () => {
+    const lines = run({ vacationAdditive: true });
+    // Base line stays gross; Vacation Cost is unchanged; the year now totals
+    // 36000 + 1200 instead of 36000.
+    expectMonths(months(lines, "base"), flat(3000));
+    expectMonths(months(lines, "vacation"), augOnly(1200));
+    // SS "base salary + vacation" is now gross + vacation: Aug = 4200 → 420.
+    expectMonths(months(lines, "ss"), flat(300).map((v, m) => (m === 7 ? 420 : v)));
+    // The accrual is a timing line over the same days at the same rate, so it
+    // is byte-identical to the carve-out run and still nets to zero.
+    const accrual = months(lines, "accrual");
+    expectMonths(accrual, flat(100).map((v, m) => (m === 7 ? v - 1200 : v)));
+    expect(accrual.reduce((a, b) => a + b, 0)).toBeCloseTo(0, 9);
+  });
+
+  it("combines both switches independently", () => {
+    const lines = run({ vacationWorkingDays: true, vacationAdditive: true });
+    expectMonths(months(lines, "base"), flat(3000));
+    expectMonths(months(lines, "vacation"), augOnly(1800));
+    expectMonths(months(lines, "ss"), flat(300).map((v, m) => (m === 7 ? 480 : v)));
   });
 });
 

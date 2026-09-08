@@ -24,6 +24,7 @@ const ALLOWED_CHANNEL_PREFIXES = [
   "hotelCopy:",
   "socialSecurity:",
   "allocations:",
+  "reports:",
   "kairosSync:",
   "settings-",
   "settings:",

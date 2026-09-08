@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelCopyHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelCopyHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers, createReportsHandlers } from "./handlers";
 import { createAuthDebugHandlers } from "./handlers/authDebug"; // [AUTH-DEBUG]
 import { KAIROS_SYNC_CHANNELS } from "../shared/kairosSync/ipc";
 import {
@@ -131,6 +131,13 @@ export function initializeIpc(deps: {
   // any file whose own OU or budget year disagrees with the selection.
   const bstPushHandlers = createBstPushHandlers();
   Object.entries(bstPushHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register report handlers (evaluate a built-in definition over the results
+  // cache + mapping tables + budget import). OU-gated like the Results page.
+  const reportsHandlers = createReportsHandlers();
+  Object.entries(reportsHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 

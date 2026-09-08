@@ -35,7 +35,9 @@
 
 import type Database from "better-sqlite3-multiple-ciphers";
 import {
+  BlockAccountSource,
   BlockBaseRef,
+  normalizeAccountSource,
   BlockInput,
   BlockType,
 } from "../../shared/blocks/ipc";
@@ -223,10 +225,25 @@ export function copyHotelSetup(
   const referencedBlockIds = (row: Row): string[] => {
     const config = configOf(row);
     const rules = config.rateRules as RateRulesConfig | undefined;
+    const accountSource = normalizeAccountSource(config.accountSource);
     return [
       ...baseBlockIds(config.base as BlockBaseRef | undefined),
       ...(rules ? rateRulesBlockIds(rules) : []),
+      // An account link is a posting-key reference, not a base — but the
+      // followed block still has to exist before the follower is saved.
+      ...(accountSource?.kind === "BLOCK" ? [accountSource.blockId] : []),
     ];
+  };
+
+  // A followed block that did not make the trip (it is outside the copy, or
+  // failed) leaves the follower on its snapshot literal rather than a dangling
+  // link — the same "keep posting somewhere sensible" an older client gets.
+  const remapAccountSource = (raw: unknown): BlockAccountSource | undefined => {
+    const source = normalizeAccountSource(raw);
+    if (!source) return undefined;
+    if (source.kind === "POSITION_FIELD") return source;
+    const mapped = blockIds.get(source.blockId);
+    return mapped ? { kind: "BLOCK", blockId: mapped } : undefined;
   };
 
   // The stored config blob and BlockInput share their field names by
@@ -243,6 +260,7 @@ export function copyHotelSetup(
       label: uniqueBlockLabel(db, target, String(row.label)),
       base: remapBase(config.base as BlockBaseRef | undefined),
       rateRules: remapRules(config.rateRules as RateRulesConfig | undefined),
+      accountSource: remapAccountSource(config.accountSource),
       ssSchemeId: mapScheme(config.ssSchemeId),
       poolKpiDriverId: mapDriver(config.poolKpiDriverId),
     } as BlockInput;

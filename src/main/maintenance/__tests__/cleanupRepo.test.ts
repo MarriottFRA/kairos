@@ -19,6 +19,12 @@ import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
 import { MANUAL_INPUT_TABLES_SQL } from "../../manualInput/schema";
 import { purgeScenario, purgeSoftDeleted, scanSoftDeleted } from "../cleanupRepo";
+import { resolveOuScope } from "../../positions/ouScope";
+import { OutputLineWrite, writeRun } from "../../positions/outputsRepo";
+import {
+  readResultsCache,
+  readResultsCacheStamp,
+} from "../../positions/resultsCache";
 
 type Db = InstanceType<typeof Database>;
 
@@ -456,6 +462,142 @@ describe("scanSoftDeleted", () => {
 
     const scan = scanSoftDeleted(local, secure);
     expect(Object.values(scan).every((value) => value === 0)).toBe(true);
+  });
+});
+
+/**
+ * The results cache is the aggregate of a plan's lines, written beside them.
+ * A purge that thins the lines out (a position, a definition) must leave the
+ * cache saying exactly what the surviving lines say; a purge that takes the
+ * plan takes the cache; a dry run touches neither.
+ */
+describe("results cache upkeep", () => {
+  const SCOPE = resolveOuScope(OU);
+  const REBUILT_AT = "2026-07-28T00:00:00.000Z";
+
+  const line = (
+    positionId: string,
+    defId: string,
+    perMonth: number
+  ): OutputLineWrite => ({
+    positionId,
+    componentDefId: defId,
+    label: defId,
+    dept: "D0410",
+    account: "A511000",
+    months: new Array(12).fill(perMonth),
+    total: perMonth * 12,
+    source: "ENGINE",
+    sourceRef: positionId,
+  });
+
+  /** A run whose lines came from two positions on two blocks. Position ids
+   *  are unique across plans in practice, so a second plan seeds its own. */
+  function seedRun(scenarioId: string, a = "pos-a", b = "pos-b") {
+    writeRun(
+      secure,
+      SCOPE,
+      scenarioId,
+      { fingerprint: "fp", computedAt: NOW, positionCount: 2, year: 2026 },
+      [
+        line(a, "def-keep", 100),
+        line(a, "def-gone", 10),
+        line(b, "def-keep", 1),
+      ]
+    );
+  }
+
+  it("rebuilds a surviving plan's cache when a purged definition thins its lines", () => {
+    addScenario("plan-live");
+    addPosition("pos-a", "plan-live");
+    addPosition("pos-b", "plan-live");
+    addDefinition("def-keep");
+    addDefinition("def-gone", GONE);
+    seedRun("plan-live");
+    expect(readResultsCache(secure, SCOPE, "plan-live")[0].total).toBe(111 * 12);
+
+    purgeSoftDeleted(local, secure, { now: REBUILT_AT });
+
+    const rows = readResultsCache(secure, SCOPE, "plan-live");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].total).toBe(101 * 12);
+    expect(rows[0].blockLabels).toEqual(["def-keep"]);
+    expect(readResultsCacheStamp(secure, SCOPE, "plan-live").writtenAt).toBe(REBUILT_AT);
+  });
+
+  it("rebuilds when a purged position thins the lines", () => {
+    addScenario("plan-live");
+    addPosition("pos-a", "plan-live");
+    addPosition("pos-b", "plan-live", GONE);
+    addDefinition("def-keep");
+    addDefinition("def-gone");
+    seedRun("plan-live");
+
+    purgeSoftDeleted(local, secure, { now: REBUILT_AT });
+
+    const rows = readResultsCache(secure, SCOPE, "plan-live");
+    expect(rows[0].total).toBe(110 * 12);
+    expect(rows[0].blockLabels).toEqual(["def-keep", "def-gone"]);
+  });
+
+  it("leaves a plan whose lines were not touched exactly as written", () => {
+    addScenario("plan-live");
+    addPosition("pos-a", "plan-live");
+    addPosition("pos-b", "plan-live");
+    addDefinition("def-keep");
+    addDefinition("def-gone");
+    addField("goneCol", GONE);
+    seedRun("plan-live");
+
+    purgeSoftDeleted(local, secure, { now: REBUILT_AT });
+
+    expect(readResultsCacheStamp(secure, SCOPE, "plan-live")).toEqual({
+      count: 1,
+      writtenAt: NOW,
+    });
+  });
+
+  it("takes a purged plan's cache with it, and nobody else's", () => {
+    addScenario("plan-gone", GONE);
+    addScenario("plan-live");
+    addPosition("pos-a", "plan-gone");
+    addPosition("pos-b", "plan-gone");
+    addPosition("pos-c", "plan-live");
+    addPosition("pos-d", "plan-live");
+    seedRun("plan-gone");
+    seedRun("plan-live", "pos-c", "pos-d");
+
+    purgeSoftDeleted(local, secure);
+
+    expect(count(secure, "results_cache", "scenario_id = 'plan-gone'")).toBe(0);
+    expect(count(secure, "results_cache", "scenario_id = 'plan-live'")).toBe(1);
+  });
+
+  it("purgeScenario drops the cache with the plan", () => {
+    addScenario("plan-gone");
+    addPosition("pos-a", "plan-gone");
+    seedRun("plan-gone");
+
+    purgeScenario(local, secure, { id: "plan-gone", ou: OU });
+
+    expect(count(secure, "results_cache")).toBe(0);
+    expect(count(secure, "engine_output_lines")).toBe(0);
+  });
+
+  it("a dry run leaves the cache intact", () => {
+    addScenario("plan-live");
+    addPosition("pos-a", "plan-live");
+    addPosition("pos-b", "plan-live", GONE);
+    addDefinition("def-keep");
+    addDefinition("def-gone", GONE);
+    seedRun("plan-live");
+
+    const scan = scanSoftDeleted(local, secure);
+
+    expect(scan.engineOutputLines).toBe(2);
+    expect(readResultsCache(secure, SCOPE, "plan-live")[0].total).toBe(111 * 12);
+    expect(readResultsCacheStamp(secure, SCOPE, "plan-live").writtenAt).toBe(NOW);
+    expect(count(secure, "engine_output_lines")).toBe(3);
   });
 });
 

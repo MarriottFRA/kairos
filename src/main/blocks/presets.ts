@@ -23,6 +23,7 @@
 import type Database from "better-sqlite3-multiple-ciphers";
 import {
   findBlockPreset,
+  resolvePresetAccountSource,
   resolvePresetRefs,
 } from "../../shared/blocks/presets";
 import { OuScope } from "../positions/ouScope";
@@ -77,6 +78,7 @@ export function applyBlockPreset(
           ...step.block,
           label: uniqueBlockLabel(db, scope, step.block.label),
           base: resolvePresetRefs(step.block.base, idByKey),
+          accountSource: resolvePresetAccountSource(step.block.accountSource, idByKey),
         },
         opts
       );

@@ -80,3 +80,43 @@ export function applyBankHolidayV4(handle: Db): void {
     );
   }
 }
+
+/**
+ * Migration v5 — the vacation policy for a hotel-year: what a vacation day is
+ * worth for salaried staff (flat 1/30 of the month, or the month's working
+ * days) and whether vacation is carved out of salary or booked on top of it.
+ * Both defaults reproduce exactly what the engine did before, so an upgraded
+ * store's numbers do not move.
+ *
+ * Column-guarded ALTERs, applied from the baseline AND from MIGRATIONS — the
+ * same dual-write as v4, for the same column-order reason.
+ */
+export function applyVacationPolicyV5(handle: Db): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(calendar_years)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // calendar tables not created yet
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("vacation_day_basis")) {
+    handle.exec(
+      `ALTER TABLE calendar_years ADD COLUMN vacation_day_basis TEXT NOT NULL DEFAULT 'FLAT'`
+    );
+  }
+  if (!present.has("vacation_additive")) {
+    handle.exec(
+      `ALTER TABLE calendar_years ADD COLUMN vacation_additive INTEGER NOT NULL DEFAULT 0`
+    );
+  }
+}
+
+/**
+ * Every guarded column calendar_years needs beyond its CREATE TABLE, in the
+ * order the migrations added them — the applyStructureColumns discipline, so
+ * that the app's baseline and every test build the SAME store rather than a
+ * half-shaped one that is missing whichever column was added last.
+ */
+export function applyCalendarColumns(handle: Db): void {
+  applyBankHolidayV4(handle);
+  applyVacationPolicyV5(handle);
+}

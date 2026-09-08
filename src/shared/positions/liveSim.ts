@@ -34,6 +34,7 @@ import {
   SocialSecurityScheme,
 } from "../engine/types";
 import {
+  applyAccountLinks,
   applyPositionAccounts,
   applyPinnedRowRates,
   applyRateRules,
@@ -314,19 +315,27 @@ export function runLiveSim(args: {
   // output rows. What matters here is the vacation-cost head's rate: without it
   // a block using vacation cost as its base would show 0 in the grid while the
   // persisted run showed the real figure.
-  const valuesWithAccounts = applyPositionAccounts(
+  // ... and the blocks whose account follows another block or one of those
+  // columns, after them for the same reason (mirror of loadScenarioInput).
+  const valuesWithAccounts = applyAccountLinks(
     args.ou,
-    pooledValues,
-    new Map(
-      rows
-        .filter((row) => row.active !== false)
-        .map(
-          (row) =>
-            [
-              row.id,
-              readPositionAccounts(row, String(row.jobTypeCode ?? "")),
-            ] as const
-        )
+    defs,
+    blocks,
+    positions,
+    applyPositionAccounts(
+      args.ou,
+      pooledValues,
+      new Map(
+        rows
+          .filter((row) => row.active !== false)
+          .map(
+            (row) =>
+              [
+                row.id,
+                readPositionAccounts(row, String(row.jobTypeCode ?? "")),
+              ] as const
+          )
+      )
     )
   );
 

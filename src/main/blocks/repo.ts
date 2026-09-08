@@ -22,8 +22,10 @@ import { uuidv7 } from "../../shared/engine/ids";
 import type { BaseSelector, ComponentDefId } from "../../shared/engine/types";
 import {
   BLOCK_TYPES,
+  BlockAccountSource,
   BlockBaseRef,
   BLOCK_COMBINE_OPS,
+  normalizeAccountSource,
   BlockDepartmentMode,
   BlockDto,
   BlockInput,
@@ -66,10 +68,18 @@ type Db = InstanceType<typeof Database>;
 
 /** Type-specific config persisted as block_configs.config JSON. */
 interface StoredConfig {
+  /** A typed account — or, while `accountSource` is set, a SNAPSHOT of the
+   *  followed account stamped at save (so an older client that ignores the
+   *  source still posts somewhere sensible). The loaders re-resolve every run;
+   *  the snapshot is a courtesy, never the truth. */
   accountCode: string;
+  /** Forced true while `accountSource` is set: the source decides per row. */
   accountLocked: boolean;
   statsAccountCode: string;
   statsAccountLocked: boolean;
+  /** Follow another block's account or a position column — see
+   *  BlockAccountSource. Absent = `accountCode` is typed here. */
+  accountSource?: BlockAccountSource;
   base?: BlockBaseRef;
   /** MULTIPLIER + COMBINE base, or with movement — see BlockInput.useRowRate. */
   useRowRate?: boolean;
@@ -184,15 +194,20 @@ interface BlockRow {
 function rowToDto(row: BlockRow): BlockDto {
   const config = JSON.parse(row.config || "{}") as Partial<StoredConfig>;
   const blockType = row.block_type as BlockType;
+  // Shape-normalized on read like every other key; a source also forces the
+  // lock, so a hand-edited blob cannot show a per-row column the loaders
+  // would then ignore.
+  const accountSource = normalizeAccountSource(config.accountSource);
   return {
     id: row.id,
     ou: row.ou,
     blockType,
     label: row.label,
     accountCode: config.accountCode ?? "",
-    accountLocked: config.accountLocked ?? true,
+    accountLocked: accountSource ? true : config.accountLocked ?? true,
     statsAccountCode: config.statsAccountCode ?? "",
     statsAccountLocked: config.statsAccountLocked ?? true,
+    ...(accountSource ? { accountSource } : {}),
     base: config.base,
     // Normalize-on-read (the normPoolAmounts discipline): a synced or
     // hand-edited blob must not crash the grid, and a malformed rule must not
@@ -623,6 +638,82 @@ function validateInput(db: Db, scope: OuScope, input: BlockInput): void {
       "Only a Multiplier block can let each row choose its own department."
     );
   }
+
+  // Account links: depth one, in both directions. The block followed must
+  // carry a typed account (not a source of its own), and a block that is
+  // itself followed may not start following — between them no chain and no
+  // cycle can be saved locally; a synced blob that breaks the rule degrades
+  // to "no account" in applyAccountLinks rather than looping.
+  const accountSource = normalizeAccountSource(input.accountSource);
+  if (input.accountSource && !accountSource) {
+    throw new Error("Choose what the account should follow.");
+  }
+  if (accountSource?.kind === "BLOCK") {
+    if (accountSource.blockId === input.id) {
+      throw new Error("A block cannot follow its own account.");
+    }
+    const target = readStoredBlock(db, scope, accountSource.blockId);
+    if (!target) {
+      throw new Error("The block this follows no longer exists — pick an account.");
+    }
+    if (normalizeAccountSource(target.config.accountSource)) {
+      throw new Error(
+        `${target.label} already follows another block's account — follow that block directly instead.`
+      );
+    }
+  }
+  if (accountSource && input.id) {
+    const followers = followerBlockLabels(db, scope, input.id);
+    if (followers.length > 0) {
+      throw new Error(
+        `This block's account is followed by: ${followers.join(", ")}. Unfollow those first.`
+      );
+    }
+  }
+}
+
+/** A live block's label and parsed config blob, or undefined. */
+function readStoredBlock(
+  db: Db,
+  scope: OuScope,
+  blockId: string
+): { label: string; config: Partial<StoredConfig> } | undefined {
+  const row = prepared(
+    db,
+    `SELECT label, config FROM block_configs
+      WHERE id = ? AND ou = ? AND deleted_at IS NULL`
+  ).get(blockId, scope.ou) as { label: string; config: string } | undefined;
+  if (!row) return undefined;
+  return { label: row.label, config: JSON.parse(row.config || "{}") as Partial<StoredConfig> };
+}
+
+/** The literal a follower's `accountCode` is stamped with at save: the
+ *  followed block's typed account, or blank for a position column (the row
+ *  supplies it). */
+function snapshotAccountFor(db: Db, scope: OuScope, source: BlockAccountSource): string {
+  if (source.kind !== "BLOCK") return "";
+  return readStoredBlock(db, scope, source.blockId)?.config.accountCode ?? "";
+}
+
+/**
+ * Blocks (labels) whose ACCOUNT follows this block. A config scan over the
+ * OU's live blocks — the link lives only in the blob, deliberately not in
+ * component_base_refs (it is a posting-key reference, not a base).
+ */
+export function followerBlockLabels(db: Db, scope: OuScope, blockId: string): string[] {
+  const rows = prepared(
+    db,
+    `SELECT label, config FROM block_configs
+      WHERE ou = ? AND deleted_at IS NULL AND id != ?`
+  ).all(scope.ou, blockId) as Array<{ label: string; config: string }>;
+  const labels: string[] = [];
+  for (const row of rows) {
+    const source = normalizeAccountSource(
+      (JSON.parse(row.config || "{}") as Partial<StoredConfig>).accountSource
+    );
+    if (source?.kind === "BLOCK" && source.blockId === blockId) labels.push(row.label);
+  }
+  return labels;
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,11 +1110,18 @@ export function saveBlock(
 
   const id = existing?.id ?? uuidv7();
   const sortOrder = existing?.sort_order ?? nextBlockSortOrder(db, scope);
+  const accountSource = normalizeAccountSource(input.accountSource);
   const config: StoredConfig = {
-    accountCode: input.accountCode ?? "",
-    accountLocked: input.accountLocked ?? true,
+    // While following, the typed account is replaced by a snapshot of the
+    // followed one (validateInput has already checked the target exists and
+    // carries a typed account) and the lock is forced on. See StoredConfig.
+    accountCode: accountSource
+      ? snapshotAccountFor(db, scope, accountSource)
+      : input.accountCode ?? "",
+    accountLocked: accountSource ? true : input.accountLocked ?? true,
     statsAccountCode: input.statsAccountCode ?? "",
     statsAccountLocked: input.statsAccountLocked ?? true,
+    ...(accountSource ? { accountSource } : {}),
     base: input.base,
     ...(input.base?.kind === "COMBINE"
       ? {
@@ -1081,7 +1179,13 @@ export function saveBlock(
         }
       : {}),
   };
-  const defs = compileBlockDefs(id, scope.ou, input);
+  // The projection reads the STORED account, so a follower's definition
+  // carries the snapshot rather than the blank the dialog sent.
+  const defs = compileBlockDefs(id, scope.ou, {
+    ...input,
+    accountCode: config.accountCode,
+    accountLocked: config.accountLocked,
+  });
 
   db.transaction(() => {
     if (input.blockType === "MULTIPLIER" && input.base) {
@@ -1236,10 +1340,23 @@ export function deleteBlock(
   opts: { now: string }
 ): void {
   const referencedBy = referencingBlockLabels(db, scope, blockId);
-  if (referencedBy.length > 0) {
+  const followedBy = followerBlockLabels(db, scope, blockId);
+  if (referencedBy.length > 0 || followedBy.length > 0) {
+    // Refused rather than snapping followers back to a literal: that would
+    // re-route their money with no message, the exact thing the dialogs
+    // guard against everywhere else.
     throw new Error(
-      `This block is used as a base by: ${referencedBy.join(", ")}. ` +
-        `Change those blocks first, then delete this one.`
+      [
+        referencedBy.length > 0
+          ? `This block is used as a base by: ${referencedBy.join(", ")}.`
+          : "",
+        followedBy.length > 0
+          ? `${referencedBy.length > 0 ? "Its" : "This block's"} account is followed by: ${followedBy.join(", ")}.`
+          : "",
+        "Change those blocks first, then delete this one.",
+      ]
+        .filter(Boolean)
+        .join(" ")
     );
   }
   db.transaction(() => {

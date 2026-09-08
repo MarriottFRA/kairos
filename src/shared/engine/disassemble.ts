@@ -8,7 +8,7 @@
  */
 
 import { CompiledPlan } from "./compile";
-import { LINE_NONE, Op, OP_NAMES, OpCode } from "./opcodes";
+import { FLAG_VAC_WORKING_DAYS, LINE_NONE, Op, OP_NAMES, OpCode } from "./opcodes";
 import { COMBINE_OPS, MONTHS, PositionId, SS_MAX_BRACKETS } from "./types";
 
 /** ACC_ADD_DAYS' arg0, indexed — mirrors CALENDAR_SERIES_ARG in types.ts. */
@@ -61,7 +61,9 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         detail = `meritPct=${fmt(pool[pp])} manualYearly=${fmt(pool[pp + 1])} increaseMonth=${fmt(pool[pp + 2])}`;
         break;
       case Op.BASE_SALARY:
-        detail = `monthlyBase=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}`;
+        detail = `monthlyBase=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}${
+          plan.arg0[i] & FLAG_VAC_WORKING_DAYS ? " dayRate=÷workingDays" : ""
+        }`;
         break;
       case Op.BASE_SALARY_HOURLY:
         detail = `coeff=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}`;

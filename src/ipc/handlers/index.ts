@@ -26,6 +26,7 @@ export * from "./maintenance";
 export * from "./app";
 export * from "./window";
 export * from "./positions";
+export * from "./reports";
 
 // You can add more handler modules here as your application grows:
 // export * from "./file-system";

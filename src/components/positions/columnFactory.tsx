@@ -25,6 +25,7 @@ import AddIcon from "@mui/icons-material/Add";
 import LinkIcon from "@mui/icons-material/Link";
 import KeyboardDoubleArrowLeftIcon from "@mui/icons-material/KeyboardDoubleArrowLeft";
 import KeyboardDoubleArrowRightIcon from "@mui/icons-material/KeyboardDoubleArrowRight";
+import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
 import TuneIcon from "@mui/icons-material/Tune";
 import {
   gridColumnVisibilityModelSelector,
@@ -1561,7 +1562,13 @@ function buildColumn(
  * applies, so the band typography is restated here (it lives in PositionsGrid's
  * sx for the plain banners).
  */
-function renderSectionBanner(label: string, onAdd: () => void, onManage?: () => void) {
+function renderSectionBanner(
+  label: string,
+  onAdd?: () => void,
+  onManage?: () => void,
+  /** A settings cog for the section — the Vacation band's hotel-year policy. */
+  settings?: { label: string; onOpen: () => void }
+) {
   // The banner is a header cell; without stopPropagation the grid steals the
   // click for column-group selection and the dialog never opens.
   const swallow = (event: { stopPropagation: () => void }) => event.stopPropagation();
@@ -1590,39 +1597,65 @@ function renderSectionBanner(label: string, onAdd: () => void, onManage?: () => 
       >
         {label}
       </Box>
-      <Tooltip title={`Add a hotel-wide column to ${label}`}>
-        <Button
-          size="small"
-          variant="outlined"
-          color="inherit"
-          startIcon={<AddIcon sx={{ fontSize: 14 }} />}
-          aria-label={`Add a column to ${label}`}
-          onMouseDown={swallow}
-          onClick={(event) => {
-            event.stopPropagation();
-            onAdd();
-          }}
-          sx={{
-            flexShrink: 0,
-            height: 22,
-            px: 0.75,
-            py: 0,
-            minWidth: 0,
-            borderRadius: 1,
-            color: "text.secondary",
-            borderColor: "divider",
-            bgcolor: "background.paper",
-            fontWeight: 700,
-            fontSize: "0.625rem",
-            letterSpacing: "0.06em",
-            lineHeight: 1,
-            whiteSpace: "nowrap",
-            "& .MuiButton-startIcon": { mr: 0.375, ml: 0 },
-          }}
-        >
-          Add column
-        </Button>
-      </Tooltip>
+      {onAdd && (
+        <Tooltip title={`Add a hotel-wide column to ${label}`}>
+          <Button
+            size="small"
+            variant="outlined"
+            color="inherit"
+            startIcon={<AddIcon sx={{ fontSize: 14 }} />}
+            aria-label={`Add a column to ${label}`}
+            onMouseDown={swallow}
+            onClick={(event) => {
+              event.stopPropagation();
+              onAdd();
+            }}
+            sx={{
+              flexShrink: 0,
+              height: 22,
+              px: 0.75,
+              py: 0,
+              minWidth: 0,
+              borderRadius: 1,
+              color: "text.secondary",
+              borderColor: "divider",
+              bgcolor: "background.paper",
+              fontWeight: 700,
+              fontSize: "0.625rem",
+              letterSpacing: "0.06em",
+              lineHeight: 1,
+              whiteSpace: "nowrap",
+              "& .MuiButton-startIcon": { mr: 0.375, ml: 0 },
+            }}
+          >
+            Add column
+          </Button>
+        </Tooltip>
+      )}
+      {settings && (
+        <Tooltip title={settings.label}>
+          <IconButton
+            size="small"
+            aria-label={settings.label}
+            onMouseDown={swallow}
+            onClick={(event) => {
+              event.stopPropagation();
+              settings.onOpen();
+            }}
+            sx={{
+              flexShrink: 0,
+              width: 22,
+              height: 22,
+              color: "text.secondary",
+              border: (theme) => `1px solid ${theme.palette.divider}`,
+              borderRadius: 1,
+              bgcolor: "background.paper",
+            }}
+          >
+            <SettingsOutlinedIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      )}
       {onManage && (
         <Tooltip title="Manage removed columns">
           <IconButton
@@ -1656,31 +1689,44 @@ export function buildColumnGroupingModel(
   /** Sections that accept user-defined columns -> the click handler. */
   onAddField?: (section: SectionId) => void,
   /** Opens the "Recently removed" surface — rendered on addable sections. */
-  onManageFields?: () => void
+  onManageFields?: () => void,
+  /** The cog on the Vacation band — opens the hotel-year vacation policy. */
+  onVacationSettings?: () => void
 ): GridColumnGroupingModel {
   const sections = [...catalog.sections].sort((a, b) => a.order - b.order);
   return sections
-    .map((section) => ({
-      groupId: section.id,
-      headerName: section.label,
-      // Its own class, not the column one: the banner is tinted harder than the
-      // columns it spans so the eye reads section-then-column, not one flat row.
-      headerClassName: `pos-band--${section.id} pos-band`,
-      ...(onAddField && ADDABLE_SECTIONS.has(section.id)
-        ? {
-            renderHeaderGroup: renderSectionBanner(
-              section.label,
-              () => onAddField(section.id),
-              onManageFields
-            ),
-          }
-        : {}),
-      children: catalog.fields
-        .filter((def) => def.section === section.id && def.visible)
-        .map((def) => ({ field: def.key })),
-    }))
+    .map((section) => {
+      const addable = !!onAddField && ADDABLE_SECTIONS.has(section.id);
+      const settings =
+        onVacationSettings && section.id === VACATION_SECTION
+          ? { label: "Vacation settings", onOpen: onVacationSettings }
+          : undefined;
+      return {
+        groupId: section.id,
+        headerName: section.label,
+        // Its own class, not the column one: the banner is tinted harder than the
+        // columns it spans so the eye reads section-then-column, not one flat row.
+        headerClassName: `pos-band--${section.id} pos-band`,
+        ...(addable || settings
+          ? {
+              renderHeaderGroup: renderSectionBanner(
+                section.label,
+                addable ? () => onAddField!(section.id) : undefined,
+                addable ? onManageFields : undefined,
+                settings
+              ),
+            }
+          : {}),
+        children: catalog.fields
+          .filter((def) => def.section === section.id && def.visible)
+          .map((def) => ({ field: def.key })),
+      };
+    })
     .filter((group) => group.children.length > 0);
 }
 
 /** Bands that can grow: adding a column here is a catalog row, nothing more. */
 const ADDABLE_SECTIONS: ReadonlySet<string> = new Set(["pii"]);
+
+/** The band whose cog opens the hotel-year vacation policy dialog. */
+const VACATION_SECTION = "vacation";

@@ -25,7 +25,7 @@ import { StructureDoc, mergeStructureDoc } from "../../../shared/kairosSync/stru
 import { SEED_VERSION } from "../../../shared/positions/fieldSeed";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { BLOCK_CONFIGS_SQL, applyStructureColumns } from "../../blocks/schema";
-import { CALENDAR_TABLES_SQL, applyBankHolidayV4 } from "../../calendar/schema";
+import { CALENDAR_TABLES_SQL, applyCalendarColumns } from "../../calendar/schema";
 import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
 import {
   POSITIONS_STRUCTURE_TABLES_SQL,
@@ -62,7 +62,7 @@ let db: Db;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(CALENDAR_TABLES_SQL);
-  applyBankHolidayV4(db);
+  applyCalendarColumns(db);
   db.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   db.exec(POSITION_DEFAULTS_SQL);
   db.exec(KPI_DRIVERS_SQL);

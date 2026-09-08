@@ -40,6 +40,7 @@ import {
   DEFAULT_BANK_HOLIDAY_APPLIES_TO,
   DEFAULT_BANK_HOLIDAY_PREMIUM_MULTIPLIER,
   DEFAULT_BANK_HOLIDAY_STAFF_FRACTION,
+  DEFAULT_VACATION_DAY_BASIS,
 } from "../calendar";
 import { canonicalJson } from "./canonical";
 import { Row } from "./entityMap";
@@ -502,6 +503,10 @@ export function calendarToDoc(row: Row, monthRows: Row[]): Row {
     // Parsed rather than passed through as TEXT so the document hashes on the
     // map's VALUES — the same reason blockConfigToDoc parses its config blob.
     bankHolidayCoverageByDepartment: parseCoverage(row.bank_holiday_coverage_json),
+    // Vacation policy (v5). Additive keys: a document from before them reads as
+    // the flat / carve-out defaults, and an older client simply ignores them.
+    vacationDayBasis: str(row.vacation_day_basis) || DEFAULT_VACATION_DAY_BASIS,
+    vacationAdditive: bool(row.vacation_additive),
     months: monthRows
       .map((month) => ({
         month: num(month.month),
@@ -539,6 +544,8 @@ export function calendarFromDoc(row: Row): { year: Row; months: Row[] } {
       bank_holiday_coverage_json: JSON.stringify(
         parseCoverage(row.bankHolidayCoverageByDepartment)
       ),
+      vacation_day_basis: str(row.vacationDayBasis) || DEFAULT_VACATION_DAY_BASIS,
+      vacation_additive: bool(row.vacationAdditive) ? 1 : 0,
       updated_at: nullableStr(row.updatedAt) ?? new Date().toISOString(),
     },
     months: monthRows.map((month) => ({

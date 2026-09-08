@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
 import { BLOCK_CONFIGS_SQL, applyStructureColumns } from "../../blocks/schema";
-import { CALENDAR_TABLES_SQL, applyBankHolidayV4 } from "../../calendar/schema";
+import { CALENDAR_TABLES_SQL, applyCalendarColumns } from "../../calendar/schema";
 import { KPI_DRIVERS_SQL } from "../../kpiDrivers/schema";
 import {
   POSITIONS_STRUCTURE_TABLES_SQL,
@@ -54,7 +54,7 @@ let db: Db;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(CALENDAR_TABLES_SQL);
-  applyBankHolidayV4(db);
+  applyCalendarColumns(db);
   db.exec(POSITIONS_STRUCTURE_TABLES_SQL);
   db.exec(POSITION_DEFAULTS_SQL);
   db.exec(KPI_DRIVERS_SQL);
@@ -224,6 +224,20 @@ function seedSourceHotel(): { bonusId: string } {
     },
     NOW
   );
+  // Follows Bonus's account: a posting-key reference that has to be remapped
+  // like a base, and ordered after the block it follows.
+  saveBlock(
+    db,
+    SRC,
+    {
+      blockType: "FLAT_MONTHLY",
+      label: "Bonus Levy",
+      accountCode: "",
+      accountLocked: true,
+      accountSource: { kind: "BLOCK", blockId: bonusId },
+    },
+    NOW
+  );
   // Scheme membership names a block's cost def — the deferred-remap case.
   db.prepare(
     `UPDATE ss_schemes SET base_component_ids = ? WHERE id = 'scheme-src'`
@@ -244,7 +258,7 @@ describe("copyHotelSetup", () => {
 
     const counts = copyHotelSetup(db, TGT, SRC, NOW);
     expect(counts).toEqual({
-      blocks: 7,
+      blocks: 8,
       ssSchemes: 1,
       kpiDrivers: 1,
       allocations: 1,
@@ -262,6 +276,7 @@ describe("copyHotelSetup", () => {
       "Meals",
       "Tips",
       "Charge",
+      "Bonus Levy",
     ]);
     const sourceIds = new Set(listBlocks(db, SRC).map((block) => block.id));
     for (const block of copied) expect(sourceIds.has(block.id)).toBe(false);
@@ -317,6 +332,12 @@ describe("copyHotelSetup", () => {
         .get(blockCostDefId(charge.id), TGT.ou)
     ).toEqual({ movement: 1 });
 
+    // Account link → the copied block, with the snapshot re-stamped there.
+    const bonusLevy = targetBlock("Bonus Levy");
+    expect(bonusLevy.accountSource).toEqual({ kind: "BLOCK", blockId: bonus.id });
+    expect(bonusLevy.accountCode).toBe("510200");
+    expect(bonusLevy.accountLocked).toBe(true);
+
     // Dual-output block keeps both defs, derived from its NEW id.
     const meals = targetBlock("Meals");
     expect(meals.costDefId).toBe(blockCostDefId(meals.id));
@@ -346,7 +367,7 @@ describe("copyHotelSetup", () => {
     ).toEqual({ weekly_hours: 42 });
 
     // The source hotel is untouched.
-    expect(listBlocks(db, SRC)).toHaveLength(7);
+    expect(listBlocks(db, SRC)).toHaveLength(8);
     expect(listBlocks(db, SRC).some((block) => block.id === bonusId)).toBe(true);
     const srcScheme = db
       .prepare(`SELECT ou, base_component_ids FROM ss_schemes WHERE id = 'scheme-src'`)
@@ -399,7 +420,7 @@ describe("copyHotelSetup", () => {
   it("lists only OTHER hotels with live blocks as sources", () => {
     seedSourceHotel();
     expect(listLocalSetupSources(db, TGT)).toEqual([
-      { ou: SRC.ou, blockCount: 7 },
+      { ou: SRC.ou, blockCount: 8 },
     ]);
     // From the source's own point of view there is nothing to copy.
     expect(listLocalSetupSources(db, SRC)).toEqual([]);

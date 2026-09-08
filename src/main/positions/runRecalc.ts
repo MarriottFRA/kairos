@@ -192,6 +192,7 @@ export async function runRecalc(
       fingerprint,
       computedAt: now(),
       positionCount: input.positions.length,
+      year: input.scenario.year,
     },
     allLines
   );

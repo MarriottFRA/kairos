@@ -5,10 +5,13 @@
 
 import { describe, expect, it } from "vitest";
 import { weekdayCounts } from "../../calendar";
+import { referenceVacation } from "../reference";
 import { compile, simulate, recalc } from "../simulate";
 import { MONTHS } from "../types";
 import {
   FIXTURE_YEAR,
+  VACATION_POLICIES,
+  withVacationPolicy,
   makeDef,
   makeInput,
   makePosition,
@@ -87,25 +90,103 @@ describe("conservation invariants", () => {
     // generates all of those, which is why the assertion is fuzzed rather than
     // hand-built: the old 1/12-vs-normalized-weights formula drifted on each of
     // them independently.
+    // ... and under every vacation policy: the working-days day rate moves both
+    // legs identically (they share dayRate), and the additive switch never
+    // touches the accrual at all — so the telescoping survives both.
     for (const seed of [1, 7, 42, 99, 2024]) {
-      const input = randomScenario(seed, 12);
-      const compiled = compile(input);
-      if (!("plan" in compiled)) throw new Error("compile failed");
-      const sim = simulate(compiled.plan);
-      for (const position of input.positions) {
-        const accrual = sim
-          .positionLines(position.id)
-          .find((entry) => (entry.component.id as string) === "def-accrual");
-        if (!accrual) continue;
-        // Scale the tolerance to the line's own size — a position with a 5k
-        // salary and 30 days' leave swings ±10k, so a fixed epsilon would
-        // either be vacuous for big rows or flaky for small ones.
-        let magnitude = 0;
-        for (let m = 0; m < MONTHS; m++) magnitude += Math.abs(accrual.months[m]);
-        expect(
-          Math.abs(sum(accrual.months)),
-          `seed ${seed} ${position.id as string}`
-        ).toBeLessThan(1e-9 * Math.max(magnitude, 1));
+      for (const policy of VACATION_POLICIES) {
+        const input = withVacationPolicy(randomScenario(seed, 12), policy);
+        const compiled = compile(input);
+        if (!("plan" in compiled)) throw new Error("compile failed");
+        const sim = simulate(compiled.plan);
+        for (const position of input.positions) {
+          const accrual = sim
+            .positionLines(position.id)
+            .find((entry) => (entry.component.id as string) === "def-accrual");
+          if (!accrual) continue;
+          // Scale the tolerance to the line's own size — a position with a 5k
+          // salary and 30 days' leave swings ±10k, so a fixed epsilon would
+          // either be vacuous for big rows or flaky for small ones.
+          let magnitude = 0;
+          for (let m = 0; m < MONTHS; m++) magnitude += Math.abs(accrual.months[m]);
+          expect(
+            Math.abs(sum(accrual.months)),
+            `seed ${seed} ${position.id as string} ${JSON.stringify(policy)}`
+          ).toBeLessThan(1e-9 * Math.max(magnitude, 1));
+        }
+      }
+    }
+  });
+
+  it("the vacation policy moves the base line and the vacation series exactly as documented", () => {
+    // Twin scenarios off one seed: the RNG streams are identical, so the only
+    // difference is the calendar policy. Two facts pinned per position:
+    //   WORKING_DAYS  — salaried rows re-price a day at salary ÷ working days;
+    //                   hourly rows (coeff-priced) are untouched.
+    //   additive      — the base line = the carve-out base line + vacation;
+    //                   nothing but the base line moves.
+    for (const seed of [1, 42, 2024]) {
+      const scenario = randomScenario(seed, 16);
+      // Unit headcount and cluster weight, so the lines below are per-person
+      // and compare directly with referenceVacation (which is per unit — the
+      // count × weight post-pass is someone else's invariant).
+      const base = {
+        ...scenario,
+        positions: scenario.positions.map((position) => ({
+          ...position,
+          headcount: 1,
+          hotelClusterWeight: 1,
+        })),
+      };
+      const run = (policy: (typeof VACATION_POLICIES)[number]) => {
+        const compiled = compile(withVacationPolicy(base, policy));
+        if (!("plan" in compiled)) throw new Error("compile failed");
+        return simulate(compiled.plan);
+      };
+      const carveOut = run({});
+      const additive = run({ vacationAdditive: true });
+      const workingDays = run({ vacationWorkingDays: true });
+
+      for (const position of base.positions) {
+        const lineOf = (sim: ReturnType<typeof simulate>, id: string) =>
+          sim.positionLines(position.id).find((entry) => (entry.component.id as string) === id)!
+            .months;
+        const vacation = referenceVacation(position, base.calendar);
+
+        // Additive: base + vacation, month for month; every other line equal.
+        const baseCarve = lineOf(carveOut, "def-base");
+        const baseAdd = lineOf(additive, "def-base");
+        for (let m = 0; m < MONTHS; m++) {
+          expect(baseAdd[m], `seed ${seed} ${position.id as string} m${m}`).toBeCloseTo(
+            baseCarve[m] + vacation[m],
+            8
+          );
+        }
+        // Lines that read the base LINE (SS_BASE, COMPONENTS) legitimately move
+        // with it; the accrual is the canary for everything else — it reads
+        // dayRate and the day series, never the line, so it must be identical.
+        expect(Array.from(lineOf(additive, "def-accrual"))).toEqual(
+          Array.from(lineOf(carveOut, "def-accrual"))
+        );
+
+        // Working days: only salaried (monthly-priced) rows re-price.
+        const vacationWd = referenceVacation(
+          position,
+          withVacationPolicy(base, { vacationWorkingDays: true }).calendar
+        );
+        const hourly = position.hourlyRate > 0;
+        for (let m = 0; m < MONTHS; m++) {
+          if (hourly) expect(vacationWd[m]).toBe(vacation[m]);
+        }
+        // And the VM agrees with the reference on the re-priced base line.
+        const baseWd = lineOf(workingDays, "def-base");
+        const grossM = (m: number) => baseCarve[m] + vacation[m];
+        for (let m = 0; m < MONTHS; m++) {
+          expect(baseWd[m], `wd seed ${seed} ${position.id as string} m${m}`).toBeCloseTo(
+            grossM(m) - vacationWd[m],
+            8
+          );
+        }
       }
     }
   });

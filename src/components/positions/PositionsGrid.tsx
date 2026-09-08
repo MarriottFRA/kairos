@@ -403,6 +403,8 @@ export interface PositionsGridProps {
   onRemoveField: (key: string) => void;
   /** The gear on the banner — opens the "Recently removed" surface. */
   onManageColumns: () => void;
+  /** The cog on the Vacation band — opens the hotel-year vacation policy. */
+  onVacationSettings?: () => void;
   /** The cog on a block band — opens the block's config dialog. */
   onEditBlock: (block: BlockDto) => void;
 }
@@ -546,6 +548,7 @@ function PositionsGrid({
   onAddField,
   onRemoveField,
   onManageColumns,
+  onVacationSettings,
   onEditBlock,
 }: PositionsGridProps) {
   // How many times this component rendered, in dev only (statically eliminated
@@ -850,10 +853,10 @@ function PositionsGrid({
 
   const columnGroupingModel = useMemo(
     () => [
-      ...buildColumnGroupingModel(catalog, onAddField, onManageColumns),
+      ...buildColumnGroupingModel(catalog, onAddField, onManageColumns, onVacationSettings),
       ...buildBlockGroupingEntries(blocks, onEditBlock),
     ],
-    [catalog, onAddField, onManageColumns, blocks, onEditBlock]
+    [catalog, onAddField, onManageColumns, onVacationSettings, blocks, onEditBlock]
   );
 
   // The row-aware half of "can this be edited" (masked PII, the locked basic-

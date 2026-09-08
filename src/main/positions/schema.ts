@@ -267,6 +267,63 @@ export const POSITIONS_VALUE_TABLES_SQL = `
 `;
 
 /**
+ * The dept × account × month cache of a run (secure v8).
+ *
+ * One row per canonical dept × account combo of a scenario, with the twelve
+ * months as REAL columns rather than a JSON array: every consumer — the Results
+ * page, the BST push and the report engine — wants all twelve at once, and a
+ * wide row is one read per combo with nothing to pivot. It is written in the
+ * SAME transaction as the lines it summarises (see writeRun), so it can never
+ * disagree with them; the lines stay the drill-down grain, this is the read.
+ *
+ * The codes are stored canonical ("D0410" / "A988112") — the lines hold whatever
+ * spelling their source wrote and the aggregation merges the spellings, exactly
+ * as the Results page always did at read time.
+ *
+ * `encoding` says how to READ the twelve numbers: AMOUNT rows are monthly
+ * amounts; LEVEL rows are a level-valued statistic stored as January-plus-changes
+ * (the BST's running-sum contract, see toMonthlyDeltas) whose month-m level is
+ * the sum of months 1..m; MIXED means both kinds of line landed on one combo.
+ *
+ * `written_at` is the memo key for anything holding these rows in memory. It is
+ * stamped by the run AND by a cache rebuild (cleanupRepo), which is why it is
+ * here and not on engine_runs — that row syncs as an entity and must not change.
+ *
+ * Not synced, like the lines: a recipient's own recalculation reproduces it.
+ */
+export const RESULTS_CACHE_SQL = `
+  CREATE TABLE IF NOT EXISTS results_cache (
+      ou           TEXT NOT NULL,
+      scenario_id  TEXT NOT NULL,
+      dept         TEXT NOT NULL,
+      account      TEXT NOT NULL,
+      year         INTEGER NOT NULL,
+      m01 REAL NOT NULL DEFAULT 0,
+      m02 REAL NOT NULL DEFAULT 0,
+      m03 REAL NOT NULL DEFAULT 0,
+      m04 REAL NOT NULL DEFAULT 0,
+      m05 REAL NOT NULL DEFAULT 0,
+      m06 REAL NOT NULL DEFAULT 0,
+      m07 REAL NOT NULL DEFAULT 0,
+      m08 REAL NOT NULL DEFAULT 0,
+      m09 REAL NOT NULL DEFAULT 0,
+      m10 REAL NOT NULL DEFAULT 0,
+      m11 REAL NOT NULL DEFAULT 0,
+      m12 REAL NOT NULL DEFAULT 0,
+      total        REAL NOT NULL DEFAULT 0,
+      is_stats     INTEGER NOT NULL DEFAULT 0,
+      value_kind   TEXT NOT NULL DEFAULT 'currency',
+      encoding     TEXT NOT NULL DEFAULT 'AMOUNT',
+      sources      TEXT NOT NULL DEFAULT '[]',
+      block_labels TEXT NOT NULL DEFAULT '[]',
+      written_at   TEXT NOT NULL,
+      PRIMARY KEY (ou, scenario_id, dept, account)
+  );
+  CREATE INDEX IF NOT EXISTS idx_results_cache_scope
+    ON results_cache (ou, scenario_id);
+`;
+
+/**
  * Persisted engine output (encrypted store, secure v10). One run per
  * (ou, scenario) — Recalculate clears and rewrites both tables in a single
  * transaction (the budget-import / KPI-cache overwrite idiom). Lines are the
@@ -295,6 +352,10 @@ export const ENGINE_OUTPUTS_SQL = `
   --   SETUP       setup:defaults     / setup:<settingKey>
   -- detail is the small JSON blob the Results inspector renders (rate, spread
   -- base, description...) so a drill-down needs no second lookup.
+  -- encoding (secure v8) is how the twelve values READ: 'AMOUNT' (monthly
+  -- amounts) or 'LEVEL' (a level statistic stored as January-plus-changes, see
+  -- toMonthlyDeltas). Decided by the projector that writes the line, and kept
+  -- on the line so the results cache can be rebuilt from lines alone.
   CREATE TABLE IF NOT EXISTS engine_output_lines (
       ou               TEXT NOT NULL,
       scenario_id      TEXT NOT NULL,
@@ -308,11 +369,47 @@ export const ENGINE_OUTPUTS_SQL = `
       source           TEXT NOT NULL DEFAULT 'ENGINE',
       source_ref       TEXT NOT NULL DEFAULT '',
       detail           TEXT NOT NULL DEFAULT '{}',
+      encoding         TEXT NOT NULL DEFAULT 'AMOUNT',
       PRIMARY KEY (ou, scenario_id, position_id, component_def_id)
   );
   CREATE INDEX IF NOT EXISTS idx_engine_output_scope
     ON engine_output_lines (ou, scenario_id);
+${RESULTS_CACHE_SQL}
 `;
+
+/**
+ * The results cache (secure v8): `encoding` on engine_output_lines plus the
+ * results_cache table.
+ *
+ * The column backfill is deliberately partial. ALLOCATION and SETUP lines are
+ * LEVEL by construction and can be stamped from `source` alone; an ENGINE
+ * headcount line cannot be told from a salary line without the definitions,
+ * which live in the other store. So the cache is NOT backfilled either: a run
+ * that predates v8 reads as stale (readOutputs aggregates its lines on the fly)
+ * and the next Recalculate writes both the encodings and the cache properly.
+ * The backfill only runs when the column is genuinely being added, so a re-exec
+ * can never overwrite encodings a v8 run has already written. Idempotent.
+ */
+export function applyResultsCacheV8(
+  handle: InstanceType<typeof Database>
+): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(engine_output_lines)")
+    .all() as Array<{ name: string }>;
+  if (columns.length === 0) return; // table not created yet — nothing to upgrade
+  const present = new Set(columns.map((column) => column.name));
+
+  if (!present.has("encoding")) {
+    handle.exec(
+      `ALTER TABLE engine_output_lines ADD COLUMN encoding TEXT NOT NULL DEFAULT 'AMOUNT'`
+    );
+    handle.exec(
+      `UPDATE engine_output_lines SET encoding = 'LEVEL'
+        WHERE source IN ('ALLOCATION', 'SETUP')`
+    );
+  }
+  handle.exec(RESULTS_CACHE_SQL);
+}
 
 /**
  * Bring a pre-lineage `positions` table up to the v3 shape.

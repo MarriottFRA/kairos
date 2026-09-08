@@ -71,6 +71,8 @@ function planFingerprint(plan: CompiledPlan): string {
 function cloneInput(input: ScenarioInput): ScenarioInput {
   return {
     ...input,
+    // The policy switches are edited below; the day arrays never are.
+    calendar: { ...input.calendar },
     definitions: input.definitions.map((def) => ({ ...def })),
     positions: input.positions.map((position) => ({
       ...position,
@@ -153,6 +155,18 @@ const EDITS: Edit[] = [
       if (input.buyouts.length === 0) return;
       const row = input.buyouts[Math.floor(rand() * input.buyouts.length)];
       row.monthlyValues[Math.floor(rand() * MONTHS)] = Math.round(rand() * 5000);
+    },
+  },
+  {
+    // The hotel-year vacation policy changes what packPlan EMITS (an arg0 flag,
+    // whether BASE_DEDUCT exists) but nothing compileStructure reads — so the
+    // key must say "reuse" and the repacked plan must still match a fresh
+    // compile. This is the edit that proves the calendar's deliberate absence
+    // from structureKey is still right.
+    name: "flip a vacation policy switch",
+    apply: (input, rand) => {
+      if (rand() < 0.5) input.calendar.vacationWorkingDays = !input.calendar.vacationWorkingDays;
+      else input.calendar.vacationAdditive = !input.calendar.vacationAdditive;
     },
   },
   // ---- these change the SHAPE or the DIMENSIONS ----

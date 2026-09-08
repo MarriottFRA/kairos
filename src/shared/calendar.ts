@@ -61,8 +61,30 @@ export interface CalendarYear {
   bankHolidayCoverageByDepartment?: Record<string, number>;
   /** GL account the premium posts to (empty = feature effectively off). */
   bankHolidayAccount?: string;
+  /** What a vacation day is worth for SALARIED staff. FLAT = 1/30 of the
+   *  monthly salary (the 30/360 basis the salary itself spreads on);
+   *  WORKING_DAYS = monthly salary ÷ the month's net productive days from this
+   *  calendar. Hourly staff are unaffected either way — their day is already
+   *  rate × contract hours. Country policy, hence hotel-year scoped. */
+  vacationDayBasis?: VacationDayBasis;
+  /** Whether vacation is booked ON TOP of salary rather than carved out of it.
+   *  Off (the default): Base Salary = salary − vacation and the Vacation Cost
+   *  line adds it back, so the year totals the salary. On: Base Salary stays
+   *  whole and Vacation Cost is extra, so the year totals salary + vacation.
+   *  Applies to every position in the hotel-year. */
+  vacationAdditive?: boolean;
   updatedAt?: string | null;
 }
+
+/** The salaried vacation-day basis. */
+export type VacationDayBasis = "FLAT" | "WORKING_DAYS";
+
+export const VACATION_DAY_BASES: readonly VacationDayBasis[] = [
+  "FLAT",
+  "WORKING_DAYS",
+] as const;
+
+export const DEFAULT_VACATION_DAY_BASIS: VacationDayBasis = "FLAT";
 
 /** Who the bank-holiday premium is booked for. */
 export type BankHolidayAppliesTo = "HOURLY" | "ALL";
@@ -211,6 +233,25 @@ export type BankHolidayConfig = Required<Pick<
   | "bankHolidayAccount"
 >>;
 
+/** The vacation-policy fields of a CalendarYear, as their own bag. */
+export type VacationPolicyConfig = Required<Pick<
+  CalendarYear,
+  "vacationDayBasis" | "vacationAdditive"
+>>;
+
+/** The vacation-policy fields, coerced: a known basis (anything else reads as
+ *  FLAT, the pre-v5 behaviour) and a real boolean. */
+export function normalizeVacationPolicy(
+  source: Partial<VacationPolicyConfig>
+): VacationPolicyConfig {
+  return {
+    vacationDayBasis: VACATION_DAY_BASES.includes(source.vacationDayBasis as VacationDayBasis)
+      ? (source.vacationDayBasis as VacationDayBasis)
+      : DEFAULT_VACATION_DAY_BASIS,
+    vacationAdditive: !!source.vacationAdditive,
+  };
+}
+
 /** Per-department coverage, coerced: finite values only, clamped to 0..1, keyed
  *  by a trimmed non-empty department code. Sparsity comes from the UI — a blank
  *  field stores no key — not from dropping values that happen to equal the
@@ -286,6 +327,7 @@ export function buildDefaultCalendar(
       };
     }),
     ...normalizeBankHoliday({}),
+    ...normalizeVacationPolicy({}),
   };
 }
 
@@ -314,7 +356,8 @@ export function normalizeCalendar(
   year: number,
   weekendMask: number,
   months: Array<Partial<CalendarMonth>>,
-  bankHoliday: Partial<BankHolidayConfig> = {}
+  bankHoliday: Partial<BankHolidayConfig> = {},
+  vacationPolicy: Partial<VacationPolicyConfig> = {}
 ): CalendarYear {
   const byMonth = new Map(months.map((row) => [Number(row.month), row]));
   const mask = Number.isFinite(weekendMask) ? weekendMask : DEFAULT_WEEKEND_MASK;
@@ -342,6 +385,7 @@ export function normalizeCalendar(
       };
     }),
     ...normalizeBankHoliday(bankHoliday),
+    ...normalizeVacationPolicy(vacationPolicy),
   };
 }
 

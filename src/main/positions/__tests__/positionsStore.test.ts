@@ -1176,7 +1176,7 @@ describe("engine outputs", () => {
   it("aggregates lines to dept×account and tags statistics accounts", () => {
     writeRun(
       valuesDb, OU_A, SCENARIO,
-      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 2 },
+      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 2, year: 2027 },
       [
         line("p1", "blk-1:cost", "0410", "A511000", 100),
         line("p2", "blk-1:cost", "0410", "A511000", 50),
@@ -1199,7 +1199,7 @@ describe("engine outputs", () => {
   it("classifies the pinned position-count account as a statistic", () => {
     writeRun(
       valuesDb, OU_A, SCENARIO,
-      { fingerprint: "fp-hc", computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      { fingerprint: "fp-hc", computedAt: "2026-01-02T00:00:00Z", positionCount: 1, year: 2027 },
       [line("p1", "sys-poscount:OU_A", "0410", POSITION_COUNT_ACCOUNT, 5)]
     );
 
@@ -1211,12 +1211,12 @@ describe("engine outputs", () => {
   it("overwrites wholesale on a new run and isolates OUs", () => {
     writeRun(
       valuesDb, OU_A, SCENARIO,
-      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      { fingerprint: "fp-1", computedAt: "2026-01-02T00:00:00Z", positionCount: 1, year: 2027 },
       [line("p1", "blk-1:cost", "0410", "511000", 100)]
     );
     writeRun(
       valuesDb, OU_A, SCENARIO,
-      { fingerprint: "fp-2", computedAt: "2026-01-03T00:00:00Z", positionCount: 1 },
+      { fingerprint: "fp-2", computedAt: "2026-01-03T00:00:00Z", positionCount: 1, year: 2027 },
       [line("p1", "blk-1:cost", "0410", "522000", 70)]
     );
 
@@ -1241,7 +1241,7 @@ describe("engine outputs", () => {
     const fingerprint = computeFingerprint(structureDb, valuesDb, OU_A, SCENARIO);
     writeRun(
       valuesDb, OU_A, SCENARIO,
-      { fingerprint, computedAt: "2026-01-02T00:00:00Z", positionCount: 1 },
+      { fingerprint, computedAt: "2026-01-02T00:00:00Z", positionCount: 1, year: 2027 },
       [line("pos-1", "blk-1:cost", "D110", "511000", 10)]
     );
     expect(readOutputs(structureDb, valuesDb, OU_A, SCENARIO).stale).toBe(false);
@@ -1361,6 +1361,7 @@ describe("migration runner shape", () => {
       "engine_runs",
       "position_pii",
       "positions",
+      "results_cache",
     ]);
   });
 

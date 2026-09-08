@@ -60,7 +60,8 @@ import { lockReasonsByDepartment } from "../../shared/kairosSync/lockReason";
 import { buildCalendarContext } from "../../shared/engine/calendarContext";
 import { CalendarContext } from "../../shared/engine/types";
 import { CalendarYear } from "../../shared/calendar";
-import { loadCalendar } from "../../services/calendarService";
+import { loadCalendar, saveCalendar } from "../../services/calendarService";
+import VacationSettingsDialog from "../../components/positions/VacationSettingsDialog";
 import { BlockDto, BlockInput, BlocksListResponse } from "../../shared/blocks/ipc";
 import {
   applyComponentValuesToRow,
@@ -1630,6 +1631,36 @@ export default function Positions() {
     void refreshRemoved();
   }, [refreshRemoved]);
 
+  // ── Vacation settings (the cog on the Vacation band) ──
+  // The policy lives on the hotel-year calendar, so saving goes through the
+  // same channel the Home page uses; the returned calendar replaces both the
+  // CalendarYear (live sim input) and the CalendarContext (Vacation Cost
+  // column), so every number on the page follows from the one write. The
+  // calendar's updated_at moves too, which is what marks Results stale.
+  const [vacationSettingsOpen, setVacationSettingsOpen] = useState(false);
+  const [vacationSettingsBusy, setVacationSettingsBusy] = useState(false);
+  const handleVacationSettings = useCallback(() => setVacationSettingsOpen(true), []);
+  const handleSaveVacationSettings = useCallback(
+    (next: CalendarYear) => {
+      setVacationSettingsBusy(true);
+      void (async () => {
+        try {
+          const persisted = await saveCalendar(next);
+          setCalendarYear(persisted);
+          setCalendarCtx(buildCalendarContext(persisted));
+          setVacationSettingsOpen(false);
+          setToast("Vacation settings updated");
+        } catch (err) {
+          console.error("Failed to save vacation settings:", err);
+          setError(err instanceof Error ? err.message : "Could not save vacation settings");
+        } finally {
+          setVacationSettingsBusy(false);
+        }
+      })();
+    },
+    []
+  );
+
   const handleRestoreFromManage = useCallback(
     (key: string) => {
       if (!selectedHotelOu) return;
@@ -1881,7 +1912,10 @@ export default function Positions() {
         blockType: "SOCIAL_SECURITY",
         label: save.scheme.label,
         accountCode: save.accountCode,
-        accountLocked: true,
+        // Chosen in the dialog like any other block: per row, or following
+        // another block / a position column (which forces the lock).
+        accountLocked: save.accountLocked,
+        accountSource: save.accountSource,
         ssSchemeId: schemeId as string,
       });
       setBlocksModel(response);
@@ -2131,6 +2165,7 @@ export default function Positions() {
             onAddField={handleAddField}
             onRemoveField={handleRemoveField}
             onManageColumns={handleManageColumns}
+            onVacationSettings={handleVacationSettings}
             onEditBlock={handleEditBlock}
           />
         )}
@@ -2238,6 +2273,15 @@ export default function Positions() {
           setNiDialog(null);
           handleDeleteBlock(block);
         }}
+      />
+
+      <VacationSettingsDialog
+        open={vacationSettingsOpen}
+        calendar={calendarYear}
+        hotelName={selectedHotelOu ? hotelNames.get(selectedHotelOu) : undefined}
+        saving={vacationSettingsBusy}
+        onClose={() => setVacationSettingsOpen(false)}
+        onSave={handleSaveVacationSettings}
       />
 
       <DeleteClusterPositionDialog

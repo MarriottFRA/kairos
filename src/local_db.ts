@@ -4,6 +4,7 @@ import {
   BankHolidayAppliesTo,
   CalendarYear,
   DEFAULT_WEEKEND_MASK,
+  VacationDayBasis,
   normalizeCalendar,
 } from "./shared/calendar";
 import {
@@ -23,7 +24,12 @@ import {
   applyKpiDriverMultiplier,
 } from "./main/kpiDrivers/schema";
 import { applyCountExemptV3, applyStructureColumns } from "./main/blocks/schema";
-import { CALENDAR_TABLES_SQL, applyBankHolidayV4 } from "./main/calendar/schema";
+import {
+  CALENDAR_TABLES_SQL,
+  applyBankHolidayV4,
+  applyCalendarColumns,
+  applyVacationPolicyV5,
+} from "./main/calendar/schema";
 import { applyHotelClustersV13 } from "./main/hotelClusters/schema";
 import {
   applyAllocationInjectAccount,
@@ -75,7 +81,7 @@ db.pragma("foreign_keys = ON");
 // ABOVE a database's stored number, so an edited body silently never re-runs.
 // When the list grows unwieldy and every live store is at/above a known floor,
 // squash back to a fresh baseline the same way.
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 type LocalDb = InstanceType<typeof Database>;
 
@@ -108,6 +114,10 @@ const MIGRATIONS: Record<number, (handle: LocalDb) => void> = {
   // not worked, and per-department coverage overrides. The defaults reproduce
   // the two-knob behaviour the feature shipped with.
   4: applyBankHolidayV4,
+  // Vacation policy per hotel-year: salaried day basis (flat 30 vs working
+  // days) and carve-out vs on-top. Defaults = the pre-v5 engine behaviour, so
+  // an upgraded store's numbers do not move.
+  5: applyVacationPolicyV5,
 };
 
 /**
@@ -125,7 +135,7 @@ function applyBaselineSchema(handle: LocalDb): void {
   // after the baseline (v4). Both live in main/calendar/schema.ts so the tests
   // can exec them without pulling in Electron.
   handle.exec(CALENDAR_TABLES_SQL);
-  applyBankHolidayV4(handle);
+  applyCalendarColumns(handle);
   // Structure store: scenarios, cost component definitions, SS schemes, field
   // catalog, hotels cache (former v3).
   handle.exec(POSITIONS_STRUCTURE_TABLES_SQL);
@@ -508,7 +518,8 @@ export async function getCalendarYear(
               bank_holiday_enabled, bank_holiday_staff_fraction,
               bank_holiday_premium_multiplier, bank_holiday_account,
               bank_holiday_applies_to, bank_holiday_paid_when_not_worked,
-              bank_holiday_coverage_json
+              bank_holiday_coverage_json,
+              vacation_day_basis, vacation_additive
          FROM calendar_years WHERE ou = ? AND year = ?`
     )
     .get(ou, year) as
@@ -522,6 +533,8 @@ export async function getCalendarYear(
         bank_holiday_applies_to: string;
         bank_holiday_paid_when_not_worked: number;
         bank_holiday_coverage_json: string;
+        vacation_day_basis: string;
+        vacation_additive: number;
       }
     | undefined;
 
@@ -561,6 +574,12 @@ export async function getCalendarYear(
       // normalizeBankHoliday re-validates the parsed map, so junk on disk
       // degrades to "no overrides" rather than throwing on read.
       bankHolidayCoverageByDepartment: parseCoverageJson(head.bank_holiday_coverage_json),
+    },
+    {
+      // normalizeVacationPolicy maps an unknown basis to FLAT, so junk on disk
+      // degrades to the pre-v5 behaviour rather than throwing on read.
+      vacationDayBasis: head.vacation_day_basis as VacationDayBasis,
+      vacationAdditive: !!head.vacation_additive,
     }
   );
 
@@ -575,6 +594,7 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
     year,
     calendar.weekendMask ?? DEFAULT_WEEKEND_MASK,
     calendar.months ?? [],
+    calendar,
     calendar
   );
 
@@ -584,8 +604,9 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
        bank_holiday_enabled, bank_holiday_staff_fraction,
        bank_holiday_premium_multiplier, bank_holiday_account,
        bank_holiday_applies_to, bank_holiday_paid_when_not_worked,
-       bank_holiday_coverage_json)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+       bank_holiday_coverage_json,
+       vacation_day_basis, vacation_additive)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(ou, year) DO UPDATE SET
       weekend_mask = excluded.weekend_mask,
       updated_at = CURRENT_TIMESTAMP,
@@ -595,7 +616,9 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
       bank_holiday_account = excluded.bank_holiday_account,
       bank_holiday_applies_to = excluded.bank_holiday_applies_to,
       bank_holiday_paid_when_not_worked = excluded.bank_holiday_paid_when_not_worked,
-      bank_holiday_coverage_json = excluded.bank_holiday_coverage_json
+      bank_holiday_coverage_json = excluded.bank_holiday_coverage_json,
+      vacation_day_basis = excluded.vacation_day_basis,
+      vacation_additive = excluded.vacation_additive
   `);
   const upsertMonth = db.prepare(`
     INSERT INTO calendar_months
@@ -619,7 +642,9 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
         normalized.bankHolidayAccount,
         normalized.bankHolidayAppliesTo,
         normalized.bankHolidayPaidWhenNotWorked ? 1 : 0,
-        JSON.stringify(normalized.bankHolidayCoverageByDepartment)
+        JSON.stringify(normalized.bankHolidayCoverageByDepartment),
+        normalized.vacationDayBasis,
+        normalized.vacationAdditive ? 1 : 0
       );
       for (const row of normalized.months) {
         upsertMonth.run(

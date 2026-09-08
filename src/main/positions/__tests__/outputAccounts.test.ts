@@ -23,8 +23,9 @@ import {
   HEADCOUNT_ACCOUNT_BY_JOB_TYPE,
   POSITION_COUNT_ACCOUNT,
 } from "../../../shared/positions/systemAccounts";
+import { BlockInput } from "../../../shared/blocks/ipc";
 import { applyStructureColumns } from "../../blocks/schema";
-import { ensureSystemDefs } from "../../blocks/repo";
+import { ensureSystemDefs, saveBlock } from "../../blocks/repo";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { MAPPING_TABLES_SQL } from "../../mappingTables/schema";
 import { loadScenarioInput } from "../loadScenarioInput";
@@ -41,7 +42,7 @@ import {
   POSITIONS_STRUCTURE_TABLES_SQL,
   POSITIONS_VALUE_TABLES_SQL,
 } from "../schema";
-import { getFieldCatalog, saveScenario } from "../structureRepo";
+import { getComponentDefinitions, getFieldCatalog, saveScenario } from "../structureRepo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
 
 type Db = InstanceType<typeof Database>;
@@ -139,6 +140,7 @@ async function recalculate() {
       fingerprint: "fp",
       computedAt: NOW.now,
       positionCount: input.positions.length,
+      year: input.scenario.year,
     },
     projection.lines
   );
@@ -147,6 +149,102 @@ async function recalculate() {
     outputs: readOutputs(structureDb, valuesDb, SCOPE, scenarioId),
   };
 }
+
+describe("Recalculate → a block whose account follows another", () => {
+  /** A 10%-of-salary multiplier on pos-1, with the given account settings. */
+  function saveFollower(input: Partial<BlockInput> & { label: string }): string {
+    const id = saveBlock(
+      structureDb,
+      SCOPE,
+      {
+        blockType: "MULTIPLIER",
+        accountCode: "",
+        accountLocked: true,
+        base: { kind: "BASE_SALARY" },
+        ...input,
+      },
+      NOW
+    );
+    batchWrite(
+      valuesDb,
+      SCOPE,
+      {
+        ou: SCOPE.ou,
+        scenarioId,
+        componentValuePatches: [
+          { positionId: "pos-1", componentDefId: `${id}:cost`, fields: { rate: 0.1 } },
+        ],
+      },
+      buildFieldMap(getFieldCatalog(structureDb, SCOPE)),
+      new Set(getComponentDefinitions(structureDb, SCOPE).map((def) => def.id as string))
+    );
+    return id;
+  }
+
+  it("posts to the followed block's account, and moves when that account changes", async () => {
+    writePosition(ACCOUNTS);
+    const pensionId = saveBlock(
+      structureDb,
+      SCOPE,
+      { blockType: "FLAT_MONTHLY", label: "Pension", accountCode: "A560123", accountLocked: true },
+      NOW
+    );
+    saveFollower({ label: "Pension Levy", accountSource: { kind: "BLOCK", blockId: pensionId } });
+
+    const first = await recalculate();
+    const levy = first.outputs.rows.find((row) => row.account === "A560123")!;
+    // 10% of 3000 × 2 heads, every month.
+    expect(levy.months[0]).toBeCloseTo(600, 6);
+
+    // Re-point Pension — and only Pension. No save touches the follower.
+    saveBlock(
+      structureDb,
+      SCOPE,
+      { id: pensionId, blockType: "FLAT_MONTHLY", label: "Pension", accountCode: "A560999", accountLocked: true },
+      NOW
+    );
+    const second = await recalculate();
+    expect(second.outputs.rows.some((row) => row.account === "A560123")).toBe(false);
+    expect(second.outputs.rows.find((row) => row.account === "A560999")!.months[0]).toBeCloseTo(600, 6);
+  });
+
+  it("posts wherever each row's Salary account posts when following that column", async () => {
+    writePosition(ACCOUNTS);
+    saveFollower({ label: "Employer NI", accountSource: { kind: "POSITION_FIELD", field: "salary" } });
+
+    const { outputs } = await recalculate();
+    const salaryRow = outputs.rows.find((row) => row.account === ACCOUNTS.salaryAccountCode)!;
+    // The salary line (3000 × 2 heads, net of vacation) plus the 10% levy on
+    // the same account — the follower has no account of its own anywhere.
+    // Vacation in January: 24 days × 1/12 = 2 days at 3000/30 = 100 a day, × 2 heads.
+    const januarySalary = 6000 - 2 * 2 * 100;
+    expect(salaryRow.months[0]).toBeCloseTo(januarySalary + 600, 6);
+    expect(outputs.rows.every((row) => row.account !== "")).toBe(true);
+  });
+
+  it("computes but does not post when the followed block is gone from sync", async () => {
+    writePosition(ACCOUNTS);
+    const pensionId = saveBlock(
+      structureDb,
+      SCOPE,
+      { blockType: "FLAT_MONTHLY", label: "Pension", accountCode: "A560123", accountLocked: true },
+      NOW
+    );
+    saveFollower({ label: "Pension Levy", accountSource: { kind: "BLOCK", blockId: pensionId } });
+    // A peer's deletion arrives as a raw row update, bypassing the delete
+    // guard — the follower must degrade to "calculation only", not throw.
+    structureDb
+      .prepare(`UPDATE block_configs SET deleted_at = ? WHERE id = ?`)
+      .run(NOW.now, pensionId);
+    structureDb
+      .prepare(`UPDATE cost_component_definitions SET deleted_at = ? WHERE block_id = ?`)
+      .run(NOW.now, pensionId);
+
+    const { outputs, projection } = await recalculate();
+    expect(outputs.rows.some((row) => row.account === "A560123")).toBe(false);
+    expect(projection.unpostedByLabel).toMatchObject({ "Pension Levy": 1 });
+  });
+});
 
 describe("Recalculate → Results rows", () => {
   it("emits one row per account the position posts to, not just A972540", async () => {

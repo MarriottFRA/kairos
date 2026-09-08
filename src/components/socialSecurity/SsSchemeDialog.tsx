@@ -35,7 +35,8 @@ import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Typography from "@mui/material/Typography";
 import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlined";
-import { BlockDto } from "../../shared/blocks/ipc";
+import { BlockAccountSource, BlockDto } from "../../shared/blocks/ipc";
+import BlockAccountSection from "../blocks/BlockAccountSection";
 import { AccountOption } from "../../shared/mappingTables/types";
 import {
   SsSchemeInput,
@@ -50,18 +51,21 @@ import {
   SsAccumulationMode,
   SS_MAX_BRACKETS,
 } from "../../shared/engine/types";
-import AccountAutocomplete from "../common/AccountAutocomplete";
 
 const MONTH_NAMES = Array.from({ length: 12 }, (_, m) =>
   new Date(2000, m, 1).toLocaleString("en", { month: "long" })
 );
 
 /** What the dialog hands back — the parent resolves the scheme id + saves. The
- *  contributory base now lives on the scheme itself; only the GL account is a
- *  block-level property. */
+ *  contributory base now lives on the scheme itself; only the GL account (and
+ *  how it is chosen: typed, per row, or following another block / a position
+ *  column) is a block-level property. */
 export interface SsSchemeDialogSave {
   scheme: SsSchemeInput;
   accountCode: string;
+  /** false = each row picks its own account (the grid grows a column). */
+  accountLocked: boolean;
+  accountSource?: BlockAccountSource;
 }
 
 export interface SsSchemeDialogProps {
@@ -131,6 +135,8 @@ export default function SsSchemeDialog({
   const [monthlyCap, setMonthlyCap] = useState("");
   const [yearlyCap, setYearlyCap] = useState("");
   const [accountCode, setAccountCode] = useState("");
+  const [accountLocked, setAccountLocked] = useState(true);
+  const [accountSource, setAccountSource] = useState<BlockAccountSource | undefined>(undefined);
   const [includeBaseSalary, setIncludeBaseSalary] = useState(true);
   const [includeVacation, setIncludeVacation] = useState(true);
   const [baseComponentIds, setBaseComponentIds] = useState<string[]>([]);
@@ -146,6 +152,8 @@ export default function SsSchemeDialog({
     if (!open) return;
     setError(null);
     setAccountCode(niBlock?.accountCode ?? seed?.defaultAccountCode ?? "");
+    setAccountLocked(niBlock?.accountLocked ?? true);
+    setAccountSource(niBlock?.accountSource);
     setIncludeBaseSalary(
       attached?.includeBaseSalary ?? seed?.scheme.includeBaseSalary ?? true
     );
@@ -232,7 +240,12 @@ export default function SsSchemeDialog({
       setError(err instanceof Error ? err.message : "That configuration is not valid.");
       return;
     }
-    action({ scheme, accountCode });
+    action({
+      scheme,
+      accountCode,
+      accountLocked: accountSource ? true : accountLocked,
+      accountSource,
+    });
   };
 
   const cumulativeNonJan =
@@ -404,19 +417,24 @@ export default function SsSchemeDialog({
 
           <Divider />
 
-          <Stack spacing={1}>
-            <Typography variant="subtitle2">Account</Typography>
-            <AccountAutocomplete
-              options={accounts}
-              value={accountCode}
-              onChange={setAccountCode}
-              size="small"
-            />
-            <Typography variant="caption" color="text.secondary">
-              The NI cost line posts to this account. Leave blank for calculation
-              only (not included in the output).
-            </Typography>
-          </Stack>
+          <BlockAccountSection
+            accountCode={accountCode}
+            accountLocked={accountLocked}
+            accountSource={accountSource}
+            blocks={blocks}
+            selfId={niBlock?.id}
+            accounts={accounts}
+            typedHint={(code) =>
+              code
+                ? "The NI cost line posts to this account."
+                : "No account: the NI line still calculates but is not included in the output."
+            }
+            onChange={(patch) => {
+              if ("accountCode" in patch) setAccountCode(patch.accountCode ?? "");
+              if ("accountLocked" in patch) setAccountLocked(patch.accountLocked ?? true);
+              if ("accountSource" in patch) setAccountSource(patch.accountSource);
+            }}
+          />
 
           <Divider />
 

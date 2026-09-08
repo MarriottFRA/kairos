@@ -19,7 +19,10 @@ import { POSITIONS_STRUCTURE_TABLES_SQL } from "../../positions/schema";
 import { resolveOuScope } from "../../positions/ouScope";
 import { getComponentDefinitions } from "../../positions/structureRepo";
 import { applyStructureColumns } from "../schema";
-import { applySocialSecurityBase } from "../../../shared/positions/engineInput";
+import {
+  applySocialSecurityBase,
+  resolveBlockValues,
+} from "../../../shared/positions/engineInput";
 import { BlockDto } from "../../../shared/blocks/ipc";
 import { ensureBaseSalaryDef, listBlocks, saveBlock } from "../repo";
 
@@ -111,6 +114,8 @@ function scenarioInput(schemes: SocialSecurityScheme[]): ScenarioInput {
       year: 2026,
       realDays: new Float64Array(12).fill(21),
       flatDays: new Float64Array(12).fill(30),
+      vacationWorkingDays: false,
+      vacationAdditive: false,
       holidayDays: new Float64Array(12),
     },
     definitions,
@@ -178,5 +183,61 @@ describe("configuring the NI block", () => {
       .find((line) => line.component.id === niCostDefId);
     const total = niLine ? [...niLine.months].reduce((sum, value) => sum + value, 0) : 0;
     expect(total).toBeCloseTo(0, 5);
+  });
+});
+
+describe("the NI block's account per row", () => {
+  // The scheme dialog used to hard-code the lock; the pipeline underneath was
+  // always generic. Pinned end to end so the switch cannot quietly regress to
+  // "every row on the block account".
+  function keysFor(accountLocked: boolean): string[] {
+    saveBlock(
+      db,
+      OU,
+      {
+        blockType: "SOCIAL_SECURITY",
+        label: "National Insurance",
+        accountCode: "530000",
+        accountLocked,
+        ssSchemeId: SCHEME_ID,
+      },
+      NOW
+    );
+    const ni = listBlocks(db, OU).find((b) => b.blockType === "SOCIAL_SECURITY")!;
+    expect(ni.accountLocked).toBe(accountLocked);
+    const input = scenarioInput([makeScheme()]);
+    const values = resolveBlockValues(
+      input.definitions,
+      [
+        {
+          positionId: "pos-1" as never,
+          componentDefId: ni.costDefId as never,
+          accountCode: "531000",
+          updatedAt: NOW.now,
+          deletedAt: null,
+        },
+      ],
+      [
+        {
+          costDefId: ni.costDefId,
+          accountLocked: ni.accountLocked,
+          statsAccountLocked: true,
+          departmentPerRow: false,
+        },
+      ]
+    );
+    const compiled = compile({ ...input, componentValues: values });
+    if ("errors" in compiled) throw new Error("compile failed");
+    return simulate(compiled.plan).aggregates.keys.map((key) => `${key.dept}|${key.account}`);
+  }
+
+  it("posts each row to its own account when unlocked", () => {
+    expect(keysFor(false)).toContain("0410|531000");
+  });
+
+  it("ignores a stored per-row account while locked", () => {
+    const keys = keysFor(true);
+    expect(keys).toContain("0410|530000");
+    expect(keys).not.toContain("0410|531000");
   });
 });

@@ -15,6 +15,12 @@
 import { CalendarYear, netProductiveDays } from "../calendar";
 import { CalendarContext, MONTHS } from "./types";
 
+/** The two vacation-policy switches, as the engine reads them. */
+export interface CalendarPolicyOptions {
+  vacationWorkingDays?: boolean;
+  vacationAdditive?: boolean;
+}
+
 export function buildCalendarContext(calendar: CalendarYear): CalendarContext {
   const realDays = new Float64Array(MONTHS);
   const holidayDays = new Float64Array(MONTHS);
@@ -29,16 +35,23 @@ export function buildCalendarContext(calendar: CalendarYear): CalendarContext {
     realDays,
     flatDays: new Float64Array(MONTHS).fill(30),
     holidayDays,
+    // The hotel-year's vacation policy (calendar.ts documents both). Read off
+    // the calendar so the persisted run, the live sim and the grid's Vacation
+    // Cost estimate — which all build their context here — cannot disagree.
+    vacationWorkingDays: calendar.vacationDayBasis === "WORKING_DAYS",
+    vacationAdditive: !!calendar.vacationAdditive,
   };
 }
 
 /** A context with explicit day counts — used by tests and synthetic data.
  *  `holidayDays` defaults to zeros (no bank-holiday cost); `year` only matters
- *  to WEEKDAY_COUNT defs. */
+ *  to WEEKDAY_COUNT defs; the vacation policy defaults to the carve-out /
+ *  flat-30 behaviour. */
 export function makeCalendarContext(
   realDays: number[],
   holidayDays?: number[],
   year = 2026,
+  policy: CalendarPolicyOptions = {},
 ): CalendarContext {
   if (realDays.length !== MONTHS) {
     throw new Error(`realDays must have ${MONTHS} entries`);
@@ -51,5 +64,7 @@ export function makeCalendarContext(
     realDays: Float64Array.from(realDays),
     flatDays: new Float64Array(MONTHS).fill(30),
     holidayDays: holidayDays ? Float64Array.from(holidayDays) : new Float64Array(MONTHS),
+    vacationWorkingDays: !!policy.vacationWorkingDays,
+    vacationAdditive: !!policy.vacationAdditive,
   };
 }

@@ -27,12 +27,14 @@
  *                Computes twm = Σ seas, twd = Σ days·seas, twd2 = Σ realDays·seas,
  *                inc[m] = m ≥ M ? 1+meritPct : 1, and manualMonthly =
  *                manualYearly / Σ seas[m≥M]. Must be the first op of a position.
- *  BASE_SALARY   params: monthlyBase, addl[12]
+ *  BASE_SALARY   params: monthlyBase, addl[12]; arg0: FLAG_VAC_WORKING_DAYS
  *                gross[m] = base·twm/twd·days[m]·seas[m]·inc[m]
  *                           + manualMonthly·seas[m]·[m≥M] + addl[m]·seas[m]
  *                Also sets dayRate = base·twm/twd (per-working-day base pay,
- *                pre-increase) for VACATION/ACCRUAL to value a day off.
- *                Writes gross[] to scratch AND the (still-gross) line.
+ *                pre-increase) for VACATION/ACCRUAL to value a day off — or
+ *                base·twm/twd2 (÷ the month's working days) when the flag is
+ *                set. The flag moves only the day price; the spread stays on
+ *                twd. Writes gross[] to scratch AND the (still-gross) line.
  *  BASE_SALARY_HOURLY  params: coeff (= hourlyRate·dailyContractHours), addl[12]
  *                Alternate base derivation for hourly-paid staff. Spreads over
  *                realDays (net productive days), not the pay-type day basis, and
@@ -51,7 +53,9 @@
  *                Writes BOTH scratch vectors — no line. ACCRUAL provisions for
  *                the same days this prices, so both read one series.
  *  BASE_DEDUCT   line[m] -= vac[m]  (nets vacation out of the base line;
- *                gross scratch stays intact for downstream bases)
+ *                gross scratch stays intact for downstream bases). NOT emitted
+ *                when the calendar's vacationAdditive policy is on — the base
+ *                line then stays gross and the Vacation Cost line is extra.
  *  ACCRUAL       params: accrualDaysPerMonth (on/off guard only — the earning
  *                leg is derived, see below)
  *                Liability roll-forward carried in DAYS. Earns Σ vacDays[] evenly
@@ -200,6 +204,11 @@ export const LINE_NONE = 0xffffffff;
 
 /** arg0 flag bit: multiply the spread by the increase factor. */
 export const FLAG_INCREASE_AWARE = 1;
+
+/** arg0 flag bit on BASE_SALARY only: price a vacation day at monthly salary ÷
+ *  the month's working days (twd2) instead of ÷ 30 (twd). Same bit value as
+ *  FLAG_INCREASE_AWARE is fine — the two never share an opcode. */
+export const FLAG_VAC_WORKING_DAYS = 1;
 
 // ---------------------------------------------------------------------------
 // Scratch layout (one Float64Array shared across positions)

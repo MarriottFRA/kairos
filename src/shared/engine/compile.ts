@@ -16,6 +16,7 @@
 import { weekdayCounts } from "../calendar";
 import {
   FLAG_INCREASE_AWARE,
+  FLAG_VAC_WORKING_DAYS,
   LINE_NONE,
   Op,
 } from "./opcodes";
@@ -1028,7 +1029,14 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
           // Presence of hourlyRate is the discriminator — the two salary inputs
           // are mutually exclusive (enforced in the grid), so hourlyRate wins.
           const baseOp = position.hourlyRate > 0 ? Op.BASE_SALARY_HOURLY : Op.BASE_SALARY;
-          const baseAt = emitter.emitInto(baseOp, line, 0, 1 + MONTHS);
+          // The hotel's vacation-day policy rides arg0: ÷ working days (twd2)
+          // instead of ÷ 30. Meaningless to the hourly op, which prices a day
+          // as the coeff itself, so it is only set on BASE_SALARY.
+          const baseFlags =
+            baseOp === Op.BASE_SALARY && input.calendar.vacationWorkingDays
+              ? FLAG_VAC_WORKING_DAYS
+              : 0;
+          const baseAt = emitter.emitInto(baseOp, line, baseFlags, 1 + MONTHS);
           emitter.paramPool[baseAt] =
             position.hourlyRate > 0
               ? position.hourlyRate * position.dailyContractHours
@@ -1043,7 +1051,14 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
             emitter.paramPool[vacAt + 1 + m] = position.vacationMonthlyWeights[m];
           }
 
-          emitter.emit(Op.BASE_DEDUCT, line, 0, []);
+          // Carve vacation out of the base line — unless the hotel books it on
+          // top (vacationAdditive), in which case the line stays gross and the
+          // permanent Vacation Cost line is extra. Mirror of reference.ts's
+          // baseLine; nothing else changes, ACC_ADD_LINE on this line simply
+          // reads gross downstream (SS_BASE included, by design).
+          if (!input.calendar.vacationAdditive) {
+            emitter.emit(Op.BASE_DEDUCT, line, 0, []);
+          }
           break;
         }
         case "HOLIDAY_ACCRUAL": {

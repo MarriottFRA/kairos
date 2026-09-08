@@ -247,6 +247,115 @@ export const POOL_WEIGHT_DEFAULT = 1;
  */
 export const POOL_WEIGHT_MAX = 1000;
 
+/**
+ * Where a block's posting account comes from when it is not typed on the block
+ * itself — "post wherever X posts", kept in step automatically.
+ *
+ *   BLOCK           another block's cost account. Row for row if that block is
+ *                   per-row; its typed default otherwise.
+ *   POSITION_FIELD  one of the per-position system account columns (Salary,
+ *                   Benefits, Working Hours, Accrual) — so a Social-Security
+ *                   block can post wherever each row's salary posts.
+ *
+ * Depth one only: the block followed must carry its own typed account, never a
+ * source of its own (validated at save; a synced blob that breaks the rule
+ * degrades to "no account" rather than chasing a chain). Resolved at
+ * input-build time by applyAccountLinks, never at save time — a change to the
+ * followed block arrives through sync as a raw row upsert with no save.
+ */
+export type BlockAccountSource =
+  | { kind: "BLOCK"; blockId: string }
+  | { kind: "POSITION_FIELD"; field: BlockAccountField };
+
+export type BlockAccountField = "salary" | "benefits" | "hours" | "accrual";
+
+export const BLOCK_ACCOUNT_FIELDS: readonly BlockAccountField[] = [
+  "salary",
+  "benefits",
+  "hours",
+  "accrual",
+] as const;
+
+/** The per-position account columns a block may follow: the label the picker
+ *  shows and the permanent system head whose per-row account carries it. */
+export const BLOCK_ACCOUNT_FIELD_META: Record<
+  BlockAccountField,
+  { label: string; defId: (ou: string) => string }
+> = {
+  salary: { label: "Salary account", defId: (ou) => baseSalaryDefId(ou) },
+  benefits: { label: "Vacation (Benefits) account", defId: (ou) => vacationCostDefId(ou) },
+  hours: { label: "Working Hours account", defId: (ou) => systemStatDefId(ou, "HOURS") },
+  accrual: { label: "Accrual account", defId: (ou) => holidayAccrualDefId(ou) },
+};
+
+/** Shape-only normalization of a stored/synced source: an unknown kind, a
+ *  blank block id or a field outside the list reads as "no source". Cross-row
+ *  facts (does the block exist, does it itself follow) are the read model's
+ *  and the loaders' to settle. */
+export function normalizeAccountSource(raw: unknown): BlockAccountSource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const source = raw as { kind?: unknown; blockId?: unknown; field?: unknown };
+  if (source.kind === "BLOCK") {
+    const blockId = String(source.blockId ?? "").trim();
+    return blockId ? { kind: "BLOCK", blockId } : undefined;
+  }
+  if (source.kind === "POSITION_FIELD") {
+    const field = source.field as BlockAccountField;
+    return BLOCK_ACCOUNT_FIELDS.includes(field) ? { kind: "POSITION_FIELD", field } : undefined;
+  }
+  return undefined;
+}
+
+/** The resolved picture of a block's `accountSource`, for display only —
+ *  stamped onto BlockDto by blocks:list, never persisted, never resolved in
+ *  the renderer. */
+export interface BlockAccountLink {
+  /** "Pension" / "Salary account". */
+  targetLabel: string;
+  /** The followed block's typed default ("" for a position column). */
+  account: string;
+  /** true when the account differs row by row (per-row block or a column). */
+  perRow: boolean;
+  /** Set when the link cannot be honoured — the block is gone, or it follows
+   *  something itself. The line then computes but does not post. */
+  issue?: string;
+}
+
+/**
+ * The display picture of a block's account source, from the STORED facts of
+ * the blocks in the OU — the same reading applyAccountLinks makes, so what the
+ * header says and where the money lands cannot disagree. Undefined when the
+ * block has no source.
+ */
+export function describeAccountLink(
+  block: Pick<BlockDto, "accountSource">,
+  blockById: ReadonlyMap<string, Pick<BlockDto, "label" | "accountCode" | "accountLocked" | "accountSource">>
+): BlockAccountLink | undefined {
+  const source = block.accountSource;
+  if (!source) return undefined;
+  if (source.kind === "POSITION_FIELD") {
+    return { targetLabel: BLOCK_ACCOUNT_FIELD_META[source.field].label, account: "", perRow: true };
+  }
+  const target = blockById.get(source.blockId);
+  if (!target) {
+    return {
+      targetLabel: "a deleted block",
+      account: "",
+      perRow: false,
+      issue: "The block this follows no longer exists — pick an account.",
+    };
+  }
+  if (target.accountSource) {
+    return {
+      targetLabel: target.label,
+      account: "",
+      perRow: false,
+      issue: `${target.label} follows another block's account itself — follow that block directly.`,
+    };
+  }
+  return { targetLabel: target.label, account: target.accountCode, perRow: !target.accountLocked };
+}
+
 /** The payload the renderer sends to create/update a block. */
 export interface BlockInput {
   /** Omit to create; present to update an existing block. */
@@ -261,6 +370,11 @@ export interface BlockInput {
   /** COUNT_RATE only: the stats account the count line posts to. */
   statsAccountCode?: string;
   statsAccountLocked?: boolean;
+  /** Follow another block's account, or a position account column, instead of
+   *  typing one — see BlockAccountSource. While set, `accountLocked` is forced
+   *  true (the source decides per-row) and `accountCode` is stamped by the
+   *  repo as a snapshot of the followed account for older clients. */
+  accountSource?: BlockAccountSource;
   /** MULTIPLIER only. */
   base?: BlockBaseRef;
   /** MULTIPLIER + COMBINE base, or MULTIPLIER with `movement`: keep a per-row
@@ -342,6 +456,11 @@ export interface BlockDto {
   accountLocked: boolean;
   statsAccountCode: string;
   statsAccountLocked: boolean;
+  /** See BlockInput.accountSource. Absent = `accountCode` is the answer. */
+  accountSource?: BlockAccountSource;
+  /** Read-model only: what `accountSource` resolves to today (blocks:list
+   *  stamps it, like ssCumulativeNonJan). Absent when there is no source. */
+  accountLink?: BlockAccountLink;
   base?: BlockBaseRef;
   /** MULTIPLIER + COMBINE base, or with `movement` — see BlockInput. Defaults
    *  to true; drives whether the grid shows a multiplier column

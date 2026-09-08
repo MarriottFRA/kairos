@@ -302,6 +302,23 @@ export type OutputSource =
  */
 export type OutputValueKind = "currency" | "count" | "percent";
 
+/**
+ * How a line's twelve numbers READ.
+ *  - AMOUNT: genuine monthly amounts — money, hours, covers.
+ *  - LEVEL:  a level-valued statistic (headcount, position count, an allocation
+ *            split, weekly hours) stored as January-plus-changes, because the
+ *            BST reads such a row as the running sum of its months. The level in
+ *            month m is the sum of months 1..m; the year total is the December
+ *            level. See toMonthlyDeltas.
+ * Decided by the projector that writes the line and stored on it, so the
+ * results cache can be rebuilt from lines alone.
+ */
+export type OutputEncoding = "AMOUNT" | "LEVEL";
+
+/** A results-cache row's encoding: the lines' own, or MIXED when both kinds
+ *  of line landed on one dept × account (summed as amounts, and flagged). */
+export type ResultEncoding = OutputEncoding | "MIXED";
+
 /** One dept×account result row (source lines aggregated in the repo). */
 export interface OutputAggRowDto {
   dept: string;

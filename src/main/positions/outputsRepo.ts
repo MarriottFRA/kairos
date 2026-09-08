@@ -17,29 +17,31 @@
  */
 
 import type Database from "better-sqlite3-multiple-ciphers";
-import { accountAllowed } from "../../shared/positions/fields";
 import {
   accountVariants,
   bareAccount,
   bareDept,
-  comboKeyOf,
   deptVariants,
-  displayAccount,
-  displayDept,
 } from "../../shared/positions/comboKey";
 import { listAccounts, listDepartments } from "../mappingTables/repo";
 import {
   OutputAggRowDto,
+  OutputEncoding,
   OutputLineDto,
   OutputSource,
-  OutputValueKind,
   OutputsResponse,
 } from "../../shared/positions/ipc";
 import {
-  STATS_ACCOUNT_FILTER,
   WEEKLY_HOURS_STAT_ACCOUNT,
   WEEKLY_HOURS_STAT_DEPARTMENT,
 } from "../../shared/positions/systemAccounts";
+import {
+  aggregateResultRows,
+  normalizeSource,
+  readLinesForAggregation,
+  readResultsCache,
+  writeResultsCache,
+} from "./resultsCache";
 import { AllocationDto } from "../../shared/allocations/ipc";
 import {
   DepartmentAgg,
@@ -70,6 +72,8 @@ export interface OutputLineWrite {
   sourceRef?: string;
   /** Small JSON-serializable blob the Results inspector renders as-is. */
   detail?: Record<string, unknown>;
+  /** How the twelve values read (see OutputEncoding). Defaults to AMOUNT. */
+  encoding?: OutputEncoding;
 }
 
 /** Sum a 12-month vector. */
@@ -195,9 +199,8 @@ export function projectOutputLines(
       // means the position was empty.
       if (Math.abs(sumMonths(levels)) > 1e-9) nonZero++;
 
-      const months = cumulativeDefIds.has(line.component.id as string)
-        ? toMonthlyDeltas(levels)
-        : levels;
+      const isLevel = cumulativeDefIds.has(line.component.id as string);
+      const months = isLevel ? toMonthlyDeltas(levels) : levels;
       const total = sumMonths(months);
       lines.push({
         positionId: position.id as string,
@@ -209,6 +212,7 @@ export function projectOutputLines(
         total,
         source: "ENGINE",
         sourceRef: position.id as string,
+        encoding: isLevel ? "LEVEL" : "AMOUNT",
       });
     }
     if (nonZero === 0) allZeroPositions++;
@@ -403,6 +407,7 @@ export function projectAllocationLines(
           percent: column.get(dept.departmentCode) ?? 0,
           excluded: excluded.has(dept.departmentCode),
         },
+        encoding: "LEVEL",
       });
     }
   }
@@ -453,6 +458,7 @@ export function projectSetupLines(defaults: {
       source: "SETUP",
       sourceRef: "weeklyHours",
       detail: { setting: "Weekly Hours", weeklyHours: weekly },
+      encoding: "LEVEL",
     },
   ];
 }
@@ -619,11 +625,24 @@ export function computeFingerprint(
 // Write (Recalculate)
 // ---------------------------------------------------------------------------
 
+/**
+ * Persist a run: the header, every line, AND the dept × account cache the
+ * lines aggregate to — one transaction, so the three can never disagree.
+ *
+ * `year` is the scenario's planning year, denormalised onto the cache rows
+ * because the scenario row lives in the other store and a period label like
+ * "2027-01" has to be derivable from a cache row alone.
+ */
 export function writeRun(
   db: Db,
   scope: OuScope,
   scenarioId: string,
-  run: { fingerprint: string; computedAt: string; positionCount: number },
+  run: {
+    fingerprint: string;
+    computedAt: string;
+    positionCount: number;
+    year: number;
+  },
   lines: OutputLineWrite[]
 ): void {
   db.transaction(() => {
@@ -646,8 +665,8 @@ export function writeRun(
       db,
       `INSERT INTO engine_output_lines
          (ou, scenario_id, position_id, component_def_id, label, dept, account,
-          monthly_values, total, source, source_ref, detail)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          monthly_values, total, source, source_ref, detail, encoding)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const line of lines) {
       insert.run(
@@ -662,62 +681,25 @@ export function writeRun(
         line.total,
         line.source ?? "ENGINE",
         line.sourceRef ?? "",
-        JSON.stringify(line.detail ?? {})
+        JSON.stringify(line.detail ?? {}),
+        line.encoding ?? "AMOUNT"
       );
     }
+
+    writeResultsCache(
+      db,
+      scope,
+      scenarioId,
+      run.year,
+      run.computedAt,
+      aggregateResultRows(lines)
+    );
   })();
 }
 
 // ---------------------------------------------------------------------------
 // Read (Results page)
 // ---------------------------------------------------------------------------
-
-/** Convention carried from the workbook: stats accounts (counts/hours/FTE) are
- *  the A9… range, everything else is currency. Display-only — it drives the
- *  Results page's Costs/Statistics toggle. Resolved through the shared filter
- *  and matcher, so it cannot drift from what the account pickers offer. */
-function isStatsAccount(account: string): boolean {
-  return accountAllowed(account, STATS_ACCOUNT_FILTER);
-}
-
-/** Display order for a row's source chips — engine first, then the hand-made
- *  sources in the order a user meets them in the app. */
-const SOURCE_ORDER: readonly OutputSource[] = [
-  "ENGINE",
-  "MANUAL",
-  "ALLOCATION",
-  "BUYOUT",
-  "SETUP",
-];
-
-const SOURCE_SET: ReadonlySet<string> = new Set(SOURCE_ORDER);
-
-/** Rows written before the provenance columns existed carry '' — they are all
- *  engine lines, which is what the column DEFAULT says too. */
-function normalizeSource(value: unknown): OutputSource {
-  const source = String(value ?? "");
-  return SOURCE_SET.has(source) ? (source as OutputSource) : "ENGINE";
-}
-
-/**
- * How the Results grid should read this row's numbers.
- *
- * An allocation split is a share out of 100, so "percent" tells the grid to
- * render it with a % sign rather than as money. A row is only a percent if EVERY
- * line in it is one: the moment a real statistic shares the account, the numbers
- * are ordinary counts again and pretending otherwise would hide the collision.
- */
-function resolveValueKind(
-  isStats: boolean,
-  sources: ReadonlySet<OutputSource>
-): OutputValueKind {
-  if (sources.size === 1 && sources.has("ALLOCATION")) return "percent";
-  return isStats ? "count" : "currency";
-}
-
-/** How many block names one row will carry. A row that names twenty blocks
- *  answers nothing, and the inspector is where the full list belongs. */
-export const BLOCK_LABEL_CAP = 12;
 
 /**
  * Code → description for accounts and departments, keyed on the CANONICAL code.
@@ -763,84 +745,34 @@ export function readOutputs(
 
   if (!runRow) return { run: null, stale: false, rows: [] };
 
-  // `label` carries the block name for engine lines — the per-block grain the
-  // aggregation below throws away. It has always been on disk; selecting it is
-  // the whole cost of naming a row's blocks (no recalculation, no engine).
-  const lineRows = prepared(
-    valuesDb,
-    `SELECT dept, account, monthly_values, total, source, label
-       FROM engine_output_lines
-      WHERE ou = ? AND scenario_id = ?`
-  ).all(scope.ou, scenarioId) as Array<{
-    dept: string;
-    account: string;
-    monthly_values: string;
-    total: number;
-    source: string;
-    label: string | null;
-  }>;
+  // The aggregation was done once, when the run was written. A run from before
+  // the cache existed (secure v8) has lines but no cache rows: aggregate them on
+  // the fly — the same function, so the page looks identical — but report the
+  // run as stale, because those lines predate `encoding` and only a fresh
+  // Recalculate can write the cache properly. Nothing is persisted from a read.
+  let cacheRows = readResultsCache(valuesDb, scope, scenarioId);
+  let predatesCache = false;
+  if (cacheRows.length === 0) {
+    const lines = readLinesForAggregation(valuesDb, scope, scenarioId);
+    if (lines.length > 0) {
+      cacheRows = aggregateResultRows(lines);
+      predatesCache = true;
+    }
+  }
 
   const names = nameLookup(structureDb);
-  const byKey = new Map<string, OutputAggRowDto>();
-  const sourcesByKey = new Map<string, Set<OutputSource>>();
-  /** Per row: block label → summed |contribution|, so the chips can be ordered
-   *  by what actually drives the number rather than by insertion. */
-  const blocksByKey = new Map<string, Map<string, number>>();
-  for (const line of lineRows) {
-    // Keyed on the canonical combo, not the raw strings: "D0410" and a typed
-    // "0410" are one row on this page because they are one row in the BST.
-    const key = comboKeyOf(line.dept, line.account);
-    const account = displayAccount(line.account);
-    let row = byKey.get(key);
-    if (!row) {
-      row = {
-        dept: displayDept(line.dept),
-        account,
-        accountName: names.accounts.get(bareAccount(line.account)) ?? "",
-        departmentName: names.departments.get(bareDept(line.dept)) ?? "",
-        isStats: isStatsAccount(account),
-        months: new Array(MONTHS).fill(0),
-        total: 0,
-        sources: [],
-        blockLabels: [],
-        valueKind: "currency",
-      };
-      byKey.set(key, row);
-      sourcesByKey.set(key, new Set());
-      blocksByKey.set(key, new Map());
-    }
-    const source = normalizeSource(line.source);
-    sourcesByKey.get(key)!.add(source);
-    const label = (line.label ?? "").trim();
-    if (source === "ENGINE" && label) {
-      const blocks = blocksByKey.get(key)!;
-      blocks.set(label, (blocks.get(label) ?? 0) + Math.abs(line.total));
-    }
-    let months: number[] = [];
-    try {
-      months = JSON.parse(line.monthly_values) as number[];
-    } catch {
-      months = [];
-    }
-    for (let m = 0; m < MONTHS; m++) row.months[m] += Number(months[m]) || 0;
-    row.total += line.total;
-  }
-
-  for (const [key, row] of byKey) {
-    const sources = sourcesByKey.get(key)!;
-    row.sources = SOURCE_ORDER.filter((source) => sources.has(source));
-    row.blockLabels = [...blocksByKey.get(key)!.entries()]
-      // Biggest driver first, name as the tie-break so a row's chips are stable
-      // between reads (two blocks contributing zero must not swap places).
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, BLOCK_LABEL_CAP)
-      .map(([label]) => label);
-    row.valueKind = resolveValueKind(row.isStats, sources);
-  }
-
-  const rows = [...byKey.values()].sort(
-    (a, b) => a.dept.localeCompare(b.dept) || a.account.localeCompare(b.account)
-  );
+  const rows: OutputAggRowDto[] = cacheRows.map((row) => ({
+    dept: row.dept,
+    account: row.account,
+    accountName: names.accounts.get(bareAccount(row.account)) ?? "",
+    departmentName: names.departments.get(bareDept(row.dept)) ?? "",
+    isStats: row.isStats,
+    months: row.months,
+    total: row.total,
+    sources: row.sources,
+    blockLabels: row.blockLabels,
+    valueKind: row.valueKind,
+  }));
 
   const currentFingerprint = computeFingerprint(structureDb, valuesDb, scope, scenarioId);
 
@@ -850,7 +782,7 @@ export function readOutputs(
       lineCount: runRow.line_count,
       positionCount: runRow.position_count,
     },
-    stale: currentFingerprint !== runRow.fingerprint,
+    stale: predatesCache || currentFingerprint !== runRow.fingerprint,
     rows,
   };
 }

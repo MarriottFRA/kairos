@@ -19,6 +19,7 @@ import {
   systemStatDefId,
   vacationCostDefId,
   type BlockDto,
+  BLOCK_ACCOUNT_FIELD_META,
 } from "../blocks/ipc";
 import { KPI_EXPLICIT_DEPT_KEY } from "../kpiDrivers/ipc";
 import {
@@ -980,4 +981,115 @@ export function applyPositionAccounts(
     if (!merged.has(key)) out.push(value);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Account links — "post wherever X posts"
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve every block whose account FOLLOWS another block or a position
+ * account column (BlockDto.accountSource) into the two things the compiler
+ * actually reads: the definition's own account, and per-row overrides.
+ *
+ * Runs AFTER applyPositionAccounts on purpose: a follower of the Salary column
+ * simply reads the row applyPositionAccounts just synthesized for the Base
+ * Salary head, so "the account this row's salary posts to" has exactly one
+ * definition in the codebase. And after resolveBlockValues, whose locked
+ * policy has already dropped the follower's own stored per-row accounts (a
+ * follower is always locked — the source decides per row, not the follower).
+ *
+ * Resolution reads the followed block's STORED literal only, never its
+ * resolved value: a synced blob that follows a follower degrades to "no
+ * account" (the line computes, is not posted, and the Results diagnostics name
+ * it) instead of chasing a chain — which is also what makes a cycle harmless.
+ *
+ * Same array back when nothing follows (the applyPinnedRowRates contract);
+ * otherwise a NEW array with rows merged or synthesized under the follower's
+ * def, never appended beside an existing `positionId|defId` (compile is
+ * last-write-wins on that key). An account-only synthesized row is
+ * value-neutral: every compile read is `value?.slot ?? 0`.
+ *
+ * Cost: O(values) for the index + O(followers × positions) map lookups. The
+ * engine never sees any of this — only the aggregation key a line books to.
+ */
+export function applyAccountLinks(
+  ou: string,
+  definitions: CostComponentDefinition[],
+  blocks: readonly BlockDto[],
+  positions: readonly Position[],
+  componentValues: ComponentValue[]
+): ComponentValue[] {
+  const followers = blocks.filter((block) => block.accountSource);
+  if (followers.length === 0) return componentValues;
+
+  const blockById = new Map(blocks.map((block) => [block.id, block]));
+  const defById = new Map(definitions.map((def) => [def.id as string, def]));
+  const byKey = new Map<string, ComponentValue>();
+  for (const value of componentValues) {
+    byKey.set(`${value.positionId as string}|${value.componentDefId as string}`, value);
+  }
+
+  const out: ComponentValue[] = [];
+  const merged = new Set<string>();
+
+  for (const follower of followers) {
+    const def = defById.get(follower.costDefId);
+    if (!def) continue;
+    const resolved = resolveAccountLinkTarget(ou, follower, blockById);
+    def.accountCode = resolved.defaultAccount;
+    if (!resolved.perRowDefId) continue;
+
+    for (const position of positions) {
+      if (position.deletedAt !== null) continue;
+      const positionId = position.id as string;
+      const source = byKey.get(`${positionId}|${resolved.perRowDefId}`);
+      // No row on the source = the source's own default applies there, and
+      // the follower's def already carries that same default.
+      if (source?.accountCode === undefined) continue;
+      const key = `${positionId}|${follower.costDefId}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        merged.add(key);
+        out.push({ ...existing, accountCode: source.accountCode });
+        continue;
+      }
+      out.push({
+        positionId: position.id,
+        componentDefId: follower.costDefId as ComponentDefId,
+        accountCode: source.accountCode,
+        updatedAt: "",
+        deletedAt: null,
+      });
+    }
+  }
+
+  for (const value of componentValues) {
+    const key = `${value.positionId as string}|${value.componentDefId as string}`;
+    if (!merged.has(key)) out.push(value);
+  }
+  return out;
+}
+
+/** What a follower's source resolves to from the STORED facts alone:
+ *  the account its definition carries, and — when the account differs row
+ *  by row — the definition whose per-row values to copy. */
+export function resolveAccountLinkTarget(
+  ou: string,
+  follower: Pick<BlockDto, "accountSource">,
+  blockById: ReadonlyMap<string, BlockDto>
+): { defaultAccount: string; perRowDefId?: string } {
+  const source = follower.accountSource;
+  if (!source) return { defaultAccount: "" };
+  if (source.kind === "POSITION_FIELD") {
+    // The system head's own account is blank by seed; the row supplies it.
+    return { defaultAccount: "", perRowDefId: BLOCK_ACCOUNT_FIELD_META[source.field].defId(ou) };
+  }
+  const target = blockById.get(source.blockId);
+  // Gone, or itself a follower: depth one, so this is "no account".
+  if (!target || target.accountSource) return { defaultAccount: "" };
+  return {
+    defaultAccount: target.accountCode,
+    perRowDefId: target.accountLocked ? undefined : target.costDefId,
+  };
 }

@@ -30,6 +30,7 @@ import {
   BLOCKS_CHANNELS,
   BlockInput,
   BlocksListResponse,
+  describeAccountLink,
 } from "../../shared/blocks/ipc";
 
 function ok<T>(data: T): IpcResult<T> {
@@ -61,14 +62,22 @@ function readModel(db: LocalDb, scope: Scope): BlocksListResponse {
   // gate for the per-row "Opening base" column — the renderer's grid and live
   // sim both read it off the block, so neither re-joins the scheme.
   const schemeById = new Map(ssSchemes.map((scheme) => [scheme.id as string, scheme]));
-  const blocks = listBlocks(db, scope).map((block) => {
-    if (block.blockType !== "SOCIAL_SECURITY" || !block.ssSchemeId) return block;
-    const scheme = schemeById.get(block.ssSchemeId);
+  const stored = listBlocks(db, scope);
+  // Same idea for a block whose account FOLLOWS another block or a position
+  // column: the resolved picture (label, account, per-row, any problem) is
+  // stamped here from the stored blocks, so the dialog and the band header
+  // never resolve it themselves.
+  const blockById = new Map(stored.map((block) => [block.id, block]));
+  const blocks = stored.map((block) => {
+    const accountLink = describeAccountLink(block, blockById);
+    const withLink = accountLink ? { ...block, accountLink } : block;
+    if (withLink.blockType !== "SOCIAL_SECURITY" || !withLink.ssSchemeId) return withLink;
+    const scheme = schemeById.get(withLink.ssSchemeId);
     const cumulativeNonJan =
       !!scheme &&
       (scheme.accumulationMode ?? "CUMULATIVE") === "CUMULATIVE" &&
       (scheme.taxYearStartMonth ?? 1) > 1;
-    return { ...block, ssCumulativeNonJan: cumulativeNonJan };
+    return { ...withLink, ssCumulativeNonJan: cumulativeNonJan };
   });
   return {
     blocks,
