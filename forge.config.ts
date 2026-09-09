@@ -69,6 +69,26 @@ const config: ForgeConfig = {
         // TPM support while dev keeps working.
         'koffi',
         '@koromix/koffi-win32-x64',
+        // exceljs (report/pack exports) is externalized in vite.base.config.ts
+        // together with every transitive dep, so main.js require()s them at
+        // runtime and each one must be copied here or the packaged app dies on
+        // launch with "Cannot find module 'exceljs'". Mirrors PSLoader's list.
+        'exceljs', 'jszip', 'archiver', 'dayjs', 'fast-csv', 'readable-stream', 'saxes', 'tmp', 'unzipper',
+        '@fast-csv/format', '@fast-csv/parse', 'archiver-utils', 'async', 'balanced-match', 'base64-js',
+        'big-integer', 'binary', 'bl', 'bluebird', 'brace-expansion', 'buffer', 'buffer-crc32',
+        'buffer-indexof-polyfill', 'buffers', 'chainsaw', 'compress-commons', 'concat-map', 'crc-32',
+        'crc32-stream', 'duplexer2', 'end-of-stream', 'fs-constants', 'fs.realpath', 'fstream', 'glob',
+        'graceful-fs', 'ieee754', 'immediate', 'inflight', 'inherits', 'lazystream', 'lie',
+        'listenercount', 'lodash.defaults', 'lodash.difference', 'lodash.escaperegexp', 'lodash.flatten',
+        'lodash.groupby', 'lodash.isboolean', 'lodash.isequal', 'lodash.isfunction', 'lodash.isnil',
+        'lodash.isplainobject', 'lodash.isundefined', 'lodash.union', 'lodash.uniq', 'minimatch', 'mkdirp',
+        'normalize-path', 'once', 'pako', 'path-is-absolute', 'readdir-glob', 'rimraf', 'safe-buffer',
+        'setimmediate', 'string_decoder', 'tar-stream', 'traverse', 'util-deprecate', 'wrappy',
+        'xmlchars', 'zip-stream', 'process-nextick-args', 'core-util-is', 'isarray',
+        // exceljs require()s uuid from cf-rule-ext-xform.js as soon as a workbook
+        // is read. It is a root-level package here, not nested under exceljs, so
+        // it must be copied explicitly like every other transitive dep.
+        'uuid',
       ];
 
       console.log('Copying dependencies from:', sourceNodeModules);
