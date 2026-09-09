@@ -574,8 +574,6 @@ export async function getCalendarYear(
       // normalizeBankHoliday re-validates the parsed map, so junk on disk
       // degrades to "no overrides" rather than throwing on read.
       bankHolidayCoverageByDepartment: parseCoverageJson(head.bank_holiday_coverage_json),
-    },
-    {
       // normalizeVacationPolicy maps an unknown basis to FLAT, so junk on disk
       // degrades to the pre-v5 behaviour rather than throwing on read.
       vacationDayBasis: head.vacation_day_basis as VacationDayBasis,
@@ -594,7 +592,6 @@ export async function saveCalendarYear(calendar: CalendarYear): Promise<void> {
     year,
     calendar.weekendMask ?? DEFAULT_WEEKEND_MASK,
     calendar.months ?? [],
-    calendar,
     calendar
   );
 

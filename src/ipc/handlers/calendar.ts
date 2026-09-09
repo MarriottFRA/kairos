@@ -80,8 +80,9 @@ export class CalendarHandlers {
         year,
         Number(request?.weekendMask),
         Array.isArray(request?.months) ? request.months : [],
-        // The request is the full CalendarYear; the bank-holiday premium config
-        // rides on the head and normalizeBankHoliday coerces it into shape.
+        // The request is the full CalendarYear; the bank-holiday premium and
+        // vacation-policy config both ride on its head, and normalizeCalendar
+        // coerces them into shape.
         request
       );
 

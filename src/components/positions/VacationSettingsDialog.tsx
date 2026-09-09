@@ -107,7 +107,7 @@ export default function VacationSettingsDialog({
               disabled={!calendar}
               onChange={(_event, next: VacationDayBasis | null) => next && setDayBasis(next)}
             >
-              <ToggleButton value="FLAT">Calendar month (÷ 30)</ToggleButton>
+              <ToggleButton value="FLAT">Calendar month</ToggleButton>
               <ToggleButton value="WORKING_DAYS">Working days</ToggleButton>
             </ToggleButtonGroup>
             <Typography variant="caption" color="text.secondary">

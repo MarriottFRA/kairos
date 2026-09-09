@@ -1025,6 +1025,41 @@ export default function Positions() {
   }, [derived, apiRef]);
 
   /**
+   * Repaint EVERY row's derived cells, on demand.
+   *
+   * The same invariant as above, with the whole grid as the diff — but where
+   * the blockResults case diffs to find who moved, this one is asked. It exists
+   * for the hotel-year calendar: vacation cost and derived manhours are per-row
+   * pure only in the row, since both are valued against the calendar, so saving
+   * the vacation policy moves every row's displayed figure at once while not
+   * one row object moves. The columns read through `derivedRef`, whose identity
+   * never changes by design, so without this the grid keeps painting the old
+   * numbers until something else remounts it.
+   *
+   * Deliberately a counter and NOT a `calendarCtx` dependency. Keyed on the
+   * context this would re-run (and re-check) on every committed cell edit,
+   * because reading `rows` inside it makes `rows` a dependency — a guard that
+   * has to be right rather than a trigger that only fires when something asks.
+   * Bump it from the narrow places that change the calendar under a mounted
+   * grid; the load path needs nothing, as its rows arrive with it.
+   *
+   * Skipped at 0 (the initial render is already fresh) and filtered to live
+   * nodes, for the same reasons the blockResults diff is. Passive, and for the
+   * same timing reason: it must run AFTER the render that recomputed the maps,
+   * or it repaints the values it was called to replace.
+   */
+  const [derivedRepaint, setDerivedRepaint] = useState(0);
+  const rowsRef = useRef<PositionRow[]>(rows);
+  rowsRef.current = rows;
+  useEffect(() => {
+    if (derivedRepaint === 0) return;
+    const api = apiRef.current;
+    if (!api) return;
+    const live = rowsRef.current.filter((row) => api.getRowNode(row.id));
+    if (live.length > 0) api.updateRows(live.map((row) => ({ id: row.id })));
+  }, [derivedRepaint, apiRef]);
+
+  /**
    * Report what a write did to the OTHER member hotels.
    *
    * Two things must never be silent: rows appearing in hotels the user is not
@@ -1648,6 +1683,9 @@ export default function Positions() {
           const persisted = await saveCalendar(next);
           setCalendarYear(persisted);
           setCalendarCtx(buildCalendarContext(persisted));
+          // The policy revalues every row's Vacation Cost without touching a
+          // single row, so ask for the repaint the grid cannot infer.
+          setDerivedRepaint((epoch) => epoch + 1);
           setVacationSettingsOpen(false);
           setToast("Vacation settings updated");
         } catch (err) {

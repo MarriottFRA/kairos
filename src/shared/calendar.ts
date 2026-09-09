@@ -347,6 +347,13 @@ export function reseedWeekends(calendar: CalendarYear, weekendMask: number): Cal
   };
 }
 
+/** Everything on a calendar's head that is neither the key nor the month rows:
+ *  the bank-holiday premium and the vacation policy. They live together in ONE
+ *  parameter on purpose — they used to be two, and every caller passed the same
+ *  object twice, so forgetting the second one silently normalized those fields
+ *  from `{}` and reset a hotel's saved policy to the defaults on every write. */
+export type CalendarHeadConfig = Partial<BankHolidayConfig & VacationPolicyConfig>;
+
 /**
  * Coerce anything read back from storage into a well-formed calendar: exactly 12
  * months, integral non-negative counts, calendar days re-derived from the year.
@@ -356,8 +363,7 @@ export function normalizeCalendar(
   year: number,
   weekendMask: number,
   months: Array<Partial<CalendarMonth>>,
-  bankHoliday: Partial<BankHolidayConfig> = {},
-  vacationPolicy: Partial<VacationPolicyConfig> = {}
+  head: CalendarHeadConfig = {}
 ): CalendarYear {
   const byMonth = new Map(months.map((row) => [Number(row.month), row]));
   const mask = Number.isFinite(weekendMask) ? weekendMask : DEFAULT_WEEKEND_MASK;
@@ -384,8 +390,8 @@ export function normalizeCalendar(
           : countWeekendDays(year, month, mask),
       };
     }),
-    ...normalizeBankHoliday(bankHoliday),
-    ...normalizeVacationPolicy(vacationPolicy),
+    ...normalizeBankHoliday(head),
+    ...normalizeVacationPolicy(head),
   };
 }
 
