@@ -114,7 +114,7 @@ export const STRUCTURE_FIELD_LABELS: Record<string, string> = {
   validation: "Validation",
   vector: "Vector",
   visible: "Shown",
-  weeklyHours: "Weekly hours",
+  weeklyHours: "Contract week",
   weekendMask: "Weekend days",
   yearlyCap: "Yearly cap",
 };

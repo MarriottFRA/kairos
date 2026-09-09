@@ -12,6 +12,7 @@
  * rebuild says exactly what a write would have said.
  */
 
+import { effectiveWeekOf } from "../../../shared/positions/effectiveWeek";
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { MAPPING_TABLES_SQL } from "../../mappingTables/schema";
@@ -228,7 +229,7 @@ function mixedLines(): OutputLineWrite[] {
       encoding: "LEVEL",
     }),
     line({ dept: "D0410", account: "A988699", months: months(160), label: "Hours Worked" }),
-    line({ dept: "D0410", account: "A988699", months: months(1, 0), label: "Weekly Hours", source: "SETUP", encoding: "LEVEL" }),
+    line({ dept: "D0410", account: "A988699", months: months(1, 0), label: "Effective week", source: "SETUP", encoding: "LEVEL" }),
     line({ dept: "D0510", account: "A975010", months: months(15.23, 0), label: "Alloc", source: "ALLOCATION", encoding: "LEVEL" }),
     line({ dept: "D0510", account: "A511000", months: months(-5) }),
   ];
@@ -304,7 +305,7 @@ describe("aggregateResultRows", () => {
           { departmentCode: "D0510", metrics: { ...ZERO_METRICS, headcount: 1, fte: 1 } },
         ]
       ),
-      projectSetupLines({ weeklyHours: 40 }),
+      projectSetupLines(effectiveWeekOf(40, { productiveDays: 260 })),
       [],
     ];
     for (const lines of shapes) {

@@ -310,13 +310,16 @@ describe("Recalculate → Results rows", () => {
     expect(outputs.rows).toHaveLength(1);
     expect(outputs.rows[0].account).toBe(POSITION_COUNT_ACCOUNT);
     // ...and now it is explained rather than silent.
-    expect(projection.unpostedByLabel).toMatchObject({
+    expect(projection.unpostedByLabel).toEqual({
       "Base Salary": 1,
       "Vacation Cost": 1,
-      "Vacation Accrual": 1,
       "Hours Worked": 1,
-      Headcount: 1,
     });
+    // Headcount (derived from the grade, read-only) and Vacation Accrual
+    // (opt-in) are deliberately NOT explained: neither is a column this user
+    // could or would want to fill in — see isSilentUnpostedDef.
+    expect(projection.unpostedByLabel).not.toHaveProperty("Headcount");
+    expect(projection.unpostedByLabel).not.toHaveProperty("Vacation Accrual");
   });
 
   it("splits Costs from Statistics on the A9 prefix", async () => {

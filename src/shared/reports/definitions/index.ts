@@ -9,11 +9,15 @@
 
 import { CompiledReport, compileDefinition } from "../compile";
 import type { ReportDefinition } from "../types";
-import { PAYROLL_SUMMARY } from "./payrollSummary";
+import { PAYROLL_FTE_SUMMARY } from "./payrollFteSummary";
+import { ROOMS_KPI_REPORT } from "./roomsKpi";
 import { STAFFING_STATS } from "./staffingStats";
+import { SUMMARY_PL } from "./summaryPl";
 
 export const BUILTIN_REPORT_DEFINITIONS: readonly ReportDefinition[] = [
-  PAYROLL_SUMMARY,
+  SUMMARY_PL,
+  PAYROLL_FTE_SUMMARY,
+  ROOMS_KPI_REPORT,
   STAFFING_STATS,
 ];
 

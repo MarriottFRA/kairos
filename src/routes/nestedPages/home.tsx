@@ -83,6 +83,7 @@ import {
   PositionDefaults,
   buildDefaultPositionDefaults,
   resolvePositionDefaults,
+  fullTimeReference,
 } from "../../shared/positionDefaults";
 import {
   WEEKLY_HOURS_STAT_ACCOUNT,
@@ -92,7 +93,18 @@ import {
   useBudgetYear,
   useSelectedHotel,
   useSettingsStore,
+  usePlanningScenarioId,
 } from "../../store/settings";
+import type { ScenarioDto } from "../../shared/positions/ipc";
+import { resolvePlanningScenario } from "../../shared/positions/scenarioResolve";
+import {
+  EMPTY_ROSTER_VACATION,
+  describeEffectiveWeek,
+  effectiveWeekOf,
+} from "../../shared/positions/effectiveWeek";
+import type { EffectiveWeekResponse } from "../../shared/reports/ipc";
+import { listScenarios } from "../../services/scenarioService";
+import { loadEffectiveWeek } from "../../services/reportsService";
 
 // One height for every interactive control in the toolbar, and one for the grid's
 // rows/header. Sharing these constants is what keeps the row of controls reading
@@ -480,6 +492,79 @@ export default function Home() {
     () => (defaults && calendar ? resolvePositionDefaults(defaults, calendar) : null),
     [defaults, calendar]
   );
+
+  // ── Effective week ──
+  // The roster's share of the derivation (its FTE-weighted average vacation)
+  // comes from the planning scenario of this year, read the way the run reads
+  // it; the contract week and the day defaults are the ones being edited on
+  // this page, so the cell follows every keystroke. Best-effort: no scenario
+  // for the year, or a locked store, degrades to the setup alone and says so.
+  const planningScenarioId = usePlanningScenarioId();
+  const [rosterScenario, setRosterScenario] = useState<ScenarioDto | null>(null);
+  const [roster, setRoster] = useState<EffectiveWeekResponse | null>(null);
+  const [rosterError, setRosterError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!selectedHotelOu) {
+      setRosterScenario(null);
+      setRoster(null);
+      setRosterError(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const scenarios = await listScenarios(selectedHotelOu, year);
+        const scenario = resolvePlanningScenario(scenarios, year, planningScenarioId);
+        if (cancelled) return;
+        setRosterScenario(scenario);
+        if (!scenario) {
+          setRoster(null);
+          setRosterError(null);
+          return;
+        }
+        const response = await loadEffectiveWeek(selectedHotelOu, scenario.id);
+        if (cancelled) return;
+        setRoster(response);
+        setRosterError(null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to derive the effective week:", err);
+        setRoster(null);
+        setRosterError(err instanceof Error ? err.message : "The positions could not be read");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // savedDefaultsSig: a save may follow a calculation elsewhere; re-read what was posted.
+  }, [selectedHotelOu, year, planningScenarioId, savedDefaultsSig]);
+
+  const effectiveWeek = useMemo(() => {
+    if (!defaults || !resolvedDefaults) return null;
+    const contractWeek = Number(defaults.weeklyHours);
+    if (!Number.isFinite(contractWeek) || contractWeek <= 0) return null;
+    return effectiveWeekOf(
+      contractWeek,
+      fullTimeReference(resolvedDefaults),
+      roster?.derivation ?? EMPTY_ROSTER_VACATION
+    );
+  }, [defaults, resolvedDefaults, roster]);
+
+  const effectiveWeekStatus = useMemo((): { text: string; tone: "success" | "warning" | "neutral" } => {
+    if (!effectiveWeek) return { text: "Enter a contract week to derive it.", tone: "neutral" };
+    if (rosterError) return { text: `Derived from the setup alone — ${rosterError}.`, tone: "warning" };
+    if (!rosterScenario) return { text: `No ${year} scenario yet — derived from the setup alone.`, tone: "neutral" };
+    if (!roster || roster.posted === null) {
+      return { text: `Not yet posted — calculate ${rosterScenario.label} to post it.`, tone: "warning" };
+    }
+    if (Math.abs(roster.posted - effectiveWeek.effectiveWeek) > 0.005) {
+      return {
+        text: `The last calculation posted ${roster.posted.toFixed(2)}h — recalculate ${rosterScenario.label} to post ${effectiveWeek.effectiveWeek.toFixed(2)}h.`,
+        tone: "warning",
+      };
+    }
+    return { text: `Posted by the last calculation of ${rosterScenario.label}.`, tone: "success" };
+  }, [effectiveWeek, roster, rosterScenario, rosterError, year]);
 
   const calendarDirty = useMemo(
     () => !!calendar && calendarSignature(calendar) !== savedSnapshot,
@@ -1334,28 +1419,59 @@ export default function Home() {
                 created.
               </Typography>
             </Box>
-            <Field label="Weekly Hours" hint="Sets the Daily Hours default for new positions (Weekly ÷ 5).">
-              <TextField
-                type="number"
-                size="small"
-                value={defaults?.weeklyHours ?? ""}
-                disabled={!defaults}
-                onChange={(event) => handleWeeklyHoursChange(Number(event.target.value))}
-                slotProps={{ htmlInput: { min: 0 } }}
-                sx={{ width: 132, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
-              />
-              {/* This box is the only place the figure is entered, and it now
-                  posts to the budget — so the field says where, rather than
-                  leaving a user to find an unexplained row on Results. */}
-              <Typography
-                variant="caption"
-                sx={{ display: "block", mt: 0.5, color: "text.secondary" }}
+            <Stack direction="row" spacing={2} sx={{ alignItems: "flex-start" }}>
+              <Field
+                label="Contract week"
+                hint="What a full-time contract says, in hours. Sets the Daily Hours default for new positions (÷ 5) and is the yardstick every position's FTE is measured against. Not posted — the effective week beside it is."
               >
-                Reports to {WEEKLY_HOURS_STAT_DEPARTMENT} / {WEEKLY_HOURS_STAT_ACCOUNT} in
-                January.
-              </Typography>
-            </Field>
+                <TextField
+                  type="number"
+                  size="small"
+                  value={defaults?.weeklyHours ?? ""}
+                  disabled={!defaults}
+                  onChange={(event) => handleWeeklyHoursChange(Number(event.target.value))}
+                  slotProps={{ htmlInput: { min: 0 } }}
+                  sx={{ width: 132, "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT } }}
+                />
+              </Field>
+              {/* Derived, never typed: the contract week over the days a
+                  full-timer actually works once the roster's average vacation
+                  and the public holidays are out. This is what posts to the
+                  budget and what every FTE-from-hours line divides by, so the
+                  field says where it goes and whether the last run posted it. */}
+              <Field
+                label="Effective week (posted)"
+                hint="The contract week scaled by the days a full-timer actually works: (productive days − the positions' average vacation) × daily hours ÷ 52. Reports read FTE as hours ÷ (this × 52), so a full-timer on the average entitlement is 1.00 FTE on the ledger, exactly as on the Positions grid."
+              >
+                <TextField
+                  size="small"
+                  value={effectiveWeek ? effectiveWeek.effectiveWeek.toFixed(2) : "—"}
+                  slotProps={{ input: { readOnly: true } }}
+                  sx={{
+                    width: 132,
+                    "& .MuiOutlinedInput-root": { height: CONTROL_HEIGHT, fontWeight: 700 },
+                    "& .MuiOutlinedInput-input": { color: "text.secondary" },
+                  }}
+                />
+              </Field>
+            </Stack>
           </Stack>
+          <Typography
+            variant="caption"
+            sx={{
+              display: "block",
+              mt: 1,
+              color: effectiveWeekStatus.tone === "warning" ? "warning.main" : effectiveWeekStatus.tone === "success" ? "success.main" : "text.secondary",
+            }}
+          >
+            Effective week reports to {WEEKLY_HOURS_STAT_DEPARTMENT} / {WEEKLY_HOURS_STAT_ACCOUNT} in January.{" "}
+            {effectiveWeekStatus.text}
+          </Typography>
+          {effectiveWeek && (
+            <Typography variant="caption" sx={{ display: "block", color: "text.secondary" }}>
+              Working: {describeEffectiveWeek(effectiveWeek)}
+            </Typography>
+          )}
 
           <Stack direction="row" sx={{ mt: 2, flexWrap: "wrap", gap: 2 }}>
             {resolvedDefaults &&

@@ -114,6 +114,8 @@ function seedMaps(version = "maps-1") {
       ],
       departmentMaps: [
         { base_department: "D0410", department_description_detail_level_max: "Admin", level_2: "Lodging Operations" },
+        { base_department: "D0100", department_description_detail_level_max: "Rooms", level_2: "Lodging Operations" },
+        { base_department: "D0200", department_description_detail_level_max: "Restaurant", level_2: "Lodging Operations" },
       ],
       combos: [],
       version,
@@ -164,33 +166,31 @@ describe("evaluateReportForScenario", () => {
     seedBudgetImport();
     await recalc();
 
-    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "payroll_summary");
+    // The single-scenario reading: every unpinned atom reads the results
+    // cache, so the Summary P&L's revenue (a BST figure) is zero here and
+    // payroll comes from the engine run. Column evaluation is what joins the
+    // BST in — see evaluateColumns.test.ts.
+    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "summary_pl");
     expect(report.warnings).toEqual([]);
     expect(report.mappingVersion).toBe("maps-1");
-    expect(report.bst).toEqual([
-      { importId: "imp-1", bucketIndex: 1, bucketType: "BUDGET", year: YEAR },
-    ]);
+    expect(report.bst).toEqual([]);
 
     const byLabel = new Map(report.rows.map((r) => [r.label, r.values]));
-    const payroll = byLabel.get("Total payroll")!;
+    const payroll = byLabel.get("Total Payroll")!;
     expect(payroll[0]).toBe(6000); // 2 heads × 3000
     expect(payroll[12]).toBe(72000);
-    expect(byLabel.get("Position count")![12]).toBe(2);
-    expect(byLabel.get("Payroll per head")![0]).toBe(3000);
-    // Revenue = 50,000 a month across the two revenue accounts (level 6).
-    expect(byLabel.get("Payroll % of revenue")![0]).toBeCloseTo(12);
-    expect(byLabel.get("Payroll % of revenue")![12]).toBeCloseTo(12);
-    expect(report.atoms.bst_total_revenue[12]).toBe(600000);
+    expect(byLabel.get("Total Sales")![12]).toBe(0);
+    expect(report.atoms.total_payroll[12]).toBe(72000);
   });
 
-  it("degrades with warnings when the maps were never synced and there is no import", async () => {
+  it("degrades with warnings when the maps were never synced", async () => {
     await recalc();
-    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "payroll_summary");
-    expect(report.warnings.map((w) => w.code).sort()).toEqual(["BST_UNAVAILABLE"]);
+    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "summary_pl");
+    // One warning per level atom, all the same code.
+    expect([...new Set(report.warnings.map((w) => w.code))]).toEqual(["MAPS_UNAVAILABLE"]);
     expect(report.mappingVersion).toBeNull();
     const byLabel = new Map(report.rows.map((r) => [r.label, r.values]));
-    expect(byLabel.get("Payroll % of revenue")!.every((v) => v === 0)).toBe(true);
-    expect(byLabel.get("Total payroll")![0]).toBe(6000);
+    expect(byLabel.get("Total Payroll")!.every((v) => v === 0)).toBe(true);
   });
 
   it("reports stale exactly when the Results page would", async () => {
@@ -247,7 +247,12 @@ describe("evaluateReportForScenario", () => {
 
   it("lists the built-in definitions with the sources they read", () => {
     expect(listReportDefinitionSummaries()).toEqual([
-      expect.objectContaining({ id: "payroll_summary", sources: expect.arrayContaining(["kairos", "bst"]) }),
+      expect.objectContaining({ id: "summary_pl", sources: ["kairos"], params: [] }),
+      expect.objectContaining({
+        id: "payroll_fte_summary",
+        params: expect.arrayContaining([expect.objectContaining({ id: "weekly_hours", builtin: "weekly_hours" })]),
+      }),
+      expect.objectContaining({ id: "rooms_kpi" }),
       expect.objectContaining({ id: "staffing_stats", sources: ["kairos"] }),
     ]);
   });

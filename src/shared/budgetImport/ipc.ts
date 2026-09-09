@@ -6,7 +6,14 @@
  * plaintext local store — overwriting the hotel's previous data — then returns
  * the stored rows. There is no separate preview/commit step: reading the file
  * is the expensive part, so we persist in the same pass.
+ *
+ * The file itself is remembered between pulls (see shared/files/recentFiles):
+ * a hotel re-imports the SAME spread file month after month, so the page offers
+ * it back beside the picker. A remembered path skips the DIALOG only — it is
+ * parsed and OU-gated exactly like one chosen by hand.
  */
+
+import type { RecentFile } from "../files/recentFiles";
 
 /** Number of month periods per bucket (Jan..Dec). */
 export const PERIODS_PER_BUCKET = 12;
@@ -69,6 +76,8 @@ export interface WideBudgetRow {
 export type PullResult =
   | { outcome: "cancelled" }
   | { outcome: "no_data"; sourceFileName: string }
+  /** A remembered path that no longer resolves — moved, renamed, or offline. */
+  | { outcome: "file_missing"; sourceFileName: string; filePath: string }
   | { outcome: "ou_mismatch"; fileOu: string; selectedOu: string; sourceFileName: string }
   | { outcome: "ok"; result: ImportRowsResult };
 
@@ -103,9 +112,18 @@ export interface BudgetDepartmentOption {
   name: string;
 }
 
+/** The workbook this hotel was last pulled from, when there is one. */
+export type RecentBudgetFile = RecentFile;
+
 export const BUDGET_IMPORT_CHANNELS = {
-  /** Open a file dialog, parse + OU-gate, persist (overwrite), return the data. */
+  /**
+   * Parse + OU-gate, persist (overwrite), return the data. Opens a file dialog
+   * unless the request names a `filePath` — which is how the page re-pulls the
+   * workbook it remembers, without walking the dialog to it again.
+   */
   pull: "budgetImport:pull",
+  /** The file this hotel was last pulled from, or null. */
+  recentFile: "budgetImport:recentFile",
   /** The current stored import (metadata + rows) for the selected OU, or null. */
   getCurrent: "budgetImport:getCurrent",
   /** Just the current import's metadata — for callers that only need to know

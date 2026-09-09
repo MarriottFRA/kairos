@@ -60,6 +60,8 @@ const THROWING_MAPS: MapIndex = {
   },
   hasDept: () => true,
   hasAccount: () => true,
+  labelAt: () => null,
+  name: () => null,
   warnings: [],
 };
 

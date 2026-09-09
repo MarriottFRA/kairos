@@ -31,6 +31,18 @@
  * through the same preview, the same rules and the same row-level report.
  */
 
+import {
+  MAX_RECENT_FILES,
+  RecentFile,
+  baseName,
+  findRecentFile,
+  forgetRecentFile,
+  normalizeRecentFiles,
+  parentPath,
+  recentFilesForOu,
+  rememberRecentFile,
+} from "../files/recentFiles";
+
 /** Months per row, Jan..Dec. */
 export const PUSH_MONTHS = 12;
 
@@ -294,10 +306,36 @@ export function matchesClearRules(
   return best;
 }
 
+// ── Recently used files ────────────────────────────────────────────────────
+
+/**
+ * The BST this hotel was last pushed into, so the routine monthly push is one
+ * click rather than a walk through the file dialog.
+ *
+ * The mechanics are shared with the BST Pull (see shared/files/recentFiles) —
+ * only the matching rule differs: a push is guarded on the workbook's own
+ * budget YEAR as well as its OU, so `findRecentFile` is always called with the
+ * selected year here and a file that would be refused is never offered.
+ */
+export type RecentBstFile = RecentFile;
+
+export {
+  MAX_RECENT_FILES as MAX_RECENT_BST_FILES,
+  baseName,
+  findRecentFile,
+  forgetRecentFile,
+  normalizeRecentFiles,
+  parentPath,
+  recentFilesForOu,
+  rememberRecentFile,
+};
+
 /** The persisted, install-wide push configuration. */
 export interface BstPushConfig {
   /** Account prefixes the clear pass zeroes. */
   clearPrefixes: string[];
+  /** BSTs this install has pushed into before, newest first. */
+  recentFiles: RecentBstFile[];
   /** The month plan the user last used — the same selection tends to repeat. */
   months: MonthAction[];
   allocationRows: GuardMode;
@@ -308,6 +346,7 @@ export interface BstPushConfig {
 
 export const DEFAULT_BST_PUSH_CONFIG: BstPushConfig = {
   clearPrefixes: [...DEFAULT_CLEAR_PREFIXES],
+  recentFiles: [],
   months: [...DEFAULT_MONTH_PLAN],
   allocationRows: "skip",
   protectedCells: "skip",
@@ -319,6 +358,7 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
   const source = (raw ?? {}) as Partial<BstPushConfig>;
   return {
     clearPrefixes: normalizeClearPrefixes(source.clearPrefixes),
+    recentFiles: normalizeRecentFiles(source.recentFiles),
     months: normalizeMonthPlan(source.months),
     allocationRows: normalizeGuardMode(source.allocationRows),
     protectedCells: normalizeGuardMode(source.protectedCells),
@@ -544,6 +584,7 @@ export type BstPushRefusal =
       sourceFileName: string;
     }
   | { outcome: "file_locked"; sourceFileName: string }
+  | { outcome: "file_missing"; sourceFileName: string; filePath: string }
   | { outcome: "no_outputs" }
   | { outcome: "no_months" }
   | { outcome: "unsupported_layout"; sourceFileName: string; reason: string };

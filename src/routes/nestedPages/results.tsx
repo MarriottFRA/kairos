@@ -215,7 +215,8 @@ export default function Results() {
           >
             {unposted.length > 0 && (
               <>
-                Calculated but not posted — no account set on the Positions grid:{" "}
+                Calculated but not posted — no account set on the Positions
+                grid or the Blocks page:{" "}
                 {unposted
                   .map(([label, count]) => `${label} (${count} position${count === 1 ? "" : "s"})`)
                   .join(", ")}

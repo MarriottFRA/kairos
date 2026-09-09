@@ -105,6 +105,9 @@ const UserInfoSection = styled(Box)(({ theme }) => ({
 // the end of a section. Both are deliberately un-clickable rather than routed
 // to an empty page — a dead-end screen reads as a bug, a greyed row reads as a
 // roadmap.
+//
+// `badge` is the other half of that: a row that DOES work but carries a
+// caveat. It wears the same chip as "Soon" and stays fully live.
 type NavItem = {
   key: string;
   label: string;
@@ -112,6 +115,7 @@ type NavItem = {
   path?: string;
   comingSoon?: boolean;
   hint?: boolean;
+  badge?: string;
 };
 
 type NavSection = {
@@ -165,11 +169,11 @@ const NAV_SECTIONS: NavSection[] = [
   {
     key: "reports",
     title: "Reports",
-    items: [
-      { key: "staffing-overview", label: "Staffing Overview", icon: <GroupsIcon />, comingSoon: true },
-      { key: "summary-reporting", label: "Summary Reporting", icon: <SummarizeIcon />, comingSoon: true },
-      { key: "more-reports", label: "More reports to come", icon: <MoreHorizIcon />, hint: true },
-    ],
+    // One entry: the page's own rail lists the P&L reports, the budget pack
+    // and the payroll bridge, and they share the scenario picker.
+    // Badged while the team tests it — the page itself carries the detail and
+    // the date. Drop the badge here and <BetaNotice /> there together.
+    items: [{ key: "reports", label: "Reports", icon: <SummarizeIcon />, path: "reports", badge: "Beta" }],
   },
   {
     // Deliberately last and on its own: everything above works offline and
@@ -327,7 +331,8 @@ export default function SignedInLanding() {
   };
 
   // Sized down from the default chip so it reads as an annotation on the row
-  // rather than a second control competing with it.
+  // rather than a second control competing with it. Shared by "Soon" and by
+  // the badges on live rows, so the two never compete for attention.
   const comingSoonChipStyle = {
     height: 18,
     fontSize: "0.625rem",
@@ -875,6 +880,9 @@ const handleSignOut = useCallback(async () => {
                       >
                         <ListItemIcon sx={listItemIconStyle}>{item.icon}</ListItemIcon>
                         <ListItemText primary={item.label} sx={listItemTextStyle} />
+                        {open && item.badge && (
+                          <Chip label={item.badge} size="small" variant="outlined" sx={comingSoonChipStyle} />
+                        )}
                       </ListItemButton>
                     )}
                   </ListItem>

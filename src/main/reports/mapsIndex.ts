@@ -28,12 +28,14 @@ type Db = InstanceType<typeof Database>;
 
 const LEVELS = MAP_LEVEL_KEYS.join(", ");
 
-function readRows(db: Db, table: string, codeColumn: string): MapRowInput[] {
-  const rows = prepared(db, `SELECT ${codeColumn} AS code, ${LEVELS} FROM ${table}`).all() as Array<
-    Record<string, string | null>
-  >;
+function readRows(db: Db, table: string, codeColumn: string, nameColumn: string): MapRowInput[] {
+  const rows = prepared(
+    db,
+    `SELECT ${codeColumn} AS code, ${nameColumn} AS name, ${LEVELS} FROM ${table}`
+  ).all() as Array<Record<string, string | null>>;
   return rows.map((row) => ({
     code: String(row.code ?? ""),
+    name: row.name ?? null,
     levels: MAP_LEVEL_KEYS.map((key) => row[key] ?? null),
   }));
 }
@@ -62,8 +64,8 @@ export function getMapIndex(localDb: Db): MapIndex {
   return memo(localDb, "reports:maps", key, () =>
     buildMapIndex(
       getStoredVersion(localDb),
-      readRows(localDb, "department_maps", "base_department"),
-      readRows(localDb, "account_maps", "base_account")
+      readRows(localDb, "department_maps", "base_department", "department_description_detail_level_max"),
+      readRows(localDb, "account_maps", "base_account", "account_description_detail_level_max")
     )
   );
 }

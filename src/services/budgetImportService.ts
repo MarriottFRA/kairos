@@ -12,6 +12,7 @@ import {
   ImportRowsResult,
   ImportSummary,
   PullResult,
+  RecentBudgetFile,
 } from "../shared/budgetImport/ipc";
 
 function ipc() {
@@ -23,19 +24,41 @@ function ipc() {
 }
 
 /**
- * Open a file dialog, parse + OU-gate the workbook, and (on a match) persist it
- * — overwriting the hotel's previous data — returning the stored rows. One
- * round-trip: there is no separate preview/commit step.
+ * Parse + OU-gate a workbook and (on a match) persist it — overwriting the
+ * hotel's previous data — returning the stored rows. One round-trip: there is
+ * no separate preview/commit step.
+ *
+ * With no `filePath` main opens the file dialog; with one it pulls that file
+ * directly, which is all "pull the file I used last time" is. Same call, same
+ * parse, same OU gate either way.
  */
 export async function pullBudgetFile(
   ou: string,
-  importedBy: string | null
+  importedBy: string | null,
+  filePath?: string
 ): Promise<PullResult> {
   const response = await ipc().sendIpcRequest(BUDGET_IMPORT_CHANNELS.pull, {
     ou,
     importedBy,
+    ...(filePath ? { filePath } : {}),
   });
   return response.data as PullResult;
+}
+
+/**
+ * The workbook this hotel was last pulled from, or null.
+ *
+ * Only ever a file that already cleared the OU gate, so offering it back cannot
+ * hand the user a click that fails.
+ */
+export async function getRecentBudgetFile(
+  ou: string
+): Promise<RecentBudgetFile | null> {
+  const response = await ipc().sendIpcRequest(
+    BUDGET_IMPORT_CHANNELS.recentFile,
+    { ou }
+  );
+  return (response.data as RecentBudgetFile | null) ?? null;
 }
 
 /** The current stored import (metadata + rows) for a hotel, or null. */

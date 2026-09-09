@@ -27,23 +27,23 @@ export class ReportGraphError extends Error {
 export interface EvaluationPlan {
   /** Measures in dependency order: every reference precedes its referrer. */
   order: string[];
-  /** Atoms reached from the roots. */
-  atoms: Set<string>;
+  /** Leaves (atoms and params) reached from the roots. */
+  leaves: Set<string>;
 }
 
 export function planEvaluation(
   measures: ReadonlyMap<string, CompiledMeasure>,
-  atomIds: ReadonlySet<string>,
+  leafIds: ReadonlySet<string>,
   roots: Iterable<string>
 ): EvaluationPlan {
   const order: string[] = [];
-  const atoms = new Set<string>();
+  const leaves = new Set<string>();
   const state = new Map<string, "grey" | "black">();
   const path: string[] = [];
 
   const visit = (id: string): void => {
-    if (atomIds.has(id)) {
-      atoms.add(id);
+    if (leafIds.has(id)) {
+      leaves.add(id);
       return;
     }
     const measure = measures.get(id);
@@ -68,5 +68,5 @@ export function planEvaluation(
   };
 
   for (const root of roots) visit(root);
-  return { order, atoms };
+  return { order, leaves };
 }

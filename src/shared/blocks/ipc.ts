@@ -585,6 +585,40 @@ export function vacationCostDefId(ou: string): string {
   return `sys-vaccost:${ou}`;
 }
 
+/**
+ * The heads whose blank account must NOT raise the "calculated but not posted"
+ * diagnostic (the Results page banner and the BST push warning both read it).
+ *
+ * Two different reasons, both of which make the warning worse than silence:
+ *
+ *  - Nothing the user could do about it. The per-row Headcount account is
+ *    DERIVED from the Classification and read-only in the grid (seed v26), so a
+ *    grade that books no heads is the intended answer, not an omission. FTE and
+ *    Hours Paid have no account field anywhere: FTE is not in the chart of
+ *    accounts at all (a ratio has no GL account — retired in field seed v13),
+ *    and Hours Paid rides the working-hours account when a block asks for it.
+ *
+ *  - Nothing the user necessarily WANTS. Vacation Accrual is optional; plenty
+ *    of hotels never accrue, and naming it — even informationally — reads as an
+ *    instruction to go and fill it in.
+ *
+ * Built from the constructors above with a blank ou, so each entry is exactly
+ * the "sys-…:" prefix that id carries and the two can never drift apart.
+ */
+const SILENT_UNPOSTED_DEF_PREFIXES: readonly string[] = [
+  systemStatDefId("", "HEADCOUNT"),
+  systemStatDefId("", "FTE"),
+  systemStatDefId("", "HOURS_PAID"),
+  holidayAccrualDefId(""),
+];
+
+/** Whether an unposted line of this definition should be reported to the user
+ *  at all — see SILENT_UNPOSTED_DEF_PREFIXES. Suppresses the diagnostic only;
+ *  the line still computes and still stays out of the output. */
+export function isSilentUnpostedDef(defId: string): boolean {
+  return SILENT_UNPOSTED_DEF_PREFIXES.some((prefix) => defId.startsWith(prefix));
+}
+
 /** Engine spread method a BlockSpread maps to (yearly value is synthesized
  *  per row by the block-value resolver: count × rate or count alone). */
 export const SPREAD_TO_METHOD: Record<BlockSpread, SpreadMethod> = {

@@ -39,7 +39,8 @@ import {
   readOutputs,
   writeRun,
 } from "./outputsRepo";
-import { DEFAULT_WEEKLY_HOURS } from "../../shared/positionDefaults";
+import { deriveEffectiveWeek } from "../../shared/positions/effectiveWeek";
+import { resolveHotelYearSetup } from "./hotelYearSetup";
 import { listAllocations } from "../allocations/repo";
 import { aggregateDepartmentMetrics } from "../../shared/allocations/compute";
 import { listRows as listManualRows } from "../manualInput/repo";
@@ -119,17 +120,22 @@ export async function runRecalc(
   // contributions that land in the same dept × account table, so they belong
   // beside the projection, not beside the compile.
 
-  // Weekly Hours reports itself as a statistic. loadScenarioInput reads the same
-  // defaults to size the FTE yardstick, but it hands the engine only the derived
-  // reference — and widening ScenarioInput to carry a setting the engine never
-  // reads would be the wrong trade for saving one indexed single-row lookup.
-  // Unsaved defaults post the built-in 40, which is both what the Home page
-  // shows and what the yardstick above just used: the page and the budget must
-  // report the same contract.
-  const setupDefaults = await getDefaults(scope.ou, input.scenario.year);
-  const setupLines = projectSetupLines({
-    weeklyHours: setupDefaults?.weeklyHours ?? DEFAULT_WEEKLY_HOURS,
-  });
+  // The effective week reports itself as a statistic: the contract week over
+  // the days a full-timer works once the roster's average vacation is out
+  // (shared/positions/effectiveWeek.ts), derived from the very positions the
+  // engine just ran. loadScenarioInput resolved the same defaults to size the
+  // FTE yardstick but hands the engine only the derived reference — and
+  // widening ScenarioInput to carry a setting the engine never reads would be
+  // the wrong trade for one indexed single-row lookup. Unsaved defaults read
+  // as the built-in 40 over the calendar, which is what the Home page shows.
+  const setup = await resolveHotelYearSetup(
+    { getCalendar, getPositionDefaults: getDefaults },
+    scope.ou,
+    input.scenario.year
+  );
+  const setupLines = projectSetupLines(
+    deriveEffectiveWeek(setup.contractWeek, setup.reference, input.positions)
+  );
 
   // Buyouts came in with the scenario input already (the compiler interns them
   // for its in-memory aggregate); this is the projection step that was missing.

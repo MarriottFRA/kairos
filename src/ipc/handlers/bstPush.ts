@@ -21,6 +21,7 @@
  */
 
 import { dialog, shell } from "electron";
+import * as fs from "fs";
 import * as path from "path";
 
 import { IpcHandler, IpcResult } from "../types";
@@ -48,7 +49,9 @@ import type { BstTarget } from "../../main/bstPush/readTarget";
 import { annotateProtection } from "../../main/bstPush/readProtection";
 import { buildPushPlan, toCellWrites } from "../../main/bstPush/plan";
 import {
+  forgetBstPushFile,
   readBstPushConfig,
+  rememberBstPushFile,
   writeBstPushConfig,
 } from "../../main/bstPush/config";
 import {
@@ -59,7 +62,9 @@ import {
   BstPushPlan,
   BstPushPreviewResult,
   BstPushRefusal,
+  findRecentFile,
   isEmptyMonthPlan,
+  recentFilesForOu,
   normalizeBstPushOptions,
 } from "../../shared/bstPush/ipc";
 
@@ -113,6 +118,12 @@ function openTarget(
   year: number
 ): { refusal: BstPushRefusal } | { target: BstTarget } {
   const sourceFileName = path.basename(filePath);
+
+  // A remembered path can outlive the file it names — moved, renamed, or on a
+  // share that is not mounted right now. Saying so plainly beats an ENOENT.
+  if (!fs.existsSync(filePath)) {
+    return { refusal: { outcome: "file_missing", sourceFileName, filePath } };
+  }
 
   // Checked before reading: a workbook Excel has open would silently discard
   // the push on its next save.
@@ -222,7 +233,12 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
    *
    * A `filePath` on the request skips the dialog and re-previews that file —
    * how the review screen refreshes its numbers when the user changes an
-   * option, without making them pick the file again.
+   * option, and how the page re-opens the BST it remembers, without making
+   * anyone pick the file again.
+   *
+   * When the dialog does open it starts in the folder of the last BST accepted
+   * for this hotel and year, so even "choose a different file" lands near the
+   * one they want.
    */
   const preview: IpcHandler<any, IpcResult<BstPushPreviewResult>> = async (
     _event,
@@ -237,10 +253,13 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
       let filePath =
         typeof request?.filePath === "string" ? request.filePath.trim() : "";
       if (!filePath) {
+        const { recentFiles } = await readBstPushConfig();
+        const recent = findRecentFile(recentFiles, scope.ou, year);
         const picked = await dialog.showOpenDialog({
           title: "Select the hotel's BST (BGT Spread File) to push into",
           properties: ["openFile"],
           filters: [{ name: "BGT Spread File", extensions: ["xlsm", "xlsx"] }],
+          ...(recent ? { defaultPath: path.dirname(recent.filePath) } : {}),
         });
         if (picked.canceled || picked.filePaths.length === 0) {
           return ok({ outcome: "cancelled" });
@@ -249,7 +268,19 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
       }
 
       const opened = openTarget(filePath, scope, year);
-      if ("refusal" in opened) return ok(opened.refusal);
+      if ("refusal" in opened) {
+        // A path that no longer resolves stops being offered: the shortcut is
+        // only worth having while it still points at a file.
+        if (opened.refusal.outcome === "file_missing") {
+          await forgetBstPushFile(filePath);
+        }
+        return ok(opened.refusal);
+      }
+
+      // Recorded only now — past the OU and year guards — so the remembered
+      // entry is always a file that was genuinely accepted for this hotel and
+      // this budget year, and can be offered back without a second thought.
+      await rememberBstPushFile(filePath, scope.ou, year);
 
       const plan = await buildPlanFor(
         opened.target,
@@ -286,7 +317,12 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
       // Re-checked here, not just in preview: the two calls are a user
       // interaction apart, and this is the guard that actually protects the file.
       const opened = openTarget(filePath, scope, year);
-      if ("refusal" in opened) return ok(opened.refusal);
+      if ("refusal" in opened) {
+        if (opened.refusal.outcome === "file_missing") {
+          await forgetBstPushFile(filePath);
+        }
+        return ok(opened.refusal);
+      }
 
       const plan = await buildPlanFor(
         opened.target,
@@ -345,10 +381,30 @@ export function createBstPushHandlers(): Record<string, IpcHandler> {
     }
   };
 
-  /** The saved clear rules and last-used month plan. */
-  const config: IpcHandler<any, IpcResult<BstPushConfig>> = async () => {
+  /**
+   * The saved clear rules, last-used month plan and remembered files.
+   *
+   * The recents are stored install-wide but handed back narrowed to the
+   * requesting hotel: a renderer scoped to one OU has no business holding
+   * another hotel's file paths, and it would never offer them anyway.
+   */
+  const config: IpcHandler<any, IpcResult<BstPushConfig>> = async (
+    _event,
+    request
+  ) => {
+    const scopedToRequest = async (): Promise<BstPushConfig> => {
+      const saved = await readBstPushConfig();
+      return {
+        ...saved,
+        recentFiles: recentFilesForOu(
+          saved.recentFiles,
+          (request as { ou?: unknown } | undefined)?.ou as string | undefined ??
+            null
+        ),
+      };
+    };
     try {
-      return ok(await readBstPushConfig());
+      return ok(await scopedToRequest());
     } catch (error) {
       console.error("BST push config read failed:", error);
       return fail(error, await readBstPushConfig());

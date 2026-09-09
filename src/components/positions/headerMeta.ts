@@ -161,7 +161,7 @@ const OVERRIDES: Readonly<
       "post's worked hours (Yearly Days − Vacation − Days Off − Public " +
       "Holidays, × Daily Hours, prorated by Input Basis) over what a " +
       "full-timer at this hotel works — the Yearly Days / Days Off / Public " +
-      "Holidays and Weekly Hours set on the Home page. It is an ANNUAL ratio, " +
+      "Holidays and the contract week set on the Home page. It is an ANNUAL ratio, " +
       "so a post working six full-time months reads 0.50 whichever way its " +
       "contract is written down — as a full year it only works half of, or as " +
       "a six-month contract in its own terms. Read-only.",

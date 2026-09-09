@@ -14,6 +14,7 @@
  *     are counted exactly ONCE in the persisted output.
  */
 
+import { effectiveWeekOf } from "../../../shared/positions/effectiveWeek";
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
@@ -37,6 +38,8 @@ import { buildFieldMap } from "../../../shared/positions/rowModel";
 import {
   PositionDefaults,
   buildDefaultPositionDefaults,
+  fullTimeReference,
+  resolvePositionDefaults,
 } from "../../../shared/positionDefaults";
 import {
   WEEKLY_HOURS_STAT_ACCOUNT,
@@ -274,7 +277,17 @@ describe("runRecalc assembles every source", () => {
     expect(heads.sources).toEqual(["ENGINE"]);
   });
 
-  it("reports the hotel's Weekly Hours as a January statistic", async () => {
+  /** The effective week an untouched hotel derives: the built-in 40 over the
+   *  calendar's productive days, nothing to average (no vacation typed). */
+  const effectiveOf = (contractWeek: number) =>
+    effectiveWeekOf(
+      contractWeek,
+      fullTimeReference(
+        resolvePositionDefaults({ ...buildDefaultPositionDefaults(SCOPE.ou, YEAR), weeklyHours: contractWeek }, CALENDAR)
+      )
+    ).effectiveWeek;
+
+  it("reports the hotel's effective week as a January statistic", async () => {
     const outputs = await recalc();
     const weekly = rowFor(
       outputs,
@@ -282,10 +295,14 @@ describe("runRecalc assembles every source", () => {
       WEEKLY_HOURS_STAT_ACCOUNT
     )!;
     // getDefaults returns null here — an untouched hotel — so this is the
-    // built-in 40 the Home page would be showing. The page and the budget must
-    // report the same contract, so "never saved" is not "nothing to report".
-    expect(weekly.months).toEqual([40, ...new Array(11).fill(0)]);
-    expect(weekly.total).toBe(40);
+    // built-in 40 the Home page would be showing, over the calendar's own
+    // productive days (261 weekdays in 2027, so a shade over 40). The page and
+    // the budget must report the same figure, so "never saved" is not
+    // "nothing to report".
+    const expected = effectiveOf(40);
+    expect(expected).toBeCloseTo(40 * (261 / 260), 6);
+    expect(weekly.months).toEqual([expected, ...new Array(11).fill(0)]);
+    expect(weekly.total).toBe(expected);
     expect(weekly.sources).toEqual(["SETUP"]);
     // A988… is inside the stats range, so it belongs under the Statistics
     // toggle and pushes to the BST in hours, not thousands of hours.
@@ -293,7 +310,7 @@ describe("runRecalc assembles every source", () => {
     expect(weekly.valueKind).toBe("count");
   });
 
-  it("reports a saved Weekly Hours over the built-in default", async () => {
+  it("reports a saved contract week over the built-in default", async () => {
     const outputs = await runRecalc(
       {
         localDb: structureDb,
@@ -313,7 +330,7 @@ describe("runRecalc assembles every source", () => {
     expect(
       rowFor(outputs, WEEKLY_HOURS_STAT_DEPARTMENT, WEEKLY_HOURS_STAT_ACCOUNT)!
         .months
-    ).toEqual([37.5, ...new Array(11).fill(0)]);
+    ).toEqual([effectiveOf(37.5), ...new Array(11).fill(0)]);
   });
 
   it("counts a buyout exactly once, despite the compiler also aggregating it", async () => {

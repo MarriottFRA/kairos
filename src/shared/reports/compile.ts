@@ -15,9 +15,25 @@ import { FUNCTION_NAMES } from "./formula/functions";
 import { parseFormula } from "./formula/parser";
 import { FormulaSyntaxError } from "./formula/tokenizer";
 import { CompiledMeasure, ReportGraphError, planEvaluation } from "./graph";
-import type { ReportDefinition, ValueSourceKind } from "./types";
+import type { ParamValue, ReportDefinition, ReportParam, ValueSourceKind } from "./types";
 
-const ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** null when the value is a well-formed ParamValue, else what is wrong. */
+export function paramValueProblem(value: unknown): string | null {
+  if (typeof value === "number") return Number.isFinite(value) ? null : "must be finite";
+  if (!value || typeof value !== "object") return "must be a number or { months, total? }";
+  const { months, total } = value as { months?: unknown; total?: unknown };
+  if (!Array.isArray(months) || months.length !== 12 || !months.every((m) => Number.isFinite(m))) {
+    return "months must be twelve finite numbers";
+  }
+  if (total !== undefined && !Number.isFinite(total)) return "total must be a finite number";
+  return null;
+}
+
+export function isParamValue(value: unknown): value is ParamValue {
+  return paramValueProblem(value) === null;
+}
 
 export class ReportDefinitionError extends Error {
   constructor(
@@ -43,6 +59,9 @@ export interface CompiledReport {
   atomsUsed: ReadonlySet<string>;
   /** Which kinds of value source the reached atoms read. */
   sourceKinds: ReadonlySet<ValueSourceKind>;
+  params: ReadonlyMap<string, ReportParam>;
+  /** Params the rows reach. */
+  paramsUsed: ReadonlySet<string>;
 }
 
 /** Every problem with a definition, or an empty list. Never throws. */
@@ -90,6 +109,18 @@ export function compileDefinition(definition: ReportDefinition): CompiledReport 
     }
   }
 
+  const params = new Map<string, ReportParam>();
+  for (const param of definition.params ?? []) {
+    const id = checkId(param?.id, "param");
+    if (!id) continue;
+    const problem = paramValueProblem(param.default);
+    if (problem) {
+      problems.push(`param "${id}": default ${problem}`);
+      continue;
+    }
+    params.set(id, param);
+  }
+
   const measures = new Map<string, CompiledMeasure>();
   for (const measure of definition.measures ?? []) {
     const id = checkId(measure?.id, "measure");
@@ -106,7 +137,7 @@ export function compileDefinition(definition: ReportDefinition): CompiledReport 
 
   for (const measure of measures.values()) {
     for (const ref of measure.refs) {
-      if (!atoms.has(ref) && !measures.has(ref)) {
+      if (!atoms.has(ref) && !measures.has(ref) && !params.has(ref)) {
         problems.push(`measure "${measure.id}" references unknown id "${ref}"`);
       }
     }
@@ -132,15 +163,19 @@ export function compileDefinition(definition: ReportDefinition): CompiledReport 
 
   let plan;
   try {
-    plan = planEvaluation(measures, new Set(atoms.keys()), roots);
+    plan = planEvaluation(measures, new Set([...atoms.keys(), ...params.keys()]), roots);
   } catch (error) {
     throw new ReportDefinitionError(definition.id, [
       error instanceof ReportGraphError ? error.message : String(error),
     ]);
   }
 
+  const atomsUsed = new Set<string>();
+  const paramsUsed = new Set<string>();
+  for (const leaf of plan.leaves) (atoms.has(leaf) ? atomsUsed : paramsUsed).add(leaf);
+
   const sourceKinds = new Set<ValueSourceKind>();
-  for (const atomId of plan.atoms) sourceKinds.add(atoms.get(atomId)!.source.source);
+  for (const atomId of atomsUsed) sourceKinds.add(atoms.get(atomId)!.source.source);
 
   return {
     definition,
@@ -148,7 +183,9 @@ export function compileDefinition(definition: ReportDefinition): CompiledReport 
     measures,
     roots,
     order: plan.order,
-    atomsUsed: plan.atoms,
+    atomsUsed,
     sourceKinds,
+    params,
+    paramsUsed,
   };
 }

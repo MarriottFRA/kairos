@@ -10,6 +10,10 @@
  *   - The MONTH PLAN. A hotel pushing month after month repeats almost the same
  *     selection each time; making them rebuild it every visit would be the
  *     single most annoying thing about the page.
+ *   - The RECENT FILES. Same reasoning, applied to the workbook itself: the
+ *     target is the same file on the same shared drive every time, so the page
+ *     offers it back rather than sending the user through the file dialog. A
+ *     remembered path skips the DIALOG, never a guard.
  *
  * Lives in `user_settings` (the plaintext store) alongside the app's other
  * preferences, so it survives a secure-store rebuild and is readable before
@@ -21,6 +25,12 @@
  */
 
 import { getUserSettings, setUserSettings } from "../../local_db";
+import {
+  forgetRecentPath,
+  readRecentFiles,
+  rememberRecentPath,
+  writeRecentFiles,
+} from "../files/recentFilesStore";
 import {
   BstPushConfig,
   DEFAULT_BST_PUSH_CONFIG,
@@ -37,8 +47,10 @@ const BACKUP_KEY = "bstPushBackup";
 const SKIP_UNUSED_KEY = "bstPushSkipUnusedCombos";
 const ALLOCATION_KEY = "bstPushAllocationRows";
 const PROTECTED_KEY = "bstPushProtectedCells";
+const RECENT_KEY = "bstPushRecentFiles";
 
 export async function readBstPushConfig(): Promise<BstPushConfig> {
+  const recentFiles = await readRecentFiles(RECENT_KEY);
   try {
     const settings = JSON.parse(await getUserSettings()) as Record<
       string,
@@ -55,6 +67,7 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
           ? [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes]
           : normalizeClearPrefixes(settings[PREFIX_KEY] ?? []),
       months: normalizeMonthPlan(settings[MONTHS_KEY]),
+      recentFiles,
       // Absent lands on "skip" — a deliberate behavior change for existing
       // installs: guarding the BST's allocation rows and locked cells is the
       // safe footing, and overwriting them becomes the explicit choice.
@@ -72,6 +85,7 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
     return {
       clearPrefixes: [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes],
       months: [...DEFAULT_BST_PUSH_CONFIG.months],
+      recentFiles,
       allocationRows: DEFAULT_BST_PUSH_CONFIG.allocationRows,
       protectedCells: DEFAULT_BST_PUSH_CONFIG.protectedCells,
       backup: DEFAULT_BST_PUSH_CONFIG.backup,
@@ -95,6 +109,7 @@ export async function writeBstPushConfig(raw: unknown): Promise<BstPushConfig> {
   if (patch.months !== undefined) {
     updates[MONTHS_KEY] = normalizeMonthPlan(patch.months);
   }
+
   if (GUARD_MODES.includes(patch.allocationRows as GuardMode)) {
     updates[ALLOCATION_KEY] = normalizeGuardMode(patch.allocationRows);
   }
@@ -108,8 +123,36 @@ export async function writeBstPushConfig(raw: unknown): Promise<BstPushConfig> {
     updates[SKIP_UNUSED_KEY] = patch.skipUnusedCombos;
   }
 
+  if (patch.recentFiles !== undefined) {
+    await writeRecentFiles(RECENT_KEY, patch.recentFiles ?? []);
+  }
   if (Object.keys(updates).length > 0) {
     await setUserSettings(updates);
   }
+  return readBstPushConfig();
+}
+
+/**
+ * Record a BST this install just opened successfully, and return the config as
+ * it now stands.
+ *
+ * Called only AFTER the OU and year guards have passed, so a remembered path is
+ * always one that was genuinely accepted for the hotel and year it is tagged
+ * with — never one the user merely browsed to.
+ */
+export async function rememberBstPushFile(
+  filePath: string,
+  ou: string,
+  year: number
+): Promise<BstPushConfig> {
+  await rememberRecentPath(RECENT_KEY, { filePath, ou, year });
+  return readBstPushConfig();
+}
+
+/** Drop a path from the recents — how a moved file stops being offered. */
+export async function forgetBstPushFile(
+  filePath: string
+): Promise<BstPushConfig> {
+  await forgetRecentPath(RECENT_KEY, filePath);
   return readBstPushConfig();
 }

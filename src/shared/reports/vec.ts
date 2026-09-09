@@ -45,6 +45,15 @@ export function fromMonths(months: ArrayLike<number>): Vec13 {
   return out;
 }
 
+/** A param as it enters a formula: a number fills every slot; a series keeps
+ *  its months, with the Total the sum of them unless one is given. */
+export function fromParam(value: number | { months: ArrayLike<number>; total?: number }): Vec13 {
+  if (typeof value === "number") return scalar(Number.isFinite(value) ? value : 0);
+  const out = fromMonths(value.months);
+  if (value.total !== undefined && Number.isFinite(value.total)) out[TOTAL] = value.total;
+  return out;
+}
+
 export function toArray(vec: Vec13): number[] {
   return Array.from(vec);
 }
@@ -158,5 +167,15 @@ export function retotal(a: Vec13): Vec13 {
   let sum = 0;
   for (let m = 0; m < MONTHS; m++) sum += a[m];
   out[TOTAL] = sum;
+  return out;
+}
+
+/** Months as they are, Total = their mean. The year figure of a LEVEL read as
+ *  a full-time equivalent: a head on the books all year is 1 in every month
+ *  and 1 for the year, one there for six months is 0.5 for the year — not
+ *  the December level (cum) and not twelve heads (retotal). */
+export function mean(a: Vec13): Vec13 {
+  const out = retotal(a);
+  out[TOTAL] /= MONTHS;
   return out;
 }

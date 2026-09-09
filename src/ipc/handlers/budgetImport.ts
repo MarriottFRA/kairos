@@ -10,6 +10,11 @@
  * Every channel is OU-gated (registered with ouScopeMiddleware in ipc/index.ts)
  * and re-brands the OU here via resolveOuScope, so a pull can only ever land in
  * the selected hotel's data.
+ *
+ * The last file accepted for a hotel is remembered so the page can offer it
+ * back (see main/files/recentFilesStore). That is a shortcut to the DIALOG and
+ * nothing more: a remembered path is read, parsed and OU-gated on every pull,
+ * and it is recorded only once the gate has passed.
  */
 
 import { dialog } from "electron";
@@ -31,11 +36,18 @@ import {
 import { listDepartments } from "../../main/mappingTables/repo";
 import { recomputeAllForOu } from "../../main/kpiDrivers/repo";
 import {
+  forgetRecentPath,
+  readRecentFiles,
+  rememberRecentPath,
+} from "../../main/files/recentFilesStore";
+import { findRecentFile } from "../../shared/files/recentFiles";
+import {
   BUDGET_IMPORT_CHANNELS,
   BudgetDepartmentOption,
   ImportRowsResult,
   ImportSummary,
   PullResult,
+  RecentBudgetFile,
 } from "../../shared/budgetImport/ipc";
 
 function ok<T>(data: T): IpcResult<T> {
@@ -75,8 +87,22 @@ function readWorkbookBytes(filePath: string): Buffer {
   }
 }
 
+/**
+ * Where the remembered pull paths live. Its own key, separate from the push's:
+ * the two flows point at the same workbook in practice, but nothing guarantees
+ * it, and one page's dead path should never disappear from the other's offer.
+ */
+const RECENT_KEY = "budgetImportRecentFiles";
+
 export function createBudgetImportHandlers(): Record<string, IpcHandler> {
-  /** Pick a file, parse, OU-gate, persist (overwrite), return the stored data. */
+  /**
+   * Parse, OU-gate, persist (overwrite), return the stored data.
+   *
+   * A `filePath` on the request skips the dialog and pulls that file — how the
+   * page re-imports the workbook it remembers. When the dialog does open it
+   * starts in the remembered file's folder, so even "choose a different file"
+   * lands near the one they want.
+   */
   const pull: IpcHandler<any, IpcResult<PullResult>> = async (
     _event,
     request
@@ -88,17 +114,35 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
           ? request.importedBy.trim()
           : null;
 
-      const picked = await dialog.showOpenDialog({
-        title: "Select the hotel's Excel budget file",
-        properties: ["openFile"],
-        filters: [{ name: "Excel Budget File", extensions: ["xlsm", "xlsx"] }],
-      });
-      if (picked.canceled || picked.filePaths.length === 0) {
-        return ok({ outcome: "cancelled" });
+      let filePath =
+        typeof request?.filePath === "string" ? request.filePath.trim() : "";
+      if (!filePath) {
+        const recent = findRecentFile(
+          await readRecentFiles(RECENT_KEY),
+          scope.ou
+        );
+        const picked = await dialog.showOpenDialog({
+          title: "Select the hotel's Excel budget file",
+          properties: ["openFile"],
+          filters: [{ name: "Excel Budget File", extensions: ["xlsm", "xlsx"] }],
+          ...(recent ? { defaultPath: path.dirname(recent.filePath) } : {}),
+        });
+        if (picked.canceled || picked.filePaths.length === 0) {
+          return ok({ outcome: "cancelled" });
+        }
+        filePath = picked.filePaths[0];
       }
 
-      const filePath = picked.filePaths[0];
       const sourceFileName = path.basename(filePath);
+
+      // A remembered path can outlive the file it names — moved, renamed, or on
+      // a share that is not mounted right now. Saying so plainly beats an
+      // ENOENT, and the dead path stops being offered.
+      if (!fs.existsSync(filePath)) {
+        await forgetRecentPath(RECENT_KEY, filePath);
+        return ok({ outcome: "file_missing", sourceFileName, filePath });
+      }
+
       const dataset = parseWorkbook(readWorkbookBytes(filePath), sourceFileName);
 
       if (dataset.rows.length === 0) {
@@ -114,6 +158,10 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
           sourceFileName,
         });
       }
+
+      // Recorded only now — past the OU gate — so the remembered entry is
+      // always a file that was genuinely accepted for this hotel.
+      await rememberRecentPath(RECENT_KEY, { filePath, ou: scope.ou });
 
       const db = localDbHandle();
       commitImport(db, {
@@ -210,8 +258,28 @@ export function createBudgetImportHandlers(): Record<string, IpcHandler> {
     }
   };
 
+  /**
+   * The file this hotel was last pulled from, or null.
+   *
+   * Narrowed to the requesting OU: the store is install-wide, but a renderer
+   * scoped to one hotel has no business holding another hotel's file paths.
+   */
+  const recentFile: IpcHandler<any, IpcResult<RecentBudgetFile | null>> = async (
+    _event,
+    request
+  ) => {
+    try {
+      const scope = resolveOuScope(request);
+      return ok(findRecentFile(await readRecentFiles(RECENT_KEY), scope.ou));
+    } catch (error) {
+      console.error("Budget import recentFile failed:", error);
+      return fail(error, null);
+    }
+  };
+
   return {
     [BUDGET_IMPORT_CHANNELS.pull]: pull,
+    [BUDGET_IMPORT_CHANNELS.recentFile]: recentFile,
     [BUDGET_IMPORT_CHANNELS.getCurrent]: getCurrent,
     [BUDGET_IMPORT_CHANNELS.getSummary]: getSummary,
     [BUDGET_IMPORT_CHANNELS.listDepartments]: listDepartmentsHandler,

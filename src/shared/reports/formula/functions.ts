@@ -1,7 +1,7 @@
 /**
  * The functions a formula may call. All elementwise over the thirteen slots
- * unless the comment says otherwise (cum, dec, total, avg, retotal — the ones
- * that deliberately relate months to the total).
+ * unless the comment says otherwise (cum, dec, total, avg, retotal, mean —
+ * the ones that deliberately relate months to the total).
  *
  * Names here are RESERVED: a definition may not use one as an atom or measure
  * id, and the parser refuses a bare function name used as a reference.
@@ -67,6 +67,11 @@ export const FUNCTIONS: Readonly<Record<string, FormulaFunction>> = {
     arity: 1,
     apply: ([a]) => vec.retotal(a),
     description: "months as they are, Total re-summed from them",
+  },
+  mean: {
+    arity: 1,
+    apply: ([a]) => vec.mean(a),
+    description: "months as they are, Total = the mean of the months (a level's year figure)",
   },
 };
 

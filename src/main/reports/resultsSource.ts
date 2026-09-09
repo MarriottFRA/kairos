@@ -46,6 +46,7 @@ function toInputs(rows: readonly ResultsCacheRow[]) {
     months: row.months,
     total: row.total,
     encoding: row.encoding,
+    valueKind: row.valueKind,
   }));
 }
 
@@ -55,6 +56,15 @@ export function readRun(secureDb: Db, scope: OuScope, scenarioId: string): Resul
     `SELECT computed_at, fingerprint FROM engine_runs WHERE ou = ? AND scenario_id = ?`
   ).get(scope.ou, scenarioId) as { computed_at: string; fingerprint: string } | undefined;
   return row ? { computedAt: row.computed_at, fingerprint: row.fingerprint } : null;
+}
+
+/** The identity of the scenario's cached results — the memo stamp below, so
+ *  anything built ON the source (the plan overlay) can share its lifetime. */
+export function resultsSourceStamp(secureDb: Db, scope: OuScope, scenarioId: string): string {
+  const run = readRun(secureDb, scope, scenarioId);
+  if (!run) return "none";
+  const cacheStamp = readResultsCacheStamp(secureDb, scope, scenarioId);
+  return `${run.computedAt}|${run.fingerprint}|${cacheStamp.writtenAt}|${cacheStamp.count}`;
 }
 
 export function getResultsSource(
@@ -80,7 +90,8 @@ export function getResultsSource(
   const cacheStamp = readResultsCacheStamp(secureDb, scope, scenarioId);
   if (cacheStamp.count > 0) {
     // The fingerprint is in the stamp too: two runs in one millisecond share a
-    // computed_at, but not the inputs they were computed from.
+    // computed_at, but not the inputs they were computed from. Keep in step
+    // with resultsSourceStamp().
     const key = `${run.computedAt}|${run.fingerprint}|${cacheStamp.writtenAt}|${cacheStamp.count}`;
     const source = memo(secureDb, `reports:results:${scope.ou}:${scenarioId}`, key, () =>
       buildValueSource("kairos", toInputs(readResultsCache(secureDb, scope, scenarioId)))

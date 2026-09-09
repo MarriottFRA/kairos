@@ -37,6 +37,7 @@ import {
   WEEKLY_HOURS_STAT_DEPARTMENT,
 } from "../../../shared/positions/systemAccounts";
 import { resolveOuScope } from "../ouScope";
+import { effectiveWeekOf } from "../../../shared/positions/effectiveWeek";
 import {
   ENGINE_OUTPUTS_SQL,
   POSITIONS_STRUCTURE_TABLES_SQL,
@@ -304,8 +305,12 @@ describe("projectAllocationLines", () => {
 // ---------------------------------------------------------------------------
 
 describe("projectSetupLines", () => {
-  it("posts Weekly Hours to its pinned combo, in January only", () => {
-    const [line] = projectSetupLines({ weeklyHours: 40 });
+  // A 260-day productive year with nothing to average: the effective week IS
+  // the contract week.
+  const FULL_YEAR = { productiveDays: 260 };
+
+  it("posts the effective week to its pinned combo, in January only", () => {
+    const [line] = projectSetupLines(effectiveWeekOf(40, FULL_YEAR));
 
     // 40 hours a week is one fact about the year. The BST reads a level as the
     // running sum of its months, so repeating it would report 480.
@@ -314,19 +319,30 @@ describe("projectSetupLines", () => {
     expect(line.dept).toBe(WEEKLY_HOURS_STAT_DEPARTMENT);
     expect(line.account).toBe(WEEKLY_HOURS_STAT_ACCOUNT);
     expect(line.source).toBe("SETUP");
-    expect(line.detail).toMatchObject({ weeklyHours: 40 });
+    expect(line.label).toBe("Effective week");
+    expect(line.detail).toMatchObject({ weeklyHours: 40, contractWeek: 40, productiveDays: 260, averageVacationDays: 0 });
+  });
+
+  it("posts the contract week scaled by the roster's average vacation, with its working", () => {
+    // 40h × (260 − 26) ÷ 260 = 36h: what makes hours ÷ (week × 52) read a
+    // full-timer with 26 days off as 1.00, the way the grid does.
+    const [line] = projectSetupLines(effectiveWeekOf(40, FULL_YEAR, { averageVacationDays: 26, weightedFte: 4, positions: 4 }));
+    expect(line.months).toEqual(janOnly(36));
+    expect(line.detail).toMatchObject({ weeklyHours: 36, averageVacationDays: 26, fullTimeHoursYear: 1872, positions: 4 });
+    expect(line.detail!.working).toMatch(/234 hours|1,872 hours a year/);
   });
 
   it("keeps a fractional contract exact", () => {
-    expect(projectSetupLines({ weeklyHours: 37.5 })[0].months).toEqual(janOnly(37.5));
+    expect(projectSetupLines(effectiveWeekOf(37.5, FULL_YEAR))[0].months).toEqual(janOnly(37.5));
   });
 
   it("posts nothing when the setting is zero or missing", () => {
     // Not a hotel that works no hours — a hotel that has not finished its
     // setup. A zero row would claim the first.
-    expect(projectSetupLines({ weeklyHours: 0 })).toEqual([]);
-    expect(projectSetupLines({ weeklyHours: NaN })).toEqual([]);
-    expect(projectSetupLines({ weeklyHours: -5 })).toEqual([]);
+    expect(projectSetupLines(effectiveWeekOf(0, FULL_YEAR))).toEqual([]);
+    expect(projectSetupLines(effectiveWeekOf(NaN, FULL_YEAR))).toEqual([]);
+    expect(projectSetupLines(effectiveWeekOf(-5, FULL_YEAR))).toEqual([]);
+    expect(projectSetupLines(effectiveWeekOf(40, { productiveDays: 0 }))).toEqual([]);
   });
 });
 
@@ -766,7 +782,7 @@ describe("computeFingerprint covers the new sources", () => {
     expect(fingerprint()).not.toBe(added);
   });
 
-  it("changes when the hotel's Weekly Hours setting is edited", () => {
+  it("changes when the hotel's contract week is edited", () => {
     // Two things this probe needs that the other cases do not: the defaults
     // table (it lives in the settings DB, not the positions schema) and a real
     // scenario row, because the probe is keyed on the scenario's YEAR.
@@ -797,8 +813,9 @@ describe("computeFingerprint covers the new sources", () => {
     const saved = fingerprint();
     expect(saved).not.toBe(before);
 
-    // The VALUE is stamped, not only the timestamp: Weekly Hours IS the posted
-    // statistic, so a run that predates the edit is reporting the old contract.
+    // The VALUE is stamped, not only the timestamp: the contract week drives
+    // the posted effective week, so a run that predates the edit is reporting
+    // the old contract.
     structureDb
       .prepare(`UPDATE position_defaults SET weekly_hours = 37.5 WHERE ou = ?`)
       .run(OU);

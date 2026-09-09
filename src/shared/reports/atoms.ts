@@ -18,7 +18,7 @@
 import { bareAccount, bareDept } from "../positions/comboKey";
 import { MAP_LEVEL_COUNT } from "../mappingTables/types";
 import type { MapIndex, ValueSource } from "./sources";
-import type { Atom, AtomFilter, ReportWarning, ValueSourceRef } from "./types";
+import type { Atom, AtomFilter, ComboEntry, ReportWarning, ValueSourceRef } from "./types";
 import * as vec from "./vec";
 import type { Vec13 } from "./vec";
 
@@ -219,25 +219,19 @@ function mapsUnavailable(atomId: string): ReportWarning {
 // ---------------------------------------------------------------------------
 
 /**
- * Sum the entries an atom selects. Walks the cheaper side: a base-only atom
+ * Visit every entry an atom selects. Walks the cheaper side: a base-only atom
  * on both sides is |dept codes| × |account codes| direct lookups; one-sided
  * selections walk that side's index; no filters at all walks every entry.
  */
-export function sumAtom(
+export function forEachAtomEntry(
   atom: NormalizedAtom,
   source: ValueSource,
   maps: MapIndex,
-  warn: (warning: ReportWarning) => void
-): Vec13 {
+  warn: (warning: ReportWarning) => void,
+  take: (entry: ComboEntry) => void
+): void {
   const depts = resolveSide(atom.id, "dept", atom.dept, source, maps, warn);
   const accounts = resolveSide(atom.id, "account", atom.account, source, maps, warn);
-
-  const out = vec.zero();
-  let mixed = false;
-  const take = (entry: { reportVec: Vec13; encoding: string }) => {
-    if (entry.encoding === "MIXED") mixed = true;
-    vec.addInto(out, entry.reportVec);
-  };
 
   if (depts === "all" && accounts === "all") {
     for (const entry of source.entries) take(entry);
@@ -273,6 +267,21 @@ export function sumAtom(
       }
     }
   }
+}
+
+/** Sum the entries an atom selects. */
+export function sumAtom(
+  atom: NormalizedAtom,
+  source: ValueSource,
+  maps: MapIndex,
+  warn: (warning: ReportWarning) => void
+): Vec13 {
+  const out = vec.zero();
+  let mixed = false;
+  forEachAtomEntry(atom, source, maps, warn, (entry) => {
+    if (entry.encoding === "MIXED") mixed = true;
+    vec.addInto(out, entry.reportVec);
+  });
 
   if (mixed) {
     warn({
@@ -282,4 +291,21 @@ export function sumAtom(
     });
   }
   return atom.negate ? vec.neg(out) : out;
+}
+
+/** The entries an atom selects, for a drill-down — largest |total| first. */
+export function collectAtomEntries(
+  atom: NormalizedAtom,
+  source: ValueSource,
+  maps: MapIndex,
+  warn: (warning: ReportWarning) => void
+): ComboEntry[] {
+  const out: ComboEntry[] = [];
+  forEachAtomEntry(atom, source, maps, warn, (entry) => out.push(entry));
+  return out.sort(
+    (a, b) =>
+      Math.abs(b.reportVec[vec.TOTAL]) - Math.abs(a.reportVec[vec.TOTAL]) ||
+      a.dept.localeCompare(b.dept) ||
+      a.account.localeCompare(b.account)
+  );
 }

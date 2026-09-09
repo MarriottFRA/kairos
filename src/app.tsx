@@ -39,6 +39,7 @@ import HotelClusters from "./routes/nestedPages/hotelClusters";
 import Allocations from "./routes/nestedPages/allocations";
 import Positions from "./routes/nestedPages/positions";
 import Results from "./routes/nestedPages/results";
+import Reports from "./routes/nestedPages/reports";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // define the route
@@ -112,6 +113,11 @@ const router = createHashRouter([
         path: "results",
         element: <Results />,
         handle: { title: "Results" },
+      },
+      {
+        path: "reports",
+        element: <Reports />,
+        handle: { title: "Reports" },
       },
       {
         path: "sync",

@@ -19,6 +19,8 @@ import type { MapIndex, ValueSource } from "./sources";
 import type {
   EvaluatedReport,
   EvaluatedRow,
+  ParamValue,
+  ReportParam,
   ReportWarning,
   ValueSourceRef,
 } from "./types";
@@ -30,6 +32,9 @@ export interface EvaluationContext {
    *  context has already recorded why through `warn`). */
   getSource(ref: ValueSourceRef, warn: (warning: ReportWarning) => void): ValueSource | null;
   maps: MapIndex;
+  /** The value of a param; null (or no resolver at all) falls back to the
+   *  param's default and raises PARAM_DEFAULTED. */
+  getParam?(param: ReportParam, warn: (warning: ReportWarning) => void): ParamValue | null;
   /** Warnings the context already knows about (results predate the cache…). */
   warnings?: readonly ReportWarning[];
 }
@@ -71,6 +76,22 @@ export function evaluateReport(
     values.set(atomId, source ? sumAtom(atom, source, context.maps, warn) : vec.zero());
   }
 
+  // Params next: each is a leaf like an atom, resolved by the context or
+  // falling back to the definition's default. Only a param that names a
+  // builtin was MEANT to be resolved; a plain one is a constant and its
+  // default is the value.
+  for (const paramId of compiled.paramsUsed) {
+    const param = compiled.params.get(paramId)!;
+    const resolved = context.getParam?.(param, warn) ?? null;
+    if (resolved === null && param.builtin) {
+      warn({
+        code: "PARAM_DEFAULTED",
+        message: `"${param.label ?? param.id}" was not resolved for this hotel; its default was used.`,
+      });
+    }
+    values.set(paramId, vec.fromParam(resolved ?? param.default));
+  }
+
   // Then measures, in an order where every reference is already there.
   const lookup = (id: string): Vec13 => {
     const value = values.get(id);
@@ -90,7 +111,7 @@ export function evaluateReport(
         return { type: "spacer", label: "", indent: 0, values: null };
       case "measure": {
         const measure = measureById.get(row.measureId);
-        return {
+        const out: EvaluatedRow = {
           type: "measure",
           measureId: row.measureId,
           label: row.label ?? measure?.label ?? row.measureId,
@@ -99,17 +120,22 @@ export function evaluateReport(
           invertSign: row.invertSign === true,
           values: vec.toArray(lookup(row.measureId)),
         };
+        if (measure?.polarity) out.polarity = measure.polarity;
+        return out;
       }
     }
   });
 
   const atoms: Record<string, number[]> = {};
   for (const atomId of compiled.atomsUsed) atoms[atomId] = vec.toArray(values.get(atomId)!);
+  const params: Record<string, number[]> = {};
+  for (const paramId of compiled.paramsUsed) params[paramId] = vec.toArray(values.get(paramId)!);
 
   return {
     definitionId: compiled.definition.id,
     rows,
     warnings: dedupe(warnings),
     atoms,
+    params,
   };
 }

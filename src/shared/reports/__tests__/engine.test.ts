@@ -233,6 +233,89 @@ describe("evaluateReport", () => {
     expect(report.warnings.map((w) => w.code)).toEqual(["RESULTS_PREDATE_CACHE", "BST_UNAVAILABLE"]);
   });
 
+  it("resolves params through the context, falling back to the default with a warning", () => {
+    const compiled = compileDefinition(
+      definition({
+        atoms: [{ id: "hours", filters: [{ kind: "acc_base", codes: ["A988699"] }] }],
+        params: [
+          { id: "hours_per_fte", default: { months: flat(160) }, builtin: "weekly_hours" },
+          { id: "factor", default: 2 },
+          { id: "unused_param", default: 1 },
+        ],
+        measures: [
+          { id: "fte", formula: "div(hours, hours_per_fte)", format: "ratio" },
+          { id: "doubled", formula: "fte * factor" },
+        ],
+        rows: [
+          { type: "measure", measureId: "fte" },
+          { type: "measure", measureId: "doubled" },
+        ],
+      })
+    );
+    expect([...compiled.paramsUsed].sort()).toEqual(["factor", "hours_per_fte"]);
+    expect([...compiled.atomsUsed]).toEqual(["hours"]);
+
+    const defaulted = evaluateReport(compiled, context());
+    expect(defaulted.rows[0].values![0]).toBe(4); // 640 / 160
+    expect(defaulted.rows[0].values![12]).toBe(4); // Total = 7680 / 1920
+    expect(defaulted.rows[1].values![0]).toBe(8);
+    // Only the builtin-backed param warns; `factor` is a constant.
+    expect(defaulted.warnings.map((w) => w.code)).toEqual(["PARAM_DEFAULTED"]);
+    expect(defaulted.params.hours_per_fte[12]).toBe(1920);
+    expect(defaulted.params.factor).toEqual(new Array(13).fill(2));
+    expect(defaulted.params.unused_param).toBeUndefined();
+
+    const resolved = evaluateReport(
+      compiled,
+      context({ getParam: (param) => (param.builtin === "weekly_hours" ? 320 : null) })
+    );
+    expect(resolved.rows[0].values![0]).toBe(2);
+    expect(resolved.warnings).toEqual([]);
+  });
+
+  it("rejects a param that collides, is reserved, or has a bad default", () => {
+    expect(
+      validateDefinition(
+        definition({
+          atoms: [{ id: "a", filters: [] }],
+          params: [
+            { id: "a", default: 1 },
+            { id: "avg", default: 1 },
+            { id: "p", default: { months: [1, 2] } },
+            { id: "q", default: Number.NaN },
+          ],
+          measures: [{ id: "m", formula: "a" }],
+          rows: [{ type: "measure", measureId: "m" }],
+        })
+      )
+    ).toEqual([
+      'id "a" is used more than once',
+      'param id "avg" is a function name and is reserved',
+      'param "p": default months must be twelve finite numbers',
+      'param "q": default must be finite',
+    ]);
+  });
+
+  it("hands a pinned kairos ref to the context untouched", () => {
+    const refs: ValueSourceRef[] = [];
+    evaluateReport(
+      compileDefinition(
+        definition({
+          atoms: [{ id: "heads", source: { source: "kairos", pinned: true }, filters: [] }],
+          measures: [{ id: "m", formula: "heads" }],
+          rows: [{ type: "measure", measureId: "m" }],
+        })
+      ),
+      context({
+        getSource: (ref) => {
+          refs.push(ref);
+          return KAIROS;
+        },
+      })
+    );
+    expect(refs).toEqual([{ source: "kairos", pinned: true }]);
+  });
+
   it("dedupes a warning raised by the same atom twice", () => {
     const report = evaluateReport(
       compileDefinition(
@@ -276,17 +359,6 @@ describe("built-in definitions", () => {
       expect(b.order).toEqual(a.order);
       expect([...b.atomsUsed]).toEqual([...a.atomsUsed]);
     }
-  });
-
-  it("payroll summary evaluates over the fixtures", () => {
-    const report = evaluateReport(findReportDefinition("payroll_summary")!, context());
-    const byLabel = new Map(report.rows.map((r) => [r.label, r.values]));
-    expect(byLabel.get("Wages & salaries")![0]).toBe(3000);
-    expect(byLabel.get("Benefits")![0]).toBe(300);
-    expect(byLabel.get("Total payroll")![0]).toBe(3300);
-    expect(byLabel.get("Position count")![12]).toBe(10);
-    expect(byLabel.get("Payroll per head")![0]).toBe(330);
-    expect(byLabel.get("Payroll % of revenue")![0]).toBeCloseTo(5.5);
   });
 
   it("staffing stats needs no maps at all", () => {

@@ -114,6 +114,13 @@ describe("evaluator", () => {
     expect(evaluate("avg(a)", { a }).every((v) => v === 78 / 12)).toBe(true);
   });
 
+  it("mean keeps the months and makes the Total their average, for a level's year figure", () => {
+    const heads = months([1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0]); // on the books half the year
+    const out = evaluate("mean(heads)", { heads });
+    expect(out.slice(0, 12)).toEqual([1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    expect(out[12]).toBe(0.5);
+  });
+
   it("retotal re-sums the months, for rate × volume products", () => {
     const rate = months(new Array(12).fill(2)); // total 24
     const volume = seq(1); // total 78

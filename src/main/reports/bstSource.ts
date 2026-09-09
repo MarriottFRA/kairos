@@ -19,6 +19,7 @@ import type Database from "better-sqlite3-multiple-ciphers";
 import {
   HEADCOUNT_ACCOUNT_BY_JOB_TYPE,
   POSITION_COUNT_ACCOUNT,
+  WEEKLY_HOURS_STAT_ACCOUNT,
 } from "../../shared/positions/systemAccounts";
 import { bareAccount } from "../../shared/positions/comboKey";
 import type { ReportBstInfo } from "../../shared/reports/ipc";
@@ -42,8 +43,10 @@ export interface BstSourceLoad {
   warning: ReportWarning | null;
 }
 
+// The standard work week (D0410 / A988112) is posted the same way as the
+// heads — January only, one fact about the year — so it reads as a level too.
 const LEVEL_ACCOUNTS: ReadonlySet<string> = new Set(
-  [POSITION_COUNT_ACCOUNT, ...Object.values(HEADCOUNT_ACCOUNT_BY_JOB_TYPE)].map(bareAccount)
+  [POSITION_COUNT_ACCOUNT, ...Object.values(HEADCOUNT_ACCOUNT_BY_JOB_TYPE), WEEKLY_HOURS_STAT_ACCOUNT].map(bareAccount)
 );
 
 const normalizeType = (value: string | null | undefined) =>

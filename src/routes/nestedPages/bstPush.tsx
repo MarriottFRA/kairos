@@ -5,6 +5,12 @@
  * different year or revision of the file open, so a push is always an explicit
  * act against a file they choose.
  *
+ * The choose state offers back the BST this hotel was last pushed into, so the
+ * routine monthly push is one click rather than a walk through the file dialog.
+ * That is a shortcut to the DIALOG only: an offered file is read, guarded and
+ * previewed exactly like one picked by hand, and only a file whose own OU and
+ * budget year match the current selection is ever offered.
+ *
  * The screen is one linear task in three states — choose, review, done — rather
  * than a dashboard, because that is the shape of the job. Everything on the
  * review state exists to answer one of four questions:
@@ -47,6 +53,7 @@ import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
+import HistoryIcon from "@mui/icons-material/History";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 
@@ -69,7 +76,10 @@ import {
   BstPushReport,
   DEFAULT_BST_PUSH_CONFIG,
   DEFAULT_BST_PUSH_OPTIONS,
+  RecentBstFile,
+  findRecentFile,
   isEmptyMonthPlan,
+  parentPath,
 } from "../../shared/bstPush/ipc";
 import {
   commitBstPush,
@@ -241,6 +251,14 @@ function refusalCopy(
         body:
           `Close "${refusal.sourceFileName}" and try again. Excel writes the ` +
           `whole workbook when it saves, so it would discard the push.`,
+      };
+    case "file_missing":
+      return {
+        title: "That BST is no longer where it was",
+        body:
+          `Kairos could not find "${refusal.sourceFileName}" at ${refusal.filePath}. ` +
+          `It may have been moved or renamed, or its drive may not be connected. ` +
+          `Choose the file again and Kairos will remember the new location.`,
       };
     case "not_bst_file":
       return { title: "That is not a BST", body: refusal.reason };
@@ -534,21 +552,49 @@ export default function BstPush() {
     if (result.outcome !== "cancelled") setRefusal(result);
   }, []);
 
-  const handleChooseFile = useCallback(async () => {
-    if (!ou || !scenario) return;
-    setBusy("preview");
-    setError(null);
-    setRefusal(null);
-    try {
-      applyPreview(
-        await previewBstPush({ ou, year: budgetYear, scenarioId: scenario.id }, options)
-      );
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }, [ou, scenario, budgetYear, options, applyPreview]);
+  /**
+   * Open a BST and preview a push against it.
+   *
+   * With no path, main shows the file dialog; with one, it opens that file
+   * directly — which is all "use the file I used last time" is. The two are the
+   * same call because they must stay the same act: an offered file goes through
+   * exactly the same read, the same OU and year guards and the same preview as
+   * one picked by hand, so remembering a path can never loosen anything.
+   */
+  const handleOpenFile = useCallback(
+    async (filePath?: string) => {
+      if (!ou || !scenario) return;
+      setBusy("preview");
+      setError(null);
+      setRefusal(null);
+      try {
+        applyPreview(
+          await previewBstPush(
+            { ou, year: budgetYear, scenarioId: scenario.id },
+            options,
+            filePath
+          )
+        );
+        // Main records (or drops) the remembered path as part of opening the
+        // file, so the offer on the idle screen is refreshed from the same
+        // round-trip rather than left describing the previous visit.
+        void loadBstPushConfig(ou)
+          .then(setPushConfig)
+          .catch((err) =>
+            console.error("Failed to refresh the BST push config:", err)
+          );
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [ou, scenario, budgetYear, options, applyPreview]
+  );
+
+  const handleChooseFile = useCallback(() => {
+    void handleOpenFile();
+  }, [handleOpenFile]);
 
   /** Change an option and remember it for next time. */
   const updateOptions = useCallback(
@@ -811,7 +857,9 @@ export default function BstPush() {
           busy={busy}
           outputs={outputs}
           budgetYear={budgetYear}
+          recent={findRecentFile(pushConfig.recentFiles, ou, budgetYear)}
           onChoose={handleChooseFile}
+          onUseRecent={(filePath) => void handleOpenFile(filePath)}
         />
       )}
 
@@ -965,18 +1013,104 @@ export default function BstPush() {
 
 // ── States ──────────────────────────────────────────────────────────
 
+/**
+ * The remembered BST, offered back.
+ *
+ * The same hotel pushes into the same workbook every month, and that workbook
+ * usually lives several folders deep on a shared drive — so the file dialog is
+ * pure repetition, not a decision. This turns it back into a decision only when
+ * there is one to make: the known file is one click, everything else is behind
+ * "Choose a different file".
+ *
+ * It shows the full path, not just the name, because "is this the right file?"
+ * is exactly the question a one-click shortcut must not let anyone skip. And
+ * only a file whose own OU and budget year match what is selected is ever
+ * offered, so the click cannot land on a refusal.
+ */
+function RecentFileCard({
+  recent,
+  busy,
+  disabled,
+  onUse,
+}: {
+  recent: RecentBstFile;
+  busy: boolean;
+  disabled: boolean;
+  onUse: () => void;
+}) {
+  const folder = parentPath(recent.filePath);
+  return (
+    <Paper
+      variant="outlined"
+      sx={(theme) => ({
+        p: 1.75,
+        borderRadius: 2,
+        borderColor: alpha(theme.palette.primary.main, 0.4),
+        backgroundColor: alpha(theme.palette.primary.main, 0.04),
+      })}
+    >
+      <Stack spacing={1.5}>
+        <Stack direction="row" spacing={1.25} sx={{ alignItems: "flex-start" }}>
+          <DescriptionOutlinedIcon color="primary" sx={{ mt: 0.25 }} />
+          <Box sx={{ minWidth: 0, flex: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>
+              {recent.fileName}
+            </Typography>
+            <Tooltip title={recent.filePath}>
+              <Typography variant="caption" color="text.secondary" noWrap
+                sx={{ display: "block" }}>
+                {folder || recent.filePath}
+              </Typography>
+            </Tooltip>
+          </Box>
+          {recent.usedAt > 0 && (
+            <Chip
+              size="small"
+              variant="outlined"
+              icon={<HistoryIcon sx={{ fontSize: 15 }} />}
+              label={`Last used ${new Date(recent.usedAt).toLocaleDateString()}`}
+              sx={{ flexShrink: 0 }}
+            />
+          )}
+        </Stack>
+        <Button
+          variant="contained"
+          size="large"
+          disableElevation
+          fullWidth
+          startIcon={
+            busy ? (
+              <CircularProgress size={18} color="inherit" />
+            ) : (
+              <UploadFileIcon />
+            )
+          }
+          onClick={onUse}
+          disabled={disabled}
+        >
+          {busy ? "Reading the BST…" : "Use this BST"}
+        </Button>
+      </Stack>
+    </Paper>
+  );
+}
+
 function IdleState({
   scopeReady,
   busy,
   outputs,
   budgetYear,
+  recent,
   onChoose,
+  onUseRecent,
 }: {
   scopeReady: boolean;
   busy: Stage | null | string;
   outputs: OutputsResponse | null;
   budgetYear: number;
+  recent: RecentBstFile | null;
   onChoose: () => void;
+  onUseRecent: (filePath: string) => void;
 }) {
   const rowCount = outputs?.rows.length ?? 0;
   const nothingToPush = Boolean(outputs) && rowCount === 0;
@@ -1051,13 +1185,26 @@ function IdleState({
             </Alert>
           )}
 
+          {/* The known file first, the dialog second — the common case is one
+              click, and picking a different workbook stays one click away. */}
+          {recent && (
+            <RecentFileCard
+              recent={recent}
+              busy={busy === "preview"}
+              disabled={!scopeReady || Boolean(busy) || nothingToPush}
+              onUse={() => onUseRecent(recent.filePath)}
+            />
+          )}
+
           <Button
-            variant="contained"
+            variant={recent ? "outlined" : "contained"}
             size="large"
             disableElevation
             startIcon={
-              busy === "preview" ? (
+              busy === "preview" && !recent ? (
                 <CircularProgress size={18} color="inherit" />
+              ) : recent ? (
+                <FolderOpenIcon />
               ) : (
                 <UploadFileIcon />
               )
@@ -1065,7 +1212,11 @@ function IdleState({
             onClick={onChoose}
             disabled={!scopeReady || Boolean(busy) || nothingToPush}
           >
-            {busy === "preview" ? "Reading the BST…" : "Choose BST file…"}
+            {recent
+              ? "Choose a different file…"
+              : busy === "preview"
+                ? "Reading the BST…"
+                : "Choose BST file…"}
           </Button>
 
           <Typography variant="caption" color="text.secondary">

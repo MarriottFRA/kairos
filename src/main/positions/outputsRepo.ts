@@ -31,6 +31,8 @@ import {
   OutputSource,
   OutputsResponse,
 } from "../../shared/positions/ipc";
+import { EffectiveWeekDerivation, describeEffectiveWeek } from "../../shared/positions/effectiveWeek";
+import { isSilentUnpostedDef } from "../../shared/blocks/ipc";
 import {
   WEEKLY_HOURS_STAT_ACCOUNT,
   WEEKLY_HOURS_STAT_DEPARTMENT,
@@ -188,8 +190,13 @@ export function projectOutputLines(
     let nonZero = 0;
     for (const line of result.positionLines(position.id as never)) {
       if (!line.account) {
-        unpostedByLabel[line.component.label] =
-          (unpostedByLabel[line.component.label] ?? 0) + 1;
+        // Blank is the contract, not the diagnostic: a few heads can never
+        // carry an account, or are opt-in, and naming them only sends people
+        // looking for a column to fill in (isSilentUnpostedDef).
+        if (!isSilentUnpostedDef(line.component.id as string)) {
+          unpostedByLabel[line.component.label] =
+            (unpostedByLabel[line.component.label] ?? 0) + 1;
+        }
         continue;
       }
       const levels = Array.from(line.months);
@@ -418,29 +425,32 @@ export function projectAllocationLines(
 /**
  * Hotel setup values that are themselves reportable statistics.
  *
- * Weekly Hours is the only one today. It is entered once per hotel-year on the
- * Home page, where it has always sized the FTE yardstick; the budget also has to
- * REPORT the standard contract, and it reports to a fixed department and account
- * (see WEEKLY_HOURS_STAT_DEPARTMENT / _ACCOUNT).
+ * The effective week is the only one today (shared/positions/effectiveWeek.ts):
+ * the contract week typed once per hotel-year on the Home page, scaled by the
+ * days a full-timer actually works once the roster's average vacation and the
+ * public holidays are out. The budget reports it to a fixed department and
+ * account (see WEEKLY_HOURS_STAT_DEPARTMENT / _ACCOUNT), and everything that
+ * reads FTE as hours ÷ (week × 52) — the company's reports and Kairos' own —
+ * divides by this figure.
  *
  * Posted January-only, through the same rule the headcount stats and allocation
- * splits go through: 40 hours a week is one fact about the year, not forty hours
- * earned twelve times, and the BST reads such a row as the running sum of its
- * months. toMonthlyDeltas over a flat series is that encoding — it is spelled out
- * rather than hard-coded as [weekly, 0, 0, …] so that this row can never drift
- * from how every other level-valued statistic is written.
+ * splits go through: 36 hours a week is one fact about the year, not thirty-six
+ * hours earned twelve times, and the BST reads such a row as the running sum of
+ * its months. toMonthlyDeltas over a flat series is that encoding — it is
+ * spelled out rather than hard-coded as [weekly, 0, 0, …] so that this row can
+ * never drift from how every other level-valued statistic is written.
  *
- * Not a per-scenario number: every scenario in a year posts the same figure,
- * because every scenario in that year is measured against the same full-timer.
+ * A per-scenario number: the average vacation is the scenario's roster's, so
+ * two scenarios of one year can post slightly different weeks. The posted
+ * figure keeps EFFECTIVE_WEEK_DECIMALS (the derivation rounds), inside what an
+ * Excel cell holds.
  *
- * A non-positive setting posts nothing. Zero weekly hours is not a fact worth
- * reporting — it is a hotel that has not finished its setup, and a 0 row would
- * claim otherwise.
+ * A non-positive week posts nothing. Zero hours is not a fact worth reporting —
+ * it is a hotel that has not finished its setup, and a 0 row would claim
+ * otherwise.
  */
-export function projectSetupLines(defaults: {
-  weeklyHours: number;
-}): OutputLineWrite[] {
-  const weekly = Number(defaults?.weeklyHours) || 0;
+export function projectSetupLines(setup: EffectiveWeekDerivation): OutputLineWrite[] {
+  const weekly = Number(setup?.effectiveWeek) || 0;
   if (weekly <= 0) return [];
 
   const months = toMonthlyDeltas(new Array<number>(MONTHS).fill(weekly));
@@ -450,14 +460,24 @@ export function projectSetupLines(defaults: {
       // position, which is what the inspector's LEFT JOINs already expect.
       positionId: "setup:defaults",
       componentDefId: "setup:weeklyHours",
-      label: "Weekly Hours",
+      label: "Effective week",
       dept: WEEKLY_HOURS_STAT_DEPARTMENT,
       account: WEEKLY_HOURS_STAT_ACCOUNT,
       months,
       total: sumMonths(months),
       source: "SETUP",
       sourceRef: "weeklyHours",
-      detail: { setting: "Weekly Hours", weeklyHours: weekly },
+      detail: {
+        setting: "Effective week",
+        weeklyHours: weekly,
+        contractWeek: setup.contractWeek,
+        productiveDays: setup.productiveDays,
+        averageVacationDays: setup.averageVacationDays,
+        weightedFte: setup.weightedFte,
+        positions: setup.positions,
+        fullTimeHoursYear: setup.fullTimeHoursYear,
+        working: describeEffectiveWeek(setup),
+      },
       encoding: "LEVEL",
     },
   ];
