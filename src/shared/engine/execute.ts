@@ -170,19 +170,22 @@ export function executePosition(
 
       case OP_BASE_SALARY_HOURLY: {
         const out = outLine[i] * MONTHS;
-        const coeff = paramPool[pp];
         const manualMonthly = scratch[SCRATCH_MANUAL];
         const incMonth = scratch[SCRATCH_INCMONTH];
-        // Hourly per-day pay is the coeff itself (rate·contract hours) — no
-        // twm/twd normalization, matching how the hourly base spreads.
-        scratch[SCRATCH_DAYRATE] = coeff;
+        // Hourly per-day pay is rate·contract hours (param 0) — no twm/twd
+        // normalization. The SPREAD is rate·paid hours (param 1) over the
+        // realDays the position is active in (twd2), so the year sums to the
+        // contract's paid hours × rate whatever the calendar says.
+        scratch[SCRATCH_DAYRATE] = paramPool[pp];
+        const twd2 = scratch[SCRATCH_TWD2];
+        const coeff = twd2 > 0 ? paramPool[pp + 1] / twd2 : 0;
         for (let m = 0; m < MONTHS; m++) {
           const s = seasonality[posOfs + m];
           let gross = 0;
           if (s !== 0) {
             const daySpread = coeff * realDays[m] * s * scratch[SCRATCH_INC + m];
             const manual = m >= incMonth ? manualMonthly * s : 0;
-            gross = daySpread + manual + paramPool[pp + 1 + m] * s;
+            gross = daySpread + manual + paramPool[pp + 2 + m] * s;
           }
           scratch[SCRATCH_GROSS + m] = gross;
           values[out + m] = gross;

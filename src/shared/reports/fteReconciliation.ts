@@ -8,7 +8,7 @@
  *   grid      each position's derived FTE (the contract against the hotel's
  *             full-time yardstick, engineInput.deriveFte) × Count × the
  *             hotel's cluster share — the figure the Positions grid and the
- *             Staffing overview show. Split into the manager grades and
+ *             Staffing overview's Positions basis show. Split into the manager grades and
  *             everyone else. Buyout Labour is left out: it is bought in, not
  *             staffed, and its hours sit outside the account-side node too.
  *   accounts  the staffing catalog's FTE evaluated on the scenario's own

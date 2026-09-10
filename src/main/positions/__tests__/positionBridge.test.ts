@@ -50,7 +50,14 @@ beforeEach(() => {
     structureDb,
     {
       accountMaps: [
-        { base_account: "A511000", account_description_detail_level_max: "Salaries", level_9: "Total Payroll", level_15: "Total Management Salaries" },
+        {
+          base_account: "A511000",
+          account_description_detail_level_max: "Salaries",
+          level_9: "Total Payroll",
+          level_12: "Associate Wages",
+          level_14: "Wages & Salaries",
+          level_18: "Mgmt Salaries",
+        },
         { base_account: "A512000", account_description_detail_level_max: "Wages", level_9: "Total Payroll", level_15: "Total Hourly Wages" },
       ],
       departmentMaps: [
@@ -166,14 +173,27 @@ describe("readPositionBridge", () => {
     expect(manager.headcount).toBe(2);
     expect(manager.lineageId).toBe("pos-1"); // a new position is its own lineage
     const salaries = manager.cells.find((c) => c.account === "511000")!;
-    expect(salaries.bucket).toBe("management_salaries");
+    expect(salaries.bucket).toBe("payroll");
     expect(salaries.total).toBe(72000);
     expect(manager.lines.some((l) => l.account === "511000")).toBe(true);
     expect(JSON.stringify(bridge)).not.toMatch(/Lovelace|Ada|first_name|last_name|firstName|lastName/);
 
     const clerk = admin.rows.find((r) => r.positionId === "pos-2")!;
-    expect(clerk.cells.find((c) => c.account === "512000")!.bucket).toBe("hourly_wages");
-    expect(bridge.accounts.find((a) => a.code === "511000")).toEqual({ code: "511000", name: "Salaries", bucket: "management_salaries" });
+    expect(clerk.cells.find((c) => c.account === "512000")!.bucket).toBe("payroll");
+    // Each payroll account carries its place in the matrix's column tree.
+    expect(bridge.accounts.find((a) => a.code === "511000")).toEqual({
+      code: "511000",
+      name: "Salaries",
+      bucket: "payroll",
+      path: [
+        { level: 12, label: "Associate Wages" },
+        { level: 14, label: "Wages & Salaries" },
+        { level: 18, label: "Mgmt Salaries" },
+      ],
+    });
+    // Mapped under Total Payroll but with nothing at the tree levels.
+    expect(bridge.accounts.find((a) => a.code === "512000")!.path).toEqual([{ level: 12, label: "Other payroll" }]);
+    expect(bridge.accounts.filter((a) => a.bucket !== "payroll").every((a) => a.path.length === 0)).toBe(true);
   });
 
   it("ties every department total to the results cache and shows non-engine lines as rows", async () => {

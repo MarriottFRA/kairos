@@ -215,8 +215,9 @@ const OVERRIDES: Readonly<
   hourlyRate: {
     unit: "rate / hr",
     hint:
-      "Hourly pay rate. When set, it derives the basic salary from hours worked " +
-      "(rate × daily hours × productive days) and locks Monthly Basic — only one applies.",
+      "Hourly pay rate. When set, the basic salary is rate × the hours this row " +
+      "is paid for — the worked hours its Contract columns give it plus its " +
+      "vacation — and Monthly Basic is locked; only one applies.",
   },
   additionalCostsTotal: {
     short: "Add. Costs",
@@ -228,7 +229,10 @@ const OVERRIDES: Readonly<
   },
   fullYearWage: {
     unit: "= derived",
-    hint: "Derived: monthly basic across the working months of the year. Read-only.",
+    hint:
+      "Derived: monthly basic across the working months of the year — or, on an " +
+      "hourly row, rate × the hours paid (worked + vacation) from the Contract " +
+      "columns. Read-only.",
   },
   meritIncreasePct: {
     unit: "% of basic",

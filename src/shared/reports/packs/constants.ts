@@ -3,14 +3,22 @@
  * carried over so a Kairos pack reads the same way.
  */
 
-/** Department map level the pack groups by (decided 2026-09-09). */
+/** The parent department level: orders the pack's groups (PACK_GROUP_ORDER)
+ *  and stands in for a department with no DETAIL_GROUP_LEVEL label. Staffing
+ *  overview and FTE reconciliation still group by it directly. */
 export const PACK_GROUP_LEVEL = 7;
+
+/** The department level the budget pack (every page) and Staffing statistics
+ *  group by since 2026-09-10 (level_10: Rooms, Reservation, Kitchen, Outlets
+ *  and Lounge, …), falling back to PACK_GROUP_LEVEL where a department has none. */
+export const DETAIL_GROUP_LEVEL = 10;
 
 /** Account map level the ledger sub-groups by inside a category. */
 export const PACK_ACCOUNT_GROUP_LEVEL = 12;
 
-/** level_7 groups in the order the pack presents them; anything else follows
- *  alphabetically, and unmapped departments last. */
+/** level_7 labels in the order the pack presents their groups; anything else
+ *  follows alphabetically, and unmapped departments last. Order only — which
+ *  departments form a group is always the map's say. */
 export const PACK_GROUP_ORDER: readonly string[] = [
   "Rooms and Reservation",
   "Total Food & Beverage",

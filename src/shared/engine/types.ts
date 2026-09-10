@@ -340,6 +340,25 @@ export interface CostComponentDefinition extends SyncMeta {
 }
 
 /**
+ * Yearly hours an hourly-paid position is paid for: the contract's worked hours
+ * plus its leave (vacation is paid time, and yearlyHoursWorked is net of it).
+ * Both terms come off the position's OWN contract — the loaders derive
+ * yearlyHoursWorked from Yearly Days − Days Off − Public Holidays − Vacation ×
+ * Daily Hours (or take a typed override) — so this is what makes hourly base
+ * pay follow the row's Contract columns rather than the hotel calendar. The
+ * base op spreads rate × this over the calendar's realDays shape; HOURS_PAID
+ * spreads the same total unpriced, so base ÷ rate = hours paid, month by month.
+ *
+ * Shared by the compiler and the reference implementation so the parity test
+ * compares one expression, evaluated in one operand order.
+ */
+export function hourlyPaidHours(
+  position: Pick<Position, "yearlyHoursWorked" | "vacationDays" | "dailyContractHours">
+): number {
+  return position.yearlyHoursWorked + position.vacationDays * position.dailyContractHours;
+}
+
+/**
  * The BANK_HOLIDAY premium, folded into one per-position coefficient: the number
  * of days' base pay a single public holiday costs for one head of this position.
  * The VM then only does `coefficient · dayRate · holidayDays[m] · seas[m] · inc[m]`.
@@ -532,8 +551,9 @@ export interface Position extends SyncMeta {
   seasonality: number[];
   monthlyBaseSalary: number;
   /** Hourly pay rate. When > 0 the base salary is derived from
-   *  rate × dailyContractHours × realDays[m] (net productive days) instead of
-   *  monthlyBaseSalary. The two are mutually exclusive inputs — only one is
+   *  rate × the hours the position is paid for (yearlyHoursWorked + vacation,
+   *  see hourlyPaidHours), spread over realDays (net productive days), instead
+   *  of monthlyBaseSalary. The two are mutually exclusive inputs — only one is
    *  entered per position; the UI locks the other. */
   hourlyRate: number;
   /** Extra salary cost per month, added on top of the day-spread base. */

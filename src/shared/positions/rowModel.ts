@@ -34,6 +34,7 @@ import {
   Position,
   PositionId,
   ScenarioId,
+  hourlyPaidHours,
 } from "../engine/types";
 import {
   ACCOUNT_FIELD_KEYS,
@@ -650,7 +651,15 @@ export function fteById(
 // Computed columns
 // ---------------------------------------------------------------------------
 
-export type ComputeFn = (row: PositionRow) => number;
+/** What a row-only compute may read besides the row: the hotel-year day basis,
+ *  for the computes that restate the row the way the engine will spread it
+ *  (the hourly Full Year / Budget Year previews). Absent in tests and while the
+ *  calendar loads — the compute then derives from the row alone. */
+export interface ComputeContext {
+  calendar?: Pick<CalendarContext, "realDays"> | null;
+}
+
+export type ComputeFn = (row: PositionRow, ctx?: ComputeContext) => number;
 
 function sumVector(row: PositionRow, vector: VectorName): number {
   let total = 0;
@@ -671,17 +680,49 @@ function yearlyManhoursPaidOf(row: PositionRow): number {
   );
 }
 
+/** A calendar with no productive days, for a compute called without one: the
+ *  Contract columns still derive the hours, and only a row with blank Yearly
+ *  Days — which the engine reads as the calendar's productive year — comes
+ *  out at 0 instead. */
+const NO_CALENDAR: Pick<CalendarContext, "realDays"> = {
+  realDays: new Float64Array(MONTHS),
+};
+
+/**
+ * Hours an hourly row is paid for across the year — the ENGINE's figure
+ * (hourlyPaidHours over the row restated for its Input Basis, exactly as both
+ * loaders build it), not a second formula. It is what the hourly base line
+ * sums to before increases, so the Full Year / Budget Year previews cannot
+ * disagree with the Results page about which days the contract pays for.
+ * (They used to read rate × Manhours Paid while the engine paid the hotel
+ * calendar's productive days — two numbers for one row.)
+ */
+function hourlyPaidHoursOf(row: PositionRow, ctx?: ComputeContext): number {
+  const position = rowToEnginePosition(
+    row,
+    "",
+    EMPTY_FULL_TIME_REFERENCE,
+    ctx?.calendar ?? NO_CALENDAR
+  );
+  return hourlyPaidHours(position);
+}
+
 /**
  * Effective monthly base used by the preview computes. Fixed Monthly Basic, or —
  * when an Hourly Rate drives the row — an equivalent per-active-month figure
- * (rate × yearly manhours ÷ working months) so Full Year / Budget Year previews
- * don't read 0 in hourly mode. This is a row-only approximation; the engine's
- * realDays-weighted result (reference.ts) is authoritative.
+ * (rate × the hours the contract pays for ÷ working months) so Full Year /
+ * Budget Year previews read what the engine will spread. The engine
+ * distributes it over realDays rather than flat months, so the merit-ramp
+ * previews remain a flat-month approximation; the yearly total is exact.
  */
-function effectiveMonthlyBase(row: PositionRow, seasTotal: number): number {
+function effectiveMonthlyBase(
+  row: PositionRow,
+  seasTotal: number,
+  ctx?: ComputeContext
+): number {
   const hourly = toNumber(row[BASIC_SALARY_HOURLY_KEY], 0);
   if (hourly > 0) {
-    return seasTotal > 0 ? (hourly * yearlyManhoursPaidOf(row)) / seasTotal : 0;
+    return seasTotal > 0 ? (hourly * hourlyPaidHoursOf(row, ctx)) / seasTotal : 0;
   }
   return toNumber(row[BASIC_SALARY_MONTHLY_KEY], 0);
 }
@@ -716,10 +757,11 @@ export const COMPUTES: Record<string, ComputeFn> = {
 
   /** Gross yearly wage before increases: base × working months + seasonal
    *  additional costs (matches Σ grossBase with no increase applied). In hourly
-   *  mode the base is derived from rate × manhours (see effectiveMonthlyBase). */
-  fullYearWage: (row) => {
+   *  mode the base is rate × the hours the contract pays for (see
+   *  effectiveMonthlyBase). */
+  fullYearWage: (row, ctx) => {
     const seasTotal = sumVector(row, "seasonality");
-    let total = effectiveMonthlyBase(row, seasTotal) * seasTotal;
+    let total = effectiveMonthlyBase(row, seasTotal, ctx) * seasTotal;
     for (let m = 1; m <= MONTHS; m++) {
       total +=
         toNumber(row[vectorKey("additionalMonthlyCosts", m)], 0) *
@@ -730,8 +772,8 @@ export const COMPUTES: Record<string, ComputeFn> = {
 
   /** Full year wage with the merit % applied from increaseMonth onward plus
    *  the manual yearly increase (flat-month approximation of the engine). */
-  budgetYearBasicSalary: (row) => {
-    const base = effectiveMonthlyBase(row, sumVector(row, "seasonality"));
+  budgetYearBasicSalary: (row, ctx) => {
+    const base = effectiveMonthlyBase(row, sumVector(row, "seasonality"), ctx);
     const merit = toNumber(row.meritIncreasePct, 0);
     const rawMonth = toNumber(row.increaseMonth, 13);
     const incFrom = rawMonth >= 1 && rawMonth <= 12 ? rawMonth : 13;

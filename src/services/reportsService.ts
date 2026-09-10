@@ -32,10 +32,13 @@ import {
   ReportsPositionBridgeRequest,
   ReportsStaffingOverviewExportRequest,
   ReportsStaffingOverviewRequest,
+  ReportsStaffingStatisticsExportRequest,
+  ReportsStaffingStatisticsRequest,
 } from "../shared/reports/ipc";
 import type { PositionBridgeResponse } from "../shared/reports/bridge";
 import type { FteReconciliationResponse } from "../shared/reports/fteReconciliation";
-import type { StaffingOverviewResponse, TitleMode } from "../shared/reports/staffingOverview";
+import type { StaffingBasis, StaffingOverviewResponse, TitleMode } from "../shared/reports/staffingOverview";
+import type { StaffingStatisticsResponse } from "../shared/reports/staffingStatistics";
 import type { ParamValue } from "../shared/reports/types";
 
 function ipc() {
@@ -161,7 +164,7 @@ export async function loadPositionBridge(
 export async function exportPositionBridge(
   ou: string,
   scenarioId: string,
-  options: { dept?: string; hotelName?: string; fileName?: string } = {}
+  options: { dept?: string; hotelName?: string; fileName?: string; depth?: number } = {}
 ): Promise<ReportsExportResponse> {
   const payload: ReportsPositionBridgeExportRequest = { ou, scenarioId, ...options };
   return request(REPORTS_CHANNELS.positionBridgeExport, payload, "Failed to export the payroll bridge");
@@ -171,7 +174,7 @@ export async function exportPositionBridge(
 export async function loadStaffingOverview(
   ou: string,
   scenarioId: string,
-  options: { compareScenarioId?: string; titleMode?: TitleMode } = {}
+  options: { compareScenarioId?: string; titleMode?: TitleMode; basis?: StaffingBasis } = {}
 ): Promise<StaffingOverviewResponse> {
   const payload: ReportsStaffingOverviewRequest = { ou, scenarioId, ...options };
   return request(REPORTS_CHANNELS.staffingOverview, payload, "Failed to load the staffing overview");
@@ -181,10 +184,26 @@ export async function loadStaffingOverview(
 export async function exportStaffingOverview(
   ou: string,
   scenarioId: string,
-  options: { compareScenarioId?: string; titleMode?: TitleMode; hotelName?: string; fileName?: string } = {}
+  options: { compareScenarioId?: string; titleMode?: TitleMode; basis?: StaffingBasis; hotelName?: string; fileName?: string } = {}
 ): Promise<ReportsExportResponse> {
   const payload: ReportsStaffingOverviewExportRequest = { ou, scenarioId, ...options };
   return request(REPORTS_CHANNELS.staffingOverviewExport, payload, "Failed to export the staffing overview");
+}
+
+/** Staffing statistics: heads, FTE and hours by account — hotel, groups, departments, positions. */
+export async function loadStaffingStatistics(ou: string, scenarioId: string): Promise<StaffingStatisticsResponse> {
+  const payload: ReportsStaffingStatisticsRequest = { ou, scenarioId };
+  return request(REPORTS_CHANNELS.staffingStatistics, payload, "Failed to load the staffing statistics");
+}
+
+/** The staffing statistics as .xlsx for one period; main shows the save dialog. */
+export async function exportStaffingStatistics(
+  ou: string,
+  scenarioId: string,
+  options: { slot?: number; hotelName?: string; fileName?: string } = {}
+): Promise<ReportsExportResponse> {
+  const payload: ReportsStaffingStatisticsExportRequest = { ou, scenarioId, ...options };
+  return request(REPORTS_CHANNELS.staffingStatisticsExport, payload, "Failed to export the staffing statistics");
 }
 
 /** The FTE reconciliation: the Positions grid's FTE beside the account-derived FTE. */

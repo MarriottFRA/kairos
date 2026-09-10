@@ -99,7 +99,10 @@ export function buildStaffingOverviewWorkbook(response: StaffingOverviewResponse
   }
 
   writeGridSheet(ws, {
-    title: "Staffing overview — head count and FTE per department group",
+    title:
+      response.basis === "positions"
+        ? "Staffing overview — head count and FTE per department group, from the positions"
+        : "Staffing overview — head count and FTE per department group, from the accounts",
     subtitle: `${meta.hotelName} · ${meta.scenarioLabel}${meta.compareLabel ? ` vs ${meta.compareLabel}` : ""}`,
     generatedAt: meta.generatedAt.toLocaleString(),
     rows,

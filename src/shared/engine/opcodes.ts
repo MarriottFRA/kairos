@@ -35,14 +35,20 @@
  *                base·twm/twd2 (÷ the month's working days) when the flag is
  *                set. The flag moves only the day price; the spread stays on
  *                twd. Writes gross[] to scratch AND the (still-gross) line.
- *  BASE_SALARY_HOURLY  params: coeff (= hourlyRate·dailyContractHours), addl[12]
- *                Alternate base derivation for hourly-paid staff. Spreads over
- *                realDays (net productive days), not the pay-type day basis, and
- *                skips the twm/twd normalization (coeff is an actual per-day pay):
- *                gross[m] = coeff·realDays[m]·seas[m]·inc[m]
+ *  BASE_SALARY_HOURLY  params: dayRate (= hourlyRate·dailyContractHours),
+ *                ratePaidHours (= hourlyRate·(yearlyHoursWorked + vacationDays·
+ *                dailyContractHours), see types.hourlyPaidHours), addl[12]
+ *                Alternate base derivation for hourly-paid staff. Spreads the
+ *                contract's paid hours over realDays (net productive days), the
+ *                same way STAT_HOURS_PAID spreads them, and skips the twm/twd
+ *                normalization:
+ *                gross[m] = ratePaidHours/twd2·realDays[m]·seas[m]·inc[m]
  *                           + manualMonthly·seas[m]·[m≥M] + addl[m]·seas[m]
- *                Sets dayRate = coeff (the hourly per-day pay). Emitted instead
- *                of BASE_SALARY when a position has hourlyRate>0. Writes gross[]
+ *                (0 when twd2 = 0). Σ gross before increases = rate × paid
+ *                hours, so the base follows the position's own Contract
+ *                columns, not the hotel calendar's day count. Sets dayRate =
+ *                dayRate (the hourly per-day pay). Emitted instead of
+ *                BASE_SALARY when a position has hourlyRate>0. Writes gross[]
  *                identically, so VACATION/BASE_DEDUCT are unchanged.
  *  VACATION      params: vacationDays, weights[12]
  *                vacDays[m] = vacDays·weight[m]/Σweight·seas[m]   (days taken)

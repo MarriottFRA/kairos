@@ -12,11 +12,13 @@ import { UNMAPPED_GROUP } from "../packs";
 import {
   StaffingPositionInput,
   aggregateStaffing,
+  aggregateStaffingLines,
   bucketForJobType,
   buildStaffingGroups,
   cellsTotal,
   staffingTitle,
 } from "../staffingOverview";
+import type { StaffingAccountRole, StaffingStatsLine } from "../staffingStatistics";
 
 const position = (overrides: Partial<StaffingPositionInput>): StaffingPositionInput => ({
   id: "p",
@@ -90,6 +92,70 @@ describe("aggregateStaffing", () => {
     expect(admin.get("Guard")!.fte.casual).toBeCloseTo(0.2);
     expect(admin.has("Agency")).toBe(false);
     expect(aggregate.get(UNMAPPED_GROUP)!.get("Lost")!.hc.svsr).toBe(1);
+  });
+});
+
+describe("aggregateStaffingLines", () => {
+  const ROLES: Record<string, StaffingAccountRole> = {
+    HC: { role: "heads" },
+    MGR: { role: "managerHeads" },
+    FTEH: { role: "hours", kind: "fte" },
+    OT: { role: "hours", kind: "overtime" },
+  };
+  const classify = (account: string) => ROLES[account] ?? null;
+  const months = (values: Record<number, number>, fill = 0) => Array.from({ length: 12 }, (_, m) => values[m] ?? fill);
+  const line = (
+    account: string,
+    values: number[],
+    encoding: "LEVEL" | "AMOUNT",
+    position: { id: string; jobTypeCode: string } | null,
+    dept = "D0010"
+  ): StaffingStatsLine => ({
+    dept,
+    account,
+    months: values,
+    encoding,
+    position: position ? { ...position, title: position.id, deleted: false } : null,
+    sourceLabel: "Manual input · Extra",
+  });
+  const titleOfLine = (l: StaffingStatsLine) => l.position?.title ?? l.sourceLabel;
+  const clerk = { id: "Clerk", jobTypeCode: "Associate" };
+  const boss = { id: "Boss", jobTypeCode: "Manager" };
+
+  it("reads HC at year end, manager heads as their mean and FTE hours over the full-timer's year", () => {
+    const aggregate = aggregateStaffingLines(
+      [
+        // Two start in January, one leaves in June: one head at year end.
+        line("HC", months({ 0: 2, 5: -1 }), "LEVEL", clerk),
+        line("FTEH", months({}, 100), "AMOUNT", clerk),
+        line("OT", months({}, 50), "AMOUNT", clerk),
+        // A manager from January, a second from July: FTE 1.5; heads posted as levels.
+        line("MGR", months({ 0: 1, 6: 1 }), "LEVEL", boss),
+        line("HC", Array.from({ length: 12 }, (_, m) => (m >= 6 ? 2 : 1)), "AMOUNT", boss),
+        line("HC", months({}, 5), "AMOUNT", { id: "Agency", jobTypeCode: "Buyout Labour" }),
+        line("FTEH", months({}, 10), "AMOUNT", null),
+        line("MGR", months({}, 1), "AMOUNT", null, "D0410"),
+        line("HC", months({}), "LEVEL", { id: "Idle", jobTypeCode: "Associate" }),
+        line("ELSE", months({}, 99), "AMOUNT", clerk),
+      ],
+      2000,
+      classify,
+      titleOfLine,
+      groupOf
+    );
+    const rooms = aggregate.get("Rooms and Reservation")!;
+    expect([...rooms.keys()].sort()).toEqual(["Boss", "Clerk", "Manual input · Extra"]);
+    expect(rooms.get("Clerk")!.hc.assoc).toBe(1);
+    expect(rooms.get("Clerk")!.fte.assoc).toBeCloseTo(1200 / 2000); // overtime left out
+    expect(rooms.get("Boss")!.hc.mgr).toBe(2);
+    expect(rooms.get("Boss")!.fte.mgr).toBeCloseTo(1.5);
+    expect(rooms.get("Manual input · Extra")!.fte.assoc).toBeCloseTo(120 / 2000);
+    expect(aggregate.get("Administrative & General")!.get("Manual input · Extra")!.fte.mgr).toBe(1);
+  });
+
+  it("reads hours as no FTE when the full-timer's year is zero", () => {
+    const aggregate = aggregateStaffingLines([line("FTEH", months({}, 100), "AMOUNT", clerk)], 0, classify, titleOfLine, groupOf);
+    expect(aggregate.size).toBe(0);
   });
 });
 

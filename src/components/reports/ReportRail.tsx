@@ -11,6 +11,7 @@
 import { useCallback, useState } from "react";
 import {
   Box,
+  Divider,
   IconButton,
   List,
   ListItemButton,
@@ -72,6 +73,8 @@ export interface RailEntry {
    * as a bug, a greyed row reads as a roadmap (the drawer does the same).
    */
   comingSoon?: boolean;
+  /** Draws a rule under the row — sets a non-report page apart from the reports. */
+  dividerAfter?: boolean;
 }
 
 export interface ReportRailProps {
@@ -160,6 +163,7 @@ export default function ReportRail({ entries, selectedId, onSelect, open, onOpen
               ) : (
                 button
               )}
+              {entry.dividerAfter && <Divider sx={{ my: 0.75 }} />}
             </Box>
           );
         })}

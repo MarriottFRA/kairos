@@ -23,6 +23,7 @@ import {
 import {
   AggregateKey,
   bankHolidayCoefficient,
+  hourlyPaidHours,
   BaseSelector,
   CALENDAR_SERIES_ARG,
   collapseWeights,
@@ -602,7 +603,7 @@ export interface PlanStructure {
    * so a wrong value costs a reallocation and never a wrong number. The
    * instruction count can legitimately differ between packs of the SAME
    * structure, because whether a position is hourly picks between BASE_SALARY
-   * and BASE_SALARY_HOURLY — same arity, but nothing here relies on that.
+   * and BASE_SALARY_HOURLY (one param apart), but nothing here relies on that.
    */
   lastEmitSizes: { instructions: number; params: number };
 }
@@ -1023,12 +1024,16 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
 
       switch (def.kind) {
         case "BASE_SALARY": {
-          // Hourly-rate positions derive the base from rate × contract hours,
-          // spread over realDays (net productive days); the coefficient is
-          // pre-multiplied here so the VM mirrors the reference bit-for-bit.
-          // Presence of hourlyRate is the discriminator — the two salary inputs
-          // are mutually exclusive (enforced in the grid), so hourlyRate wins.
-          const baseOp = position.hourlyRate > 0 ? Op.BASE_SALARY_HOURLY : Op.BASE_SALARY;
+          // Hourly-rate positions derive the base from rate × the hours the
+          // contract pays for (hourlyPaidHours), spread over realDays (net
+          // productive days) — the VM divides by twd2 at run time, so the
+          // product is pre-multiplied here in the reference's operand order to
+          // mirror it bit-for-bit. A day off is still priced at rate × daily
+          // hours, which rides as its own param. Presence of hourlyRate is the
+          // discriminator — the two salary inputs are mutually exclusive
+          // (enforced in the grid), so hourlyRate wins.
+          const hourly = position.hourlyRate > 0;
+          const baseOp = hourly ? Op.BASE_SALARY_HOURLY : Op.BASE_SALARY;
           // The hotel's vacation-day policy rides arg0: ÷ working days (twd2)
           // instead of ÷ 30. Meaningless to the hourly op, which prices a day
           // as the coeff itself, so it is only set on BASE_SALARY.
@@ -1036,13 +1041,16 @@ export function packPlan(input: ScenarioInput, structure: PlanStructure): Compil
             baseOp === Op.BASE_SALARY && input.calendar.vacationWorkingDays
               ? FLAG_VAC_WORKING_DAYS
               : 0;
-          const baseAt = emitter.emitInto(baseOp, line, baseFlags, 1 + MONTHS);
-          emitter.paramPool[baseAt] =
-            position.hourlyRate > 0
-              ? position.hourlyRate * position.dailyContractHours
-              : position.monthlyBaseSalary;
+          const addlOfs = hourly ? 2 : 1;
+          const baseAt = emitter.emitInto(baseOp, line, baseFlags, addlOfs + MONTHS);
+          if (hourly) {
+            emitter.paramPool[baseAt] = position.hourlyRate * position.dailyContractHours;
+            emitter.paramPool[baseAt + 1] = position.hourlyRate * hourlyPaidHours(position);
+          } else {
+            emitter.paramPool[baseAt] = position.monthlyBaseSalary;
+          }
           for (let m = 0; m < MONTHS; m++) {
-            emitter.paramPool[baseAt + 1 + m] = position.additionalMonthlyCosts[m];
+            emitter.paramPool[baseAt + addlOfs + m] = position.additionalMonthlyCosts[m];
           }
 
           const vacAt = emitter.emitInto(Op.VACATION, LINE_NONE, 0, 1 + MONTHS);

@@ -1,7 +1,7 @@
 /**
  * The Reports beta notice — the banner across the top of the Reports page
  * and the constants that go with it (the "Beta" chip in the drawer, the
- * greyed placeholder reports in the rail, the not-yet-live Submit button).
+ * greyed placeholder reports in the rail).
  *
  * One date, one place (decided 2026-09-09). The banner names the day the
  * testing round is expected to finish, and a date on a screen goes stale the
@@ -24,9 +24,6 @@ export const FINAL_TEST_DAY = "2026-09-10";
 /** How that day is written on screen. Keep the two in step. */
 export const FINAL_TEST_LABEL = "Thursday the 10th";
 
-/** Shown wherever the Submit button explains itself. */
-export const SUBMIT_TOOLTIP = `Submitting a budget is not switched on yet — it becomes available once testing completes, expected end of ${FINAL_TEST_LABEL}.`;
-
 /** True until midnight at the end of FINAL_TEST_DAY, local time. */
 export function withinTestWindow(now: Date = new Date()): boolean {
   const [year, month, day] = FINAL_TEST_DAY.split("-").map(Number);
@@ -46,7 +43,7 @@ export default function BetaNotice() {
             : "Reports are still in beta. Figures here should be checked against the BST before they are relied on, and anything that looks wrong is worth reporting."}
         </Typography>{" "}
         <Typography variant="body2" component="span" color="text.secondary">
-          Submitting a budget from this page becomes available around the same time; the button is on the bar below, greyed until then.
+          Submitting your data will have its own page — Submit data, at the top of the report list.
         </Typography>
       </Box>
     </Alert>

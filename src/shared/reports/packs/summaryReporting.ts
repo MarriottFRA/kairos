@@ -7,10 +7,12 @@
  * wages, total payroll, payroll % of the HOTEL's sales, payroll per occupied
  * room and hours per occupied room.
  *
- * The groups are whatever the mapping table says at the pack's level
- * (PACK_GROUP_LEVEL) — decided 2026-09-09 so a re-pushed grouping flows
- * through with no release; the workbook's finer hand-drawn groups are not
- * reproduced. As on the summary page, each group is pinned as its department
+ * The groups are whatever the mapping table says — never a hardcoded list, so
+ * a re-pushed grouping flows through with no release. Since 2026-09-10 that is
+ * department level_10 (DETAIL_GROUP_LEVEL: Rooms, Reservation, Kitchen,
+ * Outlets and Lounge, …), falling back to level_7 where a department has no
+ * level_10 label, in level_7 order (layoutPack) — the same groups as the rest
+ * of the pack and Staffing statistics. As on the summary page, each group is pinned as its department
  * code list (the direct-lookup path) while the accounts stay on the map
  * levels, so a line here means what it means on the Summary P&L.
  */

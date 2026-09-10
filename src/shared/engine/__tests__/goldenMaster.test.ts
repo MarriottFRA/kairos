@@ -335,9 +335,11 @@ describe("golden master 3 — weighted, direct, qty×rate and hours redistributi
 
 describe("golden master 4 — hourly-rate base derivation", () => {
   it("derives the base from rate × hours and feeds it downstream", () => {
-    // Hourly path: base = rate × dailyContractHours × realDays[m], spread over
-    // real productive days (default calendar = 20/month), NOT the twm/twd
-    // normalization. 30 × 8 × 20 = 4800/month, flat over a full seasonal year.
+    // Hourly path: base = rate × the hours the contract pays for (worked +
+    // vacation), spread over real productive days (default calendar =
+    // 20/month, twd2 = 240), NOT the twm/twd normalization. 30 × 1800 / 240 ×
+    // 20 = 4500/month, flat over a full seasonal year — and NOT 30 × 8 × 20 =
+    // 4800, which is what the hotel calendar's day count would pay.
     // monthlyBaseSalary is set too but must be ignored — presence of hourlyRate
     // is the discriminator, so the hourly derivation wins.
     const definitions = [
@@ -365,11 +367,58 @@ describe("golden master 4 — hourly-rate base derivation", () => {
     const lines = simulate(compiled.plan).positionLines(posId("p1"));
 
     const flat = (value: number) => new Array(MONTHS).fill(value);
-    expectMonths(months(lines, "base"), flat(4800)); // 30 × 8 × 20
-    expectMonths(months(lines, "pension"), flat(240)); // 5% of 4800 — base flows on
+    expectMonths(months(lines, "base"), flat(4500)); // 30 × 1800 / 240 × 20
+    expectMonths(months(lines, "pension"), flat(225)); // 5% of 4500 — base flows on
     expectMonths(months(lines, "hc"), flat(1));
-    // Hours stat is independent of the salary derivation: 1800/240 × 20 = 150.
+    // Hours stat spreads the same total unpriced: 1800/240 × 20 = 150 = 4500/30.
     expectMonths(months(lines, "hours"), flat(150));
+  });
+
+  it("pays the contract's hours, not the calendar's days — vacation priced at rate × daily hours", () => {
+    // 1000 worked hours + 10 days' leave × 8 h = 1080 paid hours × 30 = 32,400
+    // for the year, whatever calendar it is spread over. Gross per month on the
+    // 20-day calendar: 32,400 / 240 × 20 = 2,700. Leave is all taken in Aug and
+    // a day off is still worth rate × daily hours = 240, so Aug nets 2,700 −
+    // 2,400 = 300. Pension (5% of GROSS) is flat 135.
+    const definitions = [
+      makeDef({ id: "base", kind: "BASE_SALARY", accountCode: "610000" }),
+      makeDef({ id: "pension", spreadMethod: "PERCENT_OF", accountCode: "620000" }),
+      makeDef({ id: "paid", kind: "STAT", statKind: "HOURS_PAID", accountCode: "971500" }),
+    ];
+    const position = makePosition({
+      id: "p1",
+      payType: "HOURLY",
+      hourlyRate: 30,
+      dailyContractHours: 8,
+      yearlyHoursWorked: 1000,
+      vacationDays: 10,
+      vacationMonthlyWeights: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+    });
+    const run = (realDays: number[]) => {
+      const input = makeInput({
+        definitions,
+        positions: [position],
+        componentValues: [makeValue("p1", "pension", { rate: 0.05 })],
+        calendar: makeCalendar(realDays),
+      });
+      const compiled = compile(input);
+      if (!("plan" in compiled)) throw new Error("compile failed");
+      return simulate(compiled.plan).positionLines(posId("p1"));
+    };
+    const sum = (values: ArrayLike<number>) => Array.from(values).reduce((a, b) => a + b, 0);
+
+    const flatCalendar = run(new Array(MONTHS).fill(20));
+    const base = months(flatCalendar, "base");
+    expectMonths(base, [2700, 2700, 2700, 2700, 2700, 2700, 2700, 300, 2700, 2700, 2700, 2700]);
+    expectMonths(months(flatCalendar, "pension"), new Array(MONTHS).fill(135));
+    // Base ÷ rate is the HOURS_PAID line, month by month: 1080 / 240 × 20 = 90.
+    expectMonths(months(flatCalendar, "paid"), new Array(MONTHS).fill(90));
+
+    // A different hotel calendar reshapes the months but cannot change the
+    // year: the contract, not the calendar, says how many hours are paid.
+    const unevenCalendar = run([18, 19, 22, 21, 20, 22, 23, 21, 22, 22, 20, 22]);
+    expect(sum(months(unevenCalendar, "base"))).toBeCloseTo(sum(base), 6);
+    expect(sum(months(unevenCalendar, "base"))).toBeCloseTo(30 * 1080 - 10 * 240, 6);
   });
 });
 

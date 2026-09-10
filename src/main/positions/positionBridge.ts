@@ -32,7 +32,9 @@ import {
   BridgeCell,
   BridgeDepartment,
   BridgeRow,
+  BridgeAccountStep,
   PositionBridgeResponse,
+  bridgeAccountPath,
   classifyBridgeAccount,
 } from "../../shared/reports/bridge";
 import type { ReportRunInfo } from "../../shared/reports/ipc";
@@ -116,6 +118,7 @@ function addCell(cells: BridgeCell[], account: string, bucket: BridgeBucket, mon
 interface Classifier {
   bucketOf(account: string): BridgeBucket;
   nameOf(account: string): string | null;
+  pathOf(account: string): BridgeAccountStep[];
   deptName(dept: string): string | null;
 }
 
@@ -123,6 +126,11 @@ function classifier(localDb: Db): Classifier {
   const maps = getMapIndex(localDb);
   const cache = new Map<string, BridgeBucket>();
   return {
+    pathOf: (account) =>
+      bridgeAccountPath(account, {
+        accountLabel: (code, level) => maps.labelAt("account", code, level),
+        hasAccount: (code) => maps.hasAccount(code),
+      }),
     bucketOf: (account) => {
       let bucket = cache.get(account);
       if (!bucket) {
@@ -270,9 +278,10 @@ export function readPositionBridge(
     year,
     run: readRunInfo(dbs, scope, scenarioId),
     departments,
-    accounts: [...accountCodes]
-      .sort()
-      .map((code) => ({ code, name: classify.nameOf(code), bucket: classify.bucketOf(code) })),
+    accounts: [...accountCodes].sort().map((code) => {
+      const bucket = classify.bucketOf(code);
+      return { code, name: classify.nameOf(code), bucket, path: bucket === "payroll" ? classify.pathOf(code) : [] };
+    }),
     bst: {
       available: !!bstLoad.source,
       bucket: bstLoad.info ? `${bstLoad.info.bucketType ?? ""} ${bstLoad.info.year ?? ""}`.trim() : null,

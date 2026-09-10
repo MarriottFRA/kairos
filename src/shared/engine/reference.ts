@@ -20,6 +20,7 @@
 import { weekdayCounts } from "../calendar";
 import {
   bankHolidayCoefficient,
+  hourlyPaidHours,
   BaseSelector,
   CalendarContext,
   collapseWeights,
@@ -104,11 +105,17 @@ function grossBaseSalary(
 ): number[] {
   const seas = position.seasonality;
   // Two derivation modes (mutually exclusive inputs). Hourly: the base is
-  // rate × contract hours × the month's net productive days — an actual
-  // hours-worked figure, so it spreads over realDays and skips the twm/twd
-  // day-normalization the monthly path uses. Vacation is netted downstream
+  // rate × the hours the contract pays for (worked + vacation, off the
+  // position's own Contract columns — hourlyPaidHours), spread over the
+  // calendar's realDays shape exactly as the HOURS_PAID stat spreads those
+  // hours, so it skips the twm/twd day-normalization the monthly path uses.
+  // It is NOT rate × the hotel calendar's productive days: a row whose
+  // contract states fewer (or more) days than the calendar is paid for ITS
+  // days, the number the grid shows. Vacation is netted downstream
   // (BASE_DEDUCT) in both modes, unchanged.
   const hourly = position.hourlyRate > 0;
+  const hourlyCoeff =
+    hourly && d.twd2 > 0 ? (position.hourlyRate * hourlyPaidHours(position)) / d.twd2 : 0;
   const out: number[] = [];
   for (let m = 0; m < MONTHS; m++) {
     if (seas[m] === 0) {
@@ -116,11 +123,7 @@ function grossBaseSalary(
       continue;
     }
     const daySpread = hourly
-      ? position.hourlyRate *
-        position.dailyContractHours *
-        calendar.realDays[m] *
-        seas[m] *
-        d.incMul[m]
+      ? hourlyCoeff * calendar.realDays[m] * seas[m] * d.incMul[m]
       : (position.monthlyBaseSalary * d.twm / d.twd) * days[m] * seas[m] * d.incMul[m];
     const manual = m >= d.incMonth ? d.manualMonthly * seas[m] : 0;
     out.push(daySpread + manual + position.additionalMonthlyCosts[m] * seas[m]);
@@ -339,11 +342,13 @@ function hoursWorked(position: Position, calendar: CalendarContext, d: DerivedTo
  * vacation hours back out again. So it answers "hours the position is paid for",
  * where hoursWorked answers "hours actually at work".
  *
- * Deliberately worked + vacation and nothing else: both terms are already on the
- * engine Position, so this needs no new inputs. It therefore excludes public
- * holidays and reads slightly lower than the grid's "Manhours Paid" column,
- * which is (contractYearlyDays − contractDaysOff) × dailyHours — those contract
- * fields are POSITION_EXTRA and never reach the engine.
+ * Deliberately worked + vacation and nothing else (hourlyPaidHours): both terms
+ * are already on the engine Position, so this needs no new inputs. It therefore
+ * excludes public holidays and reads slightly lower than the grid's "Manhours
+ * Paid" column, which is (contractYearlyDays − contractDaysOff) × dailyHours —
+ * those contract fields are POSITION_EXTRA and never reach the engine. The
+ * hourly base spreads rate × this same total (grossBaseSalary), so for an
+ * hourly row this line is the base line ÷ rate, before increases.
  */
 function hoursPaid(
   position: Position,

@@ -40,7 +40,6 @@ import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
 import TuneOutlinedIcon from "@mui/icons-material/TuneOutlined";
 import ReceiptLongOutlinedIcon from "@mui/icons-material/ReceiptLongOutlined";
 import PaymentsOutlinedIcon from "@mui/icons-material/PaymentsOutlined";
-import HotelOutlinedIcon from "@mui/icons-material/HotelOutlined";
 import BarChartOutlinedIcon from "@mui/icons-material/BarChartOutlined";
 import TableChartOutlinedIcon from "@mui/icons-material/TableChartOutlined";
 import SummarizeOutlinedIcon from "@mui/icons-material/SummarizeOutlined";
@@ -87,9 +86,11 @@ import DriftBanner from "../../components/reports/DriftBanner";
 import UnpushedPlanDialog from "../../components/reports/UnpushedPlanDialog";
 import PositionBridge from "../../components/reports/PositionBridge";
 import StaffingOverview from "../../components/reports/StaffingOverview";
+import StaffingStatistics from "../../components/reports/StaffingStatistics";
 import FteReconciliation from "../../components/reports/FteReconciliation";
 import ReportRail, { RailEntry, useRailOpen } from "../../components/reports/ReportRail";
-import BetaNotice, { SUBMIT_TOOLTIP } from "../../components/reports/BetaNotice";
+import BetaNotice from "../../components/reports/BetaNotice";
+import SubmitData from "../../components/reports/SubmitData";
 import ColumnConfigDialog from "../../components/reports/ColumnConfigDialog";
 import {
   ColumnConfig,
@@ -104,17 +105,17 @@ import {
 const NO_OPTIONS: AtomCombosOptions = {};
 
 /** The rail entries that are not built-in definitions. */
+const SUBMIT_ID = "__submit_data";
 const SUMMARY_ID = "__summary_reporting";
 const PACK_ID = "__budget_pack";
 const BRIDGE_ID = "__payroll_bridge";
 const STAFFING_ID = "__staffing_overview";
+const STAFFING_STATS_ID = "__staffing_statistics";
 const FTE_RECON_ID = "__fte_reconciliation";
 
 const DEFINITION_ICONS: Record<string, React.ReactNode> = {
   summary_pl: <ReceiptLongOutlinedIcon />,
   payroll_fte_summary: <PaymentsOutlinedIcon />,
-  rooms_kpi: <HotelOutlinedIcon />,
-  staffing_stats: <BarChartOutlinedIcon />,
 };
 
 const OWN_PATH_ENTRIES: RailEntry[] = [
@@ -129,6 +130,12 @@ const OWN_PATH_ENTRIES: RailEntry[] = [
     name: "Payroll bridge",
     description: "Each department's payroll, position by position",
     icon: <AccountTreeOutlinedIcon />,
+  },
+  {
+    id: STAFFING_STATS_ID,
+    name: "Staffing statistics",
+    description: "Heads, FTE and hours by account — hotel, department groups, departments and positions",
+    icon: <BarChartOutlinedIcon />,
   },
   {
     id: STAFFING_ID,
@@ -261,8 +268,12 @@ export default function Reports() {
   const isBridge = definitionId === BRIDGE_ID;
   const isStaffing = definitionId === STAFFING_ID;
   const isFteRecon = definitionId === FTE_RECON_ID;
+  const isStaffingStats = definitionId === STAFFING_STATS_ID;
   // The own-path reports: position-based, no columns/inspector, their own controls.
-  const isOwnPath = isBridge || isStaffing || isFteRecon;
+  const isOwnPath = isBridge || isStaffing || isFteRecon || isStaffingStats;
+  // Submit data sits in the rail but is a page, not a report: no settings
+  // bar, no banners, nothing evaluated.
+  const isSubmit = definitionId === SUBMIT_ID;
   // "Summary reporting" is a pack page shown as a report of its own: it is
   // evaluated and exported through the pack, with its page id fixed.
   const isSummary = definitionId === SUMMARY_ID;
@@ -297,7 +308,7 @@ export default function Reports() {
   }, [selectedHotelOu, surfaceError]);
 
   useEffect(() => {
-    if (!selectedHotelOu || !definitionId || usesPack || isOwnPath) {
+    if (!selectedHotelOu || !definitionId || usesPack || isOwnPath || isSubmit) {
       setDetail(null);
       return;
     }
@@ -312,7 +323,7 @@ export default function Reports() {
     return () => {
       cancelled = true;
     };
-  }, [selectedHotelOu, definitionId, usesPack, isOwnPath]);
+  }, [selectedHotelOu, definitionId, usesPack, isOwnPath, isSubmit]);
 
   // ── Scenarios: all years, the planning one selected by default ──
   useEffect(() => {
@@ -410,7 +421,7 @@ export default function Reports() {
 
   // ── Evaluate ──
   useEffect(() => {
-    if (!selectedHotelOu || !definitionId || !columns || isOwnPath) {
+    if (!selectedHotelOu || !definitionId || !columns || isOwnPath || isSubmit) {
       setGrid(null);
       return;
     }
@@ -439,7 +450,7 @@ export default function Reports() {
     return () => {
       cancelled = true;
     };
-  }, [selectedHotelOu, definitionId, columns, usesPack, isOwnPath, pageId, surfaceError]);
+  }, [selectedHotelOu, definitionId, columns, usesPack, isOwnPath, isSubmit, pageId, surfaceError]);
 
   useEffect(() => {
     setSelectedRow(null);
@@ -499,6 +510,15 @@ export default function Reports() {
 
   const railEntries = useMemo<RailEntry[]>(
     () => [
+      // First in the rail, ruled off from the reports. Never the default
+      // selection — that stays the first report.
+      {
+        id: SUBMIT_ID,
+        name: "Submit data",
+        description: "Submit the hotel's budget data",
+        icon: <SendOutlinedIcon />,
+        dividerAfter: true,
+      },
       ...definitions.map(
         (d): RailEntry => ({
           id: d.id,
@@ -517,26 +537,6 @@ export default function Reports() {
       ...COMING_SOON_ENTRIES,
     ],
     [definitions]
-  );
-
-  // Not wired to anything yet — a signpost, not a control. It sits on the
-  // settings bar rather than inside the beta banner because submitting is a
-  // permanent action and the banner is temporary; when it goes live, only
-  // `disabled` and `onClick` change. See components/reports/BetaNotice.tsx.
-  const submitButton = (
-    <Tooltip title={SUBMIT_TOOLTIP}>
-      <span>
-        <Button
-          variant="contained"
-          size="small"
-          disabled
-          startIcon={<SendOutlinedIcon />}
-          sx={{ height: CONTROL_HEIGHT }}
-        >
-          Submit budget
-        </Button>
-      </span>
-    </Tooltip>
   );
 
   const statusChips = !isOwnPath && (
@@ -594,7 +594,7 @@ export default function Reports() {
       />
 
       <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", p: 1.5, pl: 0 }}>
-      <BetaNotice />
+      {!isSubmit && <BetaNotice />}
       {!selectedHotelOu && (
         <Alert severity="info" sx={{ mb: 1 }}>
           Select a hotel from the switcher in the top bar to see its reports.
@@ -605,13 +605,13 @@ export default function Reports() {
           {error}
         </Alert>
       )}
-      {planScope.scopeKind === "PARTIAL" && (
+      {!isSubmit && planScope.scopeKind === "PARTIAL" && (
         <PartialScopeAlert
           surface="results"
           departments={planScope.ownership?.departments.map((row) => row.code) ?? null}
         />
       )}
-      {mode === "plan" && (
+      {!isSubmit && mode === "plan" && (
         <Alert severity="error" variant="filled" sx={{ mb: 1 }} icon={false}>
           <strong>UNPUSHED PLAN DATA</strong> — this report lays Kairos results over the BST. Every export
           is marked the same way. Push to the BST to report on the record.
@@ -622,6 +622,7 @@ export default function Reports() {
       )}
 
       {/* ── Settings bar ── */}
+      {!isSubmit && (
       <Box sx={{ borderBottom: 1, borderColor: "divider", pb: 1, mb: 1 }}>
         <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap", rowGap: 0.75 }}>
           <FormControl size="small" sx={{ minWidth: 200 }}>
@@ -713,14 +714,9 @@ export default function Reports() {
                 >
                   {isPack ? "Export pack" : "Export to Excel"}
                 </Button>
-                {submitButton}
               </Stack>
             </>
           )}
-
-          {/* The position-based reports have no settings of their own on this
-              bar, so Submit needs its own push to the right edge. */}
-          {isOwnPath && <Box sx={{ ml: "auto" }}>{submitButton}</Box>}
         </Stack>
 
         {!isOwnPath && (
@@ -809,10 +805,13 @@ export default function Reports() {
           </Stack>
         )}
       </Box>
+      )}
 
       <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          {isOwnPath ? (
+          {isSubmit ? (
+            <SubmitData hotelName={hotelName} />
+          ) : isOwnPath ? (
             selectedHotelOu && scenario ? (
               isBridge ? (
                 <PositionBridge
@@ -825,6 +824,14 @@ export default function Reports() {
                 />
               ) : isFteRecon ? (
                 <FteReconciliation
+                  ou={selectedHotelOu}
+                  scenario={scenario}
+                  hotelName={hotelName}
+                  onError={surfaceError}
+                  onNotice={setNotice}
+                />
+              ) : isStaffingStats ? (
+                <StaffingStatistics
                   ou={selectedHotelOu}
                   scenario={scenario}
                   hotelName={hotelName}

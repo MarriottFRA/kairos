@@ -36,6 +36,8 @@ import {
 import { getFieldCatalog, saveScenario } from "../../positions/structureRepo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
 import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts";
+import { compileDefinition } from "../../../shared/reports/compile";
+import { MAPS_FREE_STAFFING } from "../../../shared/reports/__tests__/fixtures/mapsFreeStaffingDefinition";
 import type { ReportColumnSpec, SeriesColumnSpec } from "../../../shared/reports/columns";
 import { DEFAULT_CLEAR_PREFIXES } from "../../../shared/bstPush/ipc";
 import {
@@ -296,7 +298,7 @@ describe("evaluateReportColumns", () => {
     const grid = await evaluateReportColumns(
       dbs(),
       SCOPE,
-      "staffing_stats",
+      compileDefinition(MAPS_FREE_STAFFING),
       [
         { id: "budget", series: { kind: "bst", relativeTo: scenarioId } },
         { id: "bare", series: { kind: "bst", year: YEAR } },

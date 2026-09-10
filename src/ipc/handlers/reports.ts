@@ -54,12 +54,17 @@ import {
   ReportsPositionBridgeRequest,
   ReportsStaffingOverviewExportRequest,
   ReportsStaffingOverviewRequest,
+  ReportsStaffingStatisticsExportRequest,
+  ReportsStaffingStatisticsRequest,
 } from "../../shared/reports/ipc";
 import { readPositionBridge } from "../../main/positions/positionBridge";
 import { readStaffingOverview } from "../../main/positions/staffingOverview";
+import { readStaffingStatistics } from "../../main/positions/staffingStatistics";
+import { buildStaffingStatisticsWorkbook } from "../../main/reports/staffingStatisticsExport";
 import { readFteReconciliation } from "../../main/positions/fteReconciliation";
 import { readEffectiveWeek } from "../../main/positions/effectiveWeek";
 import { buildBridgeWorkbook } from "../../main/reports/bridgeExport";
+import { BRIDGE_DEPTHS, DEFAULT_BRIDGE_DEPTH } from "../../shared/reports/bridgeMatrix";
 import { buildStaffingOverviewWorkbook } from "../../main/reports/staffingOverviewExport";
 import { buildFteReconciliationWorkbook } from "../../main/reports/fteReconciliationExport";
 import {
@@ -134,6 +139,7 @@ function staffingOptions(request: ReportsStaffingOverviewRequest | undefined) {
         ? request.compareScenarioId.trim()
         : undefined,
     titleMode: request?.titleMode === "standard" ? ("standard" as const) : ("title" as const),
+    basis: request?.basis === "positions" ? ("positions" as const) : ("accounts" as const),
   };
 }
 
@@ -325,7 +331,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
         });
         if (picked.canceled || !picked.filePath) return ok<ReportsExportResponse>({ outcome: "cancelled" });
         const target = picked.filePath.toLowerCase().endsWith(".xlsx") ? picked.filePath : `${picked.filePath}.xlsx`;
-        const wb = buildBridgeWorkbook(response, meta);
+        const depth = BRIDGE_DEPTHS.includes(Number(request?.depth)) ? Number(request?.depth) : DEFAULT_BRIDGE_DEPTH;
+        const wb = buildBridgeWorkbook(response, { ...meta, depth });
         await wb.xlsx.writeFile(target);
         return ok<ReportsExportResponse>({ outcome: "saved", path: path.resolve(target), sheets: wb.worksheets.length });
       } catch (error) {
@@ -338,7 +345,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        return ok(await readStaffingOverview(dbs(), scope, scenarioId, staffingOptions(request), staffingDeps));
+        const { clearPrefixes } = await readBstPushConfig();
+        return ok(await readStaffingOverview(dbs(), scope, scenarioId, staffingOptions(request), { ...staffingDeps, clearPrefixes }));
       } catch (error) {
         console.error("Failed to read the staffing overview:", error);
         return fail(error, null);
@@ -350,7 +358,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
         const options = staffingOptions(request);
-        const response = await readStaffingOverview(dbs(), scope, scenarioId, options, staffingDeps);
+        const { clearPrefixes } = await readBstPushConfig();
+        const response = await readStaffingOverview(dbs(), scope, scenarioId, options, { ...staffingDeps, clearPrefixes });
         const labelOf = (id: string) => scenarioLabelFor(scope.ou, [{ id: "s", series: { kind: "kairos", scenarioId: id } }]);
         const meta = {
           reportName: "Staffing overview",
@@ -376,6 +385,53 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
         return ok<ReportsExportResponse>({ outcome: "saved", path: path.resolve(target), sheets: wb.worksheets.length });
       } catch (error) {
         console.error("Failed to export the staffing overview:", error);
+        return fail(error, null);
+      }
+    },
+
+    [REPORTS_CHANNELS.staffingStatistics]: async (_event, request: ReportsStaffingStatisticsRequest) => {
+      try {
+        const scope = resolveOuScope(request?.ou);
+        const scenarioId = requireString(request?.scenarioId, "scenarioId");
+        const { clearPrefixes } = await readBstPushConfig();
+        return ok(await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes }));
+      } catch (error) {
+        console.error("Failed to read the staffing statistics:", error);
+        return fail(error, null);
+      }
+    },
+
+    [REPORTS_CHANNELS.staffingStatisticsExport]: async (_event, request: ReportsStaffingStatisticsExportRequest) => {
+      try {
+        const scope = resolveOuScope(request?.ou);
+        const scenarioId = requireString(request?.scenarioId, "scenarioId");
+        const { clearPrefixes } = await readBstPushConfig();
+        const response = await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes });
+        const slot = Number.isInteger(request?.slot) && request.slot! >= 0 && request.slot! <= 12 ? request.slot! : 12;
+        const meta = {
+          reportName: "Staffing statistics",
+          hotelName: typeof request?.hotelName === "string" && request.hotelName.trim() ? request.hotelName.trim() : scope.ou,
+          scenarioLabel: scenarioLabelFor(scope.ou, [{ id: "s", series: { kind: "kairos", scenarioId } }]),
+          generatedAt: new Date(),
+          months: false,
+          slot,
+        };
+        const defaultName =
+          typeof request?.fileName === "string" && request.fileName.trim()
+            ? `${request.fileName.trim()}.xlsx`
+            : suggestedFileName(meta, false);
+        const picked = await dialog.showSaveDialog({
+          title: "Save the staffing statistics as an Excel workbook",
+          defaultPath: defaultName,
+          filters: [{ name: "Excel Workbook", extensions: ["xlsx"] }],
+        });
+        if (picked.canceled || !picked.filePath) return ok<ReportsExportResponse>({ outcome: "cancelled" });
+        const target = picked.filePath.toLowerCase().endsWith(".xlsx") ? picked.filePath : `${picked.filePath}.xlsx`;
+        const wb = buildStaffingStatisticsWorkbook(response, meta);
+        await wb.xlsx.writeFile(target);
+        return ok<ReportsExportResponse>({ outcome: "saved", path: path.resolve(target), sheets: wb.worksheets.length });
+      } catch (error) {
+        console.error("Failed to export the staffing statistics:", error);
         return fail(error, null);
       }
     },

@@ -1073,7 +1073,8 @@ function buildColumn(
     column.editable = false;
     column.valueGetter = readDerived
       ? (_value: unknown, row: PositionRow) => (row ? readDerived(row) ?? 0 : 0)
-      : (_value: unknown, row: PositionRow) => (row ? compute(row) : 0);
+      : (_value: unknown, row: PositionRow) =>
+          row ? compute(row, { calendar: ctx.derived.current.calendar }) : 0;
     column.cellClassName = "pos-cell--num pos-cell--derived";
     // A PERCENT-typed derived column keeps the % formatter the switch above
     // installed (Total Weights reads "100%", matching the twelve cells it sums);

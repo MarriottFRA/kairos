@@ -12,16 +12,34 @@
  * scenario by (group, title) — no lineage needed, so a post that was added or
  * removed rather than cloned still lines up.
  *
- * HC is the row's Count as it stands: a person a cluster shares is one head
- * in every hotel (the engine's HEADCOUNT stat is exempt from the cluster
- * weight). FTE is the engine's FTE stat for the year: the derived FTE ×
- * Count × the hotel's cluster share. See main/positions/staffingOverview.ts
- * for the read.
+ * Two BASES (decided 2026-09-10), the accounts one the default:
+ *
+ *   accounts   read off the scenario's engine output lines, so the figures
+ *              are the ones every other report — and actuals — carry. HC is
+ *              the pinned position count (A972540) where it ends the year;
+ *              FTE is the reports' FTE: manager heads (A988101 / A988113,
+ *              their mean) + the FTE-driving hours ÷ one full-timer's year
+ *              (the effective week × 52). Only as fresh as the last run.
+ *   positions  read off the positions themselves. HC is the row's Count as
+ *              it stands: a person a cluster shares is one head in every
+ *              hotel (the engine's HEADCOUNT stat is exempt from the cluster
+ *              weight). FTE is the derived FTE × Count × the hotel's cluster
+ *              share — the Positions grid's figure, always current.
+ *
+ * See main/positions/staffingOverview.ts for the read.
  */
 
 import { BUYOUT_JOB_TYPE } from "../positions/systemAccounts";
 import type { ReportRunInfo } from "./ipc";
 import { UNMAPPED_GROUP, groupRank } from "./packs";
+import type { StaffingAccountRole, StaffingStatsLine } from "./staffingStatistics";
+import type { ReportWarning } from "./types";
+import type { WeeklyHoursInfo } from "./weeklyHours";
+
+/** Where the figures come from. */
+export type StaffingBasis = "accounts" | "positions";
+
+export const STAFFING_BASIS_LABELS: Record<StaffingBasis, string> = { accounts: "Accounts", positions: "Positions" };
 
 export type StaffingBucket = "mgr" | "svsr" | "assoc" | "casual";
 
@@ -134,6 +152,57 @@ export function aggregateStaffing(
   return out;
 }
 
+const MONTHS = 12;
+
+/**
+ * The accounts basis: engine lines rolled up by group and title. Per line
+ * only the accounts the reports' FTE reads count — the position count (HC,
+ * its December level), the manager heads (FTE, their mean level) and the
+ * FTE-driving hours (FTE, ÷ `fteHoursYear`); overtime, manager and buyout
+ * hours are left out, as the reports leave them out. A LEVEL line is
+ * January-plus-changes (the BST's running sum); an AMOUNT line holds levels
+ * already. A position's line takes its grade's bucket (Buyout Labour none);
+ * a line no position produced (manual input, allocation) is a manager's if
+ * it posts manager heads, else a non-manager's — the blank-grade rule.
+ * `classify` is the staffing statistics' classifier, passed in so this
+ * module stays free of the maps.
+ */
+export function aggregateStaffingLines(
+  lines: Iterable<StaffingStatsLine>,
+  fteHoursYear: number,
+  classify: (account: string) => StaffingAccountRole | null,
+  titleOf: (line: StaffingStatsLine) => string,
+  groupOf: (departmentCode: string) => string
+): StaffingAggregate {
+  const out: StaffingAggregate = new Map();
+  for (const line of lines) {
+    const role = classify(line.account);
+    if (!role || (role.role === "hours" && role.kind !== "fte")) continue;
+    const bucket = line.position ? bucketForJobType(line.position.jobTypeCode) : role.role === "managerHeads" ? "mgr" : "assoc";
+    if (!bucket) continue;
+
+    const months = Array.from({ length: MONTHS }, (_, m) => Number(line.months[m]) || 0);
+    let running = 0;
+    const levels = line.encoding === "LEVEL" ? months.map((value) => (running += value)) : months;
+    let hc = 0;
+    let fte = 0;
+    if (role.role === "heads") hc = levels[MONTHS - 1];
+    else if (role.role === "managerHeads") fte = levels.reduce((sum, value) => sum + value, 0) / MONTHS;
+    else fte = Math.abs(fteHoursYear) < 1e-12 ? 0 : months.reduce((sum, value) => sum + value, 0) / fteHoursYear;
+    if (hc === 0 && fte === 0) continue;
+
+    const group = groupOf(line.dept);
+    const title = titleOf(line) || "Position";
+    let titles = out.get(group);
+    if (!titles) out.set(group, (titles = new Map()));
+    let cells = titles.get(title);
+    if (!cells) titles.set(title, (cells = emptyCells()));
+    cells.hc[bucket] += hc;
+    cells.fte[bucket] += fte;
+  }
+  return out;
+}
+
 export interface StaffingRow {
   title: string;
   cells: StaffingCells;
@@ -158,7 +227,12 @@ export interface StaffingScenarioInfo {
 }
 
 export interface StaffingOverviewResponse extends StaffingScenarioInfo {
+  basis: StaffingBasis;
   titleMode: TitleMode;
+  /** The effective week the accounts basis divided by; null on the positions basis. */
+  weeklyHours: WeeklyHoursInfo | null;
+  /** The accounts basis's: a scenario not calculated, a week not posted. */
+  warnings: ReportWarning[];
   groups: StaffingGroup[];
   totals: StaffingCells;
   compareTotals: StaffingCells | null;

@@ -39,6 +39,12 @@ export interface GridSheetInput {
   months: boolean;
   /** Money shown in thousands (the value stays whole; the format scales it). */
   thousands?: boolean;
+  /** The blue-grey strip between column groups; default on. */
+  separators?: boolean;
+  /** Per column (parallel to `columns`): an Excel outline level, whether the
+   *  column starts hidden (collapsed), and the text under its header instead
+   *  of "Total". */
+  layout?: Array<{ outlineLevel?: number; hidden?: boolean; subLabel?: string }>;
 }
 
 export const HEADER_ROWS = 6;
@@ -46,6 +52,8 @@ export const HEADER_ROWS = 6;
 export function writeGridSheet(ws: Worksheet, input: GridSheetInput): void {
   const slotsPerGroup = input.months ? 13 : 1;
   const groups = input.columns;
+  const separators = input.separators !== false;
+  const separatorAfter = (index: number) => separators && index < groups.length - 1;
   // Column 1 = label; each group takes its slots, followed by a separator
   // (none after the last).
   const groupStart: number[] = [];
@@ -53,15 +61,29 @@ export function writeGridSheet(ws: Worksheet, input: GridSheetInput): void {
   groups.forEach((_group, index) => {
     groupStart.push(col);
     col += slotsPerGroup;
-    if (index < groups.length - 1) col += 1;
+    if (separatorAfter(index)) col += 1;
   });
   const lastCol = col - 1;
 
   ws.getColumn(1).width = WIDTH.label;
   for (let c = 2; c <= lastCol; c++) ws.getColumn(c).width = WIDTH.number;
   groups.forEach((_group, index) => {
-    if (index < groups.length - 1) ws.getColumn(groupStart[index] + slotsPerGroup).width = WIDTH.separator;
+    if (separatorAfter(index)) ws.getColumn(groupStart[index] + slotsPerGroup).width = WIDTH.separator;
   });
+  if (input.layout) {
+    let deepest = 0;
+    groups.forEach((_group, index) => {
+      const layout = input.layout?.[index];
+      if (!layout) return;
+      for (let s = 0; s < slotsPerGroup; s++) {
+        const column = ws.getColumn(groupStart[index] + s);
+        if (layout.outlineLevel) column.outlineLevel = layout.outlineLevel;
+        if (layout.hidden) column.hidden = true;
+      }
+      deepest = Math.max(deepest, layout.outlineLevel ?? 0);
+    });
+    ws.properties.outlineLevelCol = deepest;
+  }
 
   // Title block.
   ws.mergeCells(1, 1, 1, lastCol);
@@ -84,7 +106,8 @@ export function writeGridSheet(ws: Worksheet, input: GridSheetInput): void {
   // Group header (row 5) and sub header (row 6).
   const headerRow = ws.getRow(5);
   const subRow = ws.getRow(6);
-  headerRow.height = 24;
+  // Tree headers are long ("Total Hourly Wages excl Overtime"): wrap them.
+  headerRow.height = input.layout ? 42 : 24;
   subRow.height = 20;
   ws.getCell(5, 1).value = "Line";
   ws.getCell(6, 1).value = "";
@@ -102,15 +125,16 @@ export function writeGridSheet(ws: Worksheet, input: GridSheetInput): void {
     head.value = group.label;
     head.fill = solid(COLOR.header);
     head.font = FONT.headerWhite;
-    head.alignment = { horizontal: "center", vertical: "middle" };
+    head.alignment = { horizontal: "center", vertical: "middle", wrapText: !!input.layout };
+    const subLabel = input.layout?.[index]?.subLabel;
     for (let c = start; c <= end; c++) {
       const sub = ws.getCell(6, c);
-      sub.value = input.months ? (c === end ? "Total" : MONTH_LABELS[c - start]) : "Total";
+      sub.value = input.months ? (c === end ? "Total" : MONTH_LABELS[c - start]) : subLabel ?? "Total";
       sub.fill = solid(COLOR.header);
       sub.font = FONT.headerWhite;
       sub.alignment = { horizontal: "right", vertical: "middle" };
     }
-    if (index < groups.length - 1) {
+    if (separatorAfter(index)) {
       for (let r = 5; r <= HEADER_ROWS + input.rows.length; r++) {
         ws.getCell(r, end + 1).fill = solid(COLOR.separator);
       }

@@ -6,12 +6,15 @@
  * touches a database, so a test can build a whole pack from literals.
  *
  * Page order (PS Loader's): Summary, Summary reporting, Hotel total, then per
- * level_7 group its summary ledger followed by its departments.
+ * department group its summary ledger followed by its departments. Since
+ * 2026-09-10 the groups are department level_10 (DETAIL_GROUP_LEVEL), falling
+ * back to level_7 where a department has none, in level_7 order — every page
+ * of the pack, and the same groups as Staffing statistics.
  */
 
 import type { ReportDefinition } from "../types";
-import { EXCLUDED_DEPARTMENTS, PACK_GROUP_ORDER, UNMAPPED_GROUP } from "./constants";
-import { PackLabels, groupOf } from "./labels";
+import { EXCLUDED_DEPARTMENTS } from "./constants";
+import { DetailGroupRef, PackLabels, compareDetailGroups, detailGroupNames, detailGroupOf } from "./labels";
 import { buildLedgerDefinition } from "./ledger";
 import { buildSummaryDefinition } from "./summary";
 import { buildSummaryReportingDefinition } from "./summaryReporting";
@@ -31,7 +34,7 @@ export interface PackPage {
   id: string;
   kind: PackPageKind;
   title: string;
-  /** The level_7 group this page belongs to (group and department pages). */
+  /** The department group this page belongs to (group and department pages). */
   group: string | null;
   /** Bare department codes the page covers. */
   depts: string[];
@@ -52,26 +55,20 @@ export interface PackLayout {
   groups: string[];
 }
 
-/** Where a group sits in the pack's order: PS Loader's list first, other
- *  labels after it, the unmapped bucket last. */
-export function groupRank(label: string): number {
-  const index = PACK_GROUP_ORDER.indexOf(label);
-  if (index >= 0) return index;
-  return label === UNMAPPED_GROUP ? Number.MAX_SAFE_INTEGER : PACK_GROUP_ORDER.length;
-}
-
 /** The pack's pages for a universe, in presentation order. */
 export function layoutPack(universe: PackUniverse, labels: PackLabels): PackLayout {
-  const departments: PackDepartment[] = [...universe.keys()]
-    .filter((code) => !EXCLUDED_DEPARTMENTS.has(code))
-    .map((code) => ({ code, name: labels.deptName(code) ?? code, group: groupOf(labels, code) }))
+  const refs = new Map<string, DetailGroupRef>();
+  for (const code of universe.keys()) {
+    if (!EXCLUDED_DEPARTMENTS.has(code)) refs.set(code, detailGroupOf(labels, code));
+  }
+  const names = detailGroupNames(refs.values());
+  const nameOf = (code: string) => labels.deptName(code) ?? code;
+  const departments: PackDepartment[] = [...refs.entries()]
     .sort(
-      (a, b) =>
-        groupRank(a.group) - groupRank(b.group) ||
-        a.group.localeCompare(b.group) ||
-        a.name.localeCompare(b.name) ||
-        a.code.localeCompare(b.code)
-    );
+      ([codeA, refA], [codeB, refB]) =>
+        compareDetailGroups(refA, refB) || nameOf(codeA).localeCompare(nameOf(codeB)) || codeA.localeCompare(codeB)
+    )
+    .map(([code, ref]) => ({ code, name: nameOf(code), group: names.get(ref.key)! }));
   const groups = [...new Set(departments.map((d) => d.group))];
 
   const pages: PackPage[] = [

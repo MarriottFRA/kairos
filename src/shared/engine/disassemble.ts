@@ -66,7 +66,7 @@ export function disassemble(plan: CompiledPlan, positionId: PositionId): string 
         }`;
         break;
       case Op.BASE_SALARY_HOURLY:
-        detail = `coeff=${fmt(pool[pp])} addl=${fmtVector(pool, pp + 1, MONTHS)}`;
+        detail = `dayRate=${fmt(pool[pp])} ratePaidHours=${fmt(pool[pp + 1])} addl=${fmtVector(pool, pp + 2, MONTHS)}`;
         break;
       case Op.VACATION:
         detail = `vacationDays=${fmt(pool[pp])} weights=${fmtVector(pool, pp + 1, MONTHS)}`;

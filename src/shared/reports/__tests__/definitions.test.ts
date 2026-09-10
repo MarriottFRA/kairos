@@ -115,9 +115,9 @@ describe("Payroll & FTE summary", () => {
     expect(byLabel.get("Hourly Wages")![0]).toBe(27000);
     expect(byLabel.get("Vacation Leave")![0]).toBe(1000);
     expect(byLabel.get("Total Benefits")![0]).toBe(1000);
-    expect(byLabel.get("Total Rooms")![0]).toBe(26000);
-    expect(byLabel.get("Total Restaurant")![0]).toBe(12000);
-    expect(byLabel.get("Total Admin & General")![0]).toBe(8000);
+    expect(byLabel.get("Total Rooms Payroll")![0]).toBe(26000);
+    expect(byLabel.get("Total Restaurant Payroll")![0]).toBe(12000);
+    expect(byLabel.get("Total Admin & General Payroll")![0]).toBe(8000);
     expect(byLabel.get("Rooms Payroll POR")![0]).toBeCloseTo(26000 / 2100);
     expect(byLabel.get("F&B Payroll as % of F&B Revenue")![0]).toBeCloseTo(30);
   });
@@ -146,16 +146,5 @@ describe("Payroll & FTE summary", () => {
     const fte = 2 + hourly;
     expect(byLabel.get("Total Average Annual Wage by FTE")![0]).toBeCloseTo((45999 / fte) * 12);
     expect(byLabel.get("Total Average Annual Wage by FTE")![12]).toBeCloseTo((45999 * 12) / fte);
-  });
-});
-
-describe("Rooms & Reservation KPIs", () => {
-  it("prices supplies per room night sold and shares of room sales", () => {
-    const { byLabel } = rowsOf("rooms_kpi");
-    expect(byLabel.get("Guest Supplies")![0]).toBeCloseTo(3000 / 2100);
-    expect(byLabel.get("Payroll")![0]).toBeCloseTo(26);
-    // Controllables = Profit Amount less Revenue, Total Payroll: the supplies.
-    expect(byLabel.get("Other Expenses")![0]).toBeCloseTo(3);
-    expect(byLabel.get("Double Occupancy %")![0]).toBeCloseTo(-100); // no bed nights in the fixture
   });
 });

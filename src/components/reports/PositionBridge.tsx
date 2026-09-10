@@ -3,12 +3,16 @@
  *
  * For a scenario: the headline figures a DOF reads first (payroll, heads,
  * FTE, payroll per FTE, hours), the plan against what the BST holds, then a
- * grid grouped by department with a row per position (title, grade, count,
- * FTE, the account buckets, total payroll) and the non-engine lines as rows
- * of their own — so the department subtotal is exactly the P&L's Total
- * Payroll for that department. Clicking a row lists the block lines behind
- * it. A compared scenario adds its payroll and the difference, matched by
- * lineage; positions only on one side say so.
+ * matrix — a row per position grouped by department, and across the top the
+ * payroll accounts as a tree from the account map (L12 → L14 → L18 → L21 →
+ * account). The depth selector opens the whole tree to a level; the chevron
+ * on a header opens or folds one group, and an open group ends in its
+ * subtotal. Non-engine lines are rows of their own, so the department
+ * subtotal is exactly the P&L's Total Payroll for that department. Clicking
+ * a row lists the block lines behind it.
+ *
+ * A compared scenario adds its payroll and the difference, matched by
+ * lineage; "Show change" turns every figure into this − compared instead.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -21,31 +25,56 @@ import {
   CircularProgress,
   Divider,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   MenuItem,
   Paper,
   Select,
   Stack,
+  Switch,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
-import { DataGridPremium, GridColDef, GridRowClassNameParams } from "@mui/x-data-grid-premium";
+import {
+  DataGridPremium,
+  GridColDef,
+  GridColumnGroupingModel,
+  GridRowClassNameParams,
+} from "@mui/x-data-grid-premium";
 import type { ScenarioDto } from "../../shared/positions/ipc";
 import {
   BRIDGE_BUCKET_LABELS,
-  BRIDGE_BUCKET_ORDER,
+  BRIDGE_STAT_BUCKETS,
   BridgeBucket,
+  BridgeCell,
   BridgeRow,
-  PAYROLL_BUCKETS,
   PositionBridgeResponse,
   bucketTotal,
   indexByLineage,
   payrollTotal,
   summarize,
 } from "../../shared/reports/bridge";
+import {
+  BRIDGE_DEPTHS,
+  BridgeLayoutItem,
+  BridgeMatrixColumn,
+  DEFAULT_BRIDGE_DEPTH,
+  activePayrollAccounts,
+  amountsOf,
+  buildAccountTree,
+  depthLabel,
+  expandedForDepth,
+  isExpandable,
+  layoutMatrix,
+  sumAccounts,
+} from "../../shared/reports/bridgeMatrix";
 import { exportPositionBridge, loadPositionBridge } from "../../services/reportsService";
 import { formatReportValue } from "./format";
 import { SourceChip } from "../results/sourceMeta";
@@ -68,7 +97,8 @@ interface GridRow {
   source: BridgeRow["source"];
   headcount: number | null;
   fte: number | null;
-  buckets: Partial<Record<BridgeBucket, number>>;
+  /** Matrix and statistic columns, by field. */
+  values: Record<string, number>;
   payroll: number;
   compare: number | null;
   delta: number | null;
@@ -76,7 +106,11 @@ interface GridRow {
   row: BridgeRow;
 }
 
+type GroupNode = GridColumnGroupingModel[number]["children"][number];
+
 const money = (value: number | null | undefined) => formatReportValue(value, "currency");
+const matrixField = (column: BridgeMatrixColumn) => `m_${column.node.id}`;
+const statField = (bucket: BridgeBucket) => `s_${bucket}`;
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -96,6 +130,36 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
+/** A header's open/fold chevron — stops the click before it sorts the column. */
+function HeaderToggle({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) {
+  return (
+    <Stack direction="row" spacing={0.25} sx={{ alignItems: "center", minWidth: 0 }}>
+      <IconButton
+        size="small"
+        aria-label={open ? `Fold ${label}` : `Open ${label}`}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        sx={{ p: 0.25 }}
+      >
+        {open ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
+      </IconButton>
+      <Box component="span" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
+        {label}
+      </Box>
+    </Stack>
+  );
+}
+
+/** Account → this − compared. */
+function changeOf(own: readonly BridgeCell[], other: readonly BridgeCell[]): Map<string, number> {
+  const out = amountsOf(own);
+  for (const [account, total] of amountsOf(other)) out.set(account, (out.get(account) ?? 0) - total);
+  return out;
+}
+
 export default function PositionBridge({ ou, scenario, scenarios, hotelName, onError, onNotice }: PositionBridgeProps) {
   const navigate = useNavigate();
   const [compareId, setCompareId] = useState<string>("");
@@ -104,6 +168,10 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [depth, setDepth] = useState<number>(DEFAULT_BRIDGE_DEPTH);
+  /** Header clicks since the depth was last chosen; null = just the depth. */
+  const [opened, setOpened] = useState<Set<string> | null>(null);
+  const [showChange, setShowChange] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,35 +198,71 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
     () => (data ? data.departments.filter((d) => !dept || d.code === dept) : []),
     [data, dept]
   );
+  const comparedDepartments = useMemo(
+    () => (data?.compare ? data.compare.departments.filter((d) => !dept || d.code === dept) : []),
+    [data, dept]
+  );
   const summary = useMemo(() => summarize(departments), [departments]);
-  const buckets = useMemo<BridgeBucket[]>(() => {
-    const seen = new Set<BridgeBucket>();
-    for (const d of departments) for (const c of d.totals) seen.add(c.bucket);
-    return BRIDGE_BUCKET_ORDER.filter((b) => seen.has(b));
-  }, [departments]);
+
+  // The column tree: only the payroll accounts with a value under the filter
+  // (on either side of a comparison).
+  const tree = useMemo(
+    () => buildAccountTree(data ? activePayrollAccounts(data.accounts, [...departments, ...comparedDepartments]) : []),
+    [data, departments, comparedDepartments]
+  );
+  const expanded = useMemo(() => opened ?? expandedForDepth(tree, depth), [opened, tree, depth]);
+  const layout = useMemo(() => layoutMatrix(tree, expanded), [tree, expanded]);
+  const statBuckets = useMemo(
+    () =>
+      BRIDGE_STAT_BUCKETS.filter((b) =>
+        [...departments, ...comparedDepartments].some((d) => d.totals.some((c) => c.bucket === b))
+      ),
+    [departments, comparedDepartments]
+  );
+
+  const toggle = useCallback(
+    (key: string) =>
+      setOpened((previous) => {
+        const next = new Set(previous ?? expandedForDepth(tree, depth));
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    [tree, depth]
+  );
 
   const bstPayroll = useMemo(() => {
     if (!data?.bst.available) return null;
     let sum = 0;
     for (const d of departments) {
       const held = data.bst.byDept[d.code] ?? {};
-      for (const cell of d.totals) if (PAYROLL_BUCKETS.has(cell.bucket)) sum += held[cell.account] ?? 0;
+      for (const cell of d.totals) if (cell.bucket === "payroll") sum += held[cell.account] ?? 0;
     }
     return sum;
   }, [data, departments]);
 
   const compareIndex = useMemo(() => (data?.compare ? indexByLineage(data.compare.departments) : null), [data]);
   const compareLabel = scenarios.find((s) => s.id === compareId);
+  const change = showChange && compareIndex !== null;
 
   const rows = useMemo<GridRow[]>(() => {
+    const valuesOf = (amounts: ReadonlyMap<string, number>, stat: (b: BridgeBucket) => number) => {
+      const values: Record<string, number> = {};
+      for (const column of layout.columns) values[matrixField(column)] = sumAccounts(amounts, column.node.accounts);
+      for (const b of statBuckets) values[statField(b)] = stat(b);
+      return values;
+    };
     const out: GridRow[] = [];
     const matched = new Set<string>();
     for (const d of departments) {
       for (const r of d.rows) {
         const other = compareIndex && r.lineageId ? compareIndex.get(r.lineageId) ?? null : null;
         if (other) matched.add(other.key);
+        const otherCells = change && other ? other.cells : [];
         const payroll = payrollTotal(r.cells);
         const compare = compareIndex ? (other ? payrollTotal(other.cells) : 0) : null;
+        const count = (own: number | null, theirs: number | null | undefined) =>
+          change && own !== null ? own - (theirs ?? 0) : own;
         out.push({
           id: r.key,
           dept: d.code,
@@ -166,10 +270,10 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
           label: r.source === "ENGINE" ? r.label || r.jobTypeCode || r.positionId || "" : r.label,
           grade: r.jobTypeCode ?? "",
           source: r.source,
-          headcount: r.headcount,
-          fte: r.fte,
-          buckets: Object.fromEntries(buckets.map((b) => [b, bucketTotal(r.cells, b)])),
-          payroll,
+          headcount: count(r.headcount, other?.headcount),
+          fte: count(r.fte, other?.fte),
+          values: valuesOf(changeOf(r.cells, otherCells), (b) => bucketTotal(r.cells, b) - bucketTotal(otherCells, b)),
+          payroll: change ? payroll - (compare ?? 0) : payroll,
           compare,
           delta: compare === null ? null : payroll - compare,
           status: r.deleted ? "deleted" : !r.active ? "inactive" : compareIndex && r.lineageId && !other ? "new" : "",
@@ -178,36 +282,41 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
       }
     }
     // Positions only in the compared scenario.
-    if (data?.compare) {
-      for (const d of data.compare.departments) {
-        if (dept && d.code !== dept) continue;
-        for (const r of d.rows) {
-          if (r.source !== "ENGINE" || matched.has(r.key) || !r.lineageId) continue;
-          const compare = payrollTotal(r.cells);
-          out.push({
-            id: `cmp:${r.key}`,
-            dept: d.code,
-            deptName: d.name,
-            label: r.label || r.jobTypeCode || "",
-            grade: r.jobTypeCode ?? "",
-            source: r.source,
-            headcount: null,
-            fte: null,
-            buckets: {},
-            payroll: 0,
-            compare,
-            delta: -compare,
-            status: "removed",
-            row: r,
-          });
-        }
+    for (const d of comparedDepartments) {
+      for (const r of d.rows) {
+        if (r.source !== "ENGINE" || matched.has(r.key) || !r.lineageId) continue;
+        const compare = payrollTotal(r.cells);
+        out.push({
+          id: `cmp:${r.key}`,
+          dept: d.code,
+          deptName: d.name,
+          label: r.label || r.jobTypeCode || "",
+          grade: r.jobTypeCode ?? "",
+          source: r.source,
+          headcount: change ? -(r.headcount ?? 0) : null,
+          fte: change ? -(r.fte ?? 0) : null,
+          values: change
+            ? valuesOf(changeOf([], r.cells), (b) => -bucketTotal(r.cells, b))
+            : valuesOf(new Map(), () => 0),
+          payroll: change ? -compare : 0,
+          compare,
+          delta: -compare,
+          status: "removed",
+          row: r,
+        });
       }
     }
     return out;
-  }, [departments, buckets, compareIndex, data, dept]);
+  }, [departments, comparedDepartments, compareIndex, change, layout, statBuckets]);
 
   const columns = useMemo<GridColDef<GridRow>[]>(() => {
-    const numeric = (field: string, headerName: string, get: (row: GridRow) => number | null, format: "currency" | "number" | "ratio" = "currency", width = 120): GridColDef<GridRow> => ({
+    const numeric = (
+      field: string,
+      headerName: string,
+      get: (row: GridRow) => number | null,
+      format: "currency" | "number" | "ratio" = "currency",
+      width = 120
+    ): GridColDef<GridRow> => ({
       field,
       headerName,
       width,
@@ -218,12 +327,29 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
       valueFormatter: (value: number | null) => formatReportValue(value, format),
       cellClassName: "bridge-cell--num",
     });
+    const matrixColumn = (column: BridgeMatrixColumn): GridColDef<GridRow> => {
+      const field = matrixField(column);
+      const base = numeric(field, column.kind === "subtotal" ? "Total" : column.label, (r) => r.values[field] ?? 0, "currency", column.kind === "account" ? 140 : 130);
+      const node = column.node;
+      if (column.kind === "subtotal") {
+        return { ...base, description: column.label, cellClassName: "bridge-cell--num bridge-cell--subtotal" };
+      }
+      if (column.kind === "account") return { ...base, description: `${node.account} · ${node.label}` };
+      return {
+        ...base,
+        headerAlign: "left",
+        description: node.accounts.length === 1 ? `${node.label} — account ${node.accounts[0]}` : `${node.label} — ${node.accounts.length} accounts`,
+        ...(isExpandable(node)
+          ? { renderHeader: () => <HeaderToggle label={node.label} open={false} onToggle={() => toggle(node.key)} /> }
+          : {}),
+      };
+    };
     return [
       { field: "dept", headerName: "Department", width: 110 },
       {
         field: "label",
         headerName: "Position",
-        width: 260,
+        width: 240,
         renderCell: (params) =>
           params.row?.row ? (
             <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", minWidth: 0 }}>
@@ -241,14 +367,13 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
             </Stack>
           ) : null,
       },
-      { field: "grade", headerName: "Grade", width: 140 },
-      numeric("headcount", "Count", (r) => r.headcount, "number", 90),
-      numeric("fte", "FTE", (r) => r.fte, "ratio", 90),
-      ...buckets.map((b) =>
-        numeric(`b_${b}`, BRIDGE_BUCKET_LABELS[b], (r) => r.buckets[b] ?? 0, b === "hours" || b === "heads" ? "number" : "currency")
-      ),
-      numeric("payroll", "Total payroll", (r) => r.payroll, "currency", 130),
-      ...(compareIndex
+      { field: "grade", headerName: "Grade", width: 130 },
+      numeric("headcount", "Count", (r) => r.headcount, "number", 80),
+      numeric("fte", "FTE", (r) => r.fte, "ratio", 80),
+      ...layout.columns.map(matrixColumn),
+      ...statBuckets.map((b) => numeric(statField(b), BRIDGE_BUCKET_LABELS[b], (r) => r.values[statField(b)] ?? 0, "number", 110)),
+      numeric("payroll", change ? "Payroll change" : "Total payroll", (r) => r.payroll, "currency", 130),
+      ...(compareIndex && !change
         ? [
             numeric("compare", compareLabel ? `${compareLabel.label} ${compareLabel.year}` : "Compared", (r) => r.compare, "currency", 130),
             {
@@ -259,21 +384,33 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
           ]
         : []),
     ];
-  }, [buckets, compareIndex, compareLabel]);
+  }, [layout, statBuckets, compareIndex, compareLabel, change, toggle]);
+
+  // Every open group becomes a header over its children and subtotal.
+  const columnGroupingModel = useMemo<GridColumnGroupingModel>(() => {
+    const toNode = (item: BridgeLayoutItem): GroupNode =>
+      item.type === "column"
+        ? { field: matrixField(item.column) }
+        : {
+            groupId: item.node.id,
+            headerName: item.node.label,
+            description: `${item.node.label} — ${item.node.accounts.length} accounts`,
+            renderHeaderGroup: () => <HeaderToggle label={item.node.label} open onToggle={() => toggle(item.node.key)} />,
+            children: item.items.map(toNode),
+          };
+    return layout.items.filter((item) => item.type === "group").map(toNode) as GridColumnGroupingModel;
+  }, [layout, toggle]);
 
   const aggregationModel = useMemo(
-    () =>
-      Object.fromEntries(
-        ["headcount", "fte", ...buckets.map((b) => `b_${b}`), "payroll", "compare", "delta"].map((f) => [f, "sum"] as const)
-      ),
-    [buckets]
+    () => Object.fromEntries(columns.filter((c) => c.type === "number").map((c) => [c.field, "sum"] as const)),
+    [columns]
   );
 
   const handleExport = useCallback(() => {
     setExporting(true);
     void (async () => {
       try {
-        const result = await exportPositionBridge(ou, scenario.id, { dept: dept || undefined, hotelName });
+        const result = await exportPositionBridge(ou, scenario.id, { dept: dept || undefined, hotelName, depth });
         if (result.outcome === "saved") onNotice(`Saved ${result.path} (${result.sheets} sheets)`);
       } catch (err) {
         onError(err, "Export failed");
@@ -281,7 +418,7 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
         setExporting(false);
       }
     })();
-  }, [ou, scenario.id, dept, hotelName, onError, onNotice]);
+  }, [ou, scenario.id, dept, hotelName, depth, onError, onNotice]);
 
   const selectedRow = rows.find((r) => r.id === selected) ?? null;
   const difference = bstPayroll === null ? null : summary.payroll - bstPayroll;
@@ -313,6 +450,33 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
               ))}
           </Select>
         </FormControl>
+        <Tooltip title="How far to open the account tree. The chevrons on the headers open or fold one group.">
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={depth}
+            onChange={(_e, value: number | null) => {
+              if (value === null) return;
+              setDepth(value);
+              setOpened(null);
+            }}
+            aria-label="Account detail"
+            sx={{ height: 36 }}
+          >
+            {BRIDGE_DEPTHS.map((d) => (
+              <ToggleButton key={d} value={d} sx={{ px: 1.25, textTransform: "none" }}>
+                {depthLabel(d)}
+              </ToggleButton>
+            ))}
+          </ToggleButtonGroup>
+        </Tooltip>
+        <Tooltip title={compareId ? "Show every figure as this scenario minus the compared one" : "Pick a scenario to compare with first"}>
+          <FormControlLabel
+            control={<Switch size="small" checked={showChange} disabled={!compareId} onChange={(e) => setShowChange(e.target.checked)} />}
+            label="Show change"
+            sx={{ mr: 0 }}
+          />
+        </Tooltip>
         <Button
           variant="outlined"
           size="small"
@@ -375,11 +539,18 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
         </Paper>
       </Stack>
 
+      {change && (
+        <Alert severity="info" sx={{ mb: 1.5, py: 0 }}>
+          Every figure is this scenario minus {compareLabel ? `${compareLabel.label} ${compareLabel.year}` : "the compared scenario"}.
+        </Alert>
+      )}
+
       <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <DataGridPremium
             rows={rows}
             columns={columns}
+            columnGroupingModel={columnGroupingModel}
             loading={loading}
             rowGroupingModel={["dept"]}
             groupingColDef={{
@@ -394,6 +565,7 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
             defaultGroupingExpansionDepth={-1}
             initialState={{ aggregation: { model: aggregationModel }, pinnedColumns: { right: ["payroll"] } }}
             aggregationModel={aggregationModel}
+            disableColumnReorder
             disableRowSelectionOnClick
             onRowClick={(params) => {
               if ((params.row as GridRow).row) setSelected(params.row.id as string);
@@ -406,6 +578,7 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
             sx={{
               borderRadius: 2,
               "& .bridge-cell--num": { fontFamily: "'IBM Plex Mono', monospace", fontSize: "0.8125rem" },
+              "& .bridge-cell--subtotal": { fontWeight: 700, bgcolor: "action.hover" },
               "& .bridge-cell--good": { color: "success.main" },
               "& .bridge-cell--bad": { color: "error.main" },
               "& .bridge-row--selected": { bgcolor: "action.selected" },
@@ -425,7 +598,7 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
                   {selectedRow.dept} · {selectedRow.grade}
-                  {selectedRow.headcount !== null && selectedRow.headcount !== 1 ? ` · ×${selectedRow.headcount}` : ""}
+                  {selectedRow.row.headcount !== null && selectedRow.row.headcount !== 1 ? ` · ×${selectedRow.row.headcount}` : ""}
                 </Typography>
               </Box>
               <IconButton size="small" onClick={() => setSelected(null)} aria-label="Close">
@@ -435,25 +608,30 @@ export default function PositionBridge({ ou, scenario, scenarios, hotelName, onE
             <Divider />
             <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", py: 1 }}>
               <Stack spacing={1}>
-                {selectedRow.row.lines.map((line, index) => (
-                  <Stack key={`${line.account}:${line.label}:${index}`} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                    <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="body2" noWrap>
-                        {line.label || line.account}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary" noWrap>
-                        {line.account}
-                        {data?.accounts.find((a) => a.code === line.account)?.name ? ` · ${data.accounts.find((a) => a.code === line.account)!.name}` : ""}
-                        {line.encoding === "LEVEL" ? " · level" : ""}
-                      </Typography>
-                    </Box>
-                    <Tooltip title={line.months.map((m) => formatReportValue(m, "number")).join(" · ")}>
-                      <Typography variant="body2" sx={{ fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>
-                        {formatReportValue(line.total, line.encoding === "LEVEL" || line.account.startsWith("9") ? "number" : "currency")}
-                      </Typography>
-                    </Tooltip>
-                  </Stack>
-                ))}
+                {selectedRow.row.lines.map((line, index) => {
+                  const account = data?.accounts.find((a) => a.code === line.account);
+                  return (
+                    <Stack key={`${line.account}:${line.label}:${index}`} direction="row" spacing={1} sx={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="body2" noWrap>
+                          {line.label || line.account}
+                        </Typography>
+                        <Tooltip title={account?.path.map((step) => step.label).join(" › ") ?? ""}>
+                          <Typography variant="caption" color="text.secondary" noWrap component="div">
+                            {line.account}
+                            {account?.name ? ` · ${account.name}` : ""}
+                            {line.encoding === "LEVEL" ? " · level" : ""}
+                          </Typography>
+                        </Tooltip>
+                      </Box>
+                      <Tooltip title={line.months.map((m) => formatReportValue(m, "number")).join(" · ")}>
+                        <Typography variant="body2" sx={{ fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" }}>
+                          {formatReportValue(line.total, line.encoding === "LEVEL" || line.account.startsWith("9") ? "number" : "currency")}
+                        </Typography>
+                      </Tooltip>
+                    </Stack>
+                  );
+                })}
               </Stack>
             </Box>
           </Box>

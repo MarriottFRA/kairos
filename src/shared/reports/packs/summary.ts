@@ -1,6 +1,6 @@
 /**
- * The pack's summary page: the hotel, then one block per level_7 department
- * group, each with the same KPI set — revenue, payroll, other expenses,
+ * The pack's summary page: the hotel, then one block per department group
+ * (level_10, else level_7 — layoutPack), each with the same KPI set — revenue, payroll, other expenses,
  * department profit, hours, FTE, heads, payroll % of revenue, payroll per
  * FTE. The page a DOF reads first; the ledgers behind it are for the
  * questions it raises.

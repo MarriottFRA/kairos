@@ -1,12 +1,14 @@
 /**
- * The bridge's account buckets: map labels first, code families as the
- * fallback, and the arithmetic over rows (payroll total, lineage index,
- * the summary a DOF reads first).
+ * The bridge's account buckets (map labels first, code families as the
+ * fallback), each payroll account's path through the tree levels, and the
+ * arithmetic over rows (payroll total, lineage index, the summary a DOF
+ * reads first).
  */
 
 import { describe, expect, it } from "vitest";
 import {
   BridgeDepartment,
+  bridgeAccountPath,
   classifyBridgeAccount,
   indexByLineage,
   payrollTotal,
@@ -15,31 +17,22 @@ import {
 
 const labelsOf = (table: Record<string, Record<number, string>>) => ({
   accountLabel: (code: string, level: number) => table[code]?.[level] ?? null,
+  hasAccount: (code: string) => code in table,
 });
 
 const HEADS = new Set(["972540", "988101"]);
 
 describe("classifyBridgeAccount", () => {
   const labels = labelsOf({
-    "511000": { 9: "Total Payroll", 12: "Associate Wages", 15: "Total Management Salaries" },
-    "512000": { 9: "Total Payroll", 12: "Associate Wages", 15: "Total Hourly Wages", 21: "Hourly Wages" },
-    "512500": { 9: "Total Payroll", 12: "Associate Wages", 15: "Total Hourly Wages", 18: "Hrly Overtime Prem" },
-    "530000": { 9: "Total Payroll", 12: "Associate Wages", 15: "Bonus Payments" },
+    "511000": { 9: "Total Payroll", 12: "Associate Wages" },
     "560303": { 9: "Total Payroll", 12: "Associate Benefits", 14: "Paid Time Off" },
-    "561000": { 9: "Total Payroll", 12: "Associate Benefits" },
-    "599000": { 9: "Total Payroll" },
     "988308": { 1: "Statistics", 4: "Total Manhours" },
     "610201": { 4: "Profit Amount", 6: "Total Expenses" },
   });
 
-  it("reads the map levels in precedence order", () => {
-    expect(classifyBridgeAccount("511000", labels, HEADS)).toBe("management_salaries");
-    expect(classifyBridgeAccount("512000", labels, HEADS)).toBe("hourly_wages");
-    expect(classifyBridgeAccount("512500", labels, HEADS)).toBe("overtime"); // overtime before hourly
-    expect(classifyBridgeAccount("530000", labels, HEADS)).toBe("bonus");
-    expect(classifyBridgeAccount("560303", labels, HEADS)).toBe("paid_time_off");
-    expect(classifyBridgeAccount("561000", labels, HEADS)).toBe("benefits");
-    expect(classifyBridgeAccount("599000", labels, HEADS)).toBe("other_payroll");
+  it("puts everything under Total Payroll in payroll, and reads hours from the map", () => {
+    expect(classifyBridgeAccount("511000", labels, HEADS)).toBe("payroll");
+    expect(classifyBridgeAccount("560303", labels, HEADS)).toBe("payroll");
     expect(classifyBridgeAccount("988308", labels, HEADS)).toBe("hours");
     expect(classifyBridgeAccount("610201", labels, HEADS)).toBe("other");
   });
@@ -53,8 +46,34 @@ describe("classifyBridgeAccount", () => {
     const none = labelsOf({});
     expect(classifyBridgeAccount("988699", none, HEADS)).toBe("hours");
     expect(classifyBridgeAccount("972541", none, HEADS)).toBe("heads");
-    expect(classifyBridgeAccount("512400", none, HEADS)).toBe("other_payroll");
+    expect(classifyBridgeAccount("512400", none, HEADS)).toBe("payroll");
     expect(classifyBridgeAccount("701110", none, HEADS)).toBe("other");
+  });
+});
+
+describe("bridgeAccountPath", () => {
+  const labels = labelsOf({
+    "510005": { 9: "Total Payroll", 12: "Associate Wages", 14: "Wages & Salaries", 18: "Total Hourly Wages excl Overtime", 21: "Hourly Wages" },
+    "560303": { 9: "Total Payroll", 12: "Associate Benefits", 14: "Paid Time Off" },
+    "599000": { 9: "Total Payroll" },
+  });
+
+  it("walks L12 → L14 → L18 → L21, skipping the blank levels", () => {
+    expect(bridgeAccountPath("510005", labels)).toEqual([
+      { level: 12, label: "Associate Wages" },
+      { level: 14, label: "Wages & Salaries" },
+      { level: 18, label: "Total Hourly Wages excl Overtime" },
+      { level: 21, label: "Hourly Wages" },
+    ]);
+    expect(bridgeAccountPath("560303", labels)).toEqual([
+      { level: 12, label: "Associate Benefits" },
+      { level: 14, label: "Paid Time Off" },
+    ]);
+  });
+
+  it("groups a mapped account with no tree labels, and an unmapped one, apart", () => {
+    expect(bridgeAccountPath("599000", labels)).toEqual([{ level: 12, label: "Other payroll" }]);
+    expect(bridgeAccountPath("512400", labels)).toEqual([{ level: 12, label: "Unmapped" }]);
   });
 });
 
@@ -88,21 +107,21 @@ describe("bridge arithmetic", () => {
     code: "0010",
     name: "Rooms",
     rows: [
-      row({ key: "a", lineageId: "L1", headcount: 2, fte: 1.5, cells: [cell("511000", "management_salaries", 60000)] }),
-      row({ key: "b", lineageId: "L2", active: false, cells: [cell("512000", "hourly_wages", 1)] }),
-      row({ key: "c", positionId: "x", deleted: true, cells: [cell("512000", "hourly_wages", 2)] }),
-      row({ key: "d", source: "MANUAL", positionId: null, headcount: null, fte: null, cells: [cell("599000", "other_payroll", 3000)] }),
+      row({ key: "a", lineageId: "L1", headcount: 2, fte: 1.5, cells: [cell("511000", "payroll", 60000)] }),
+      row({ key: "b", lineageId: "L2", active: false, cells: [cell("512000", "payroll", 1)] }),
+      row({ key: "c", positionId: "x", deleted: true, cells: [cell("512000", "payroll", 2)] }),
+      row({ key: "d", source: "MANUAL", positionId: null, headcount: null, fte: null, cells: [cell("599000", "payroll", 3000)] }),
     ],
     totals: [
-      cell("511000", "management_salaries", 60000),
-      cell("512000", "hourly_wages", 3),
-      cell("599000", "other_payroll", 3000),
+      cell("511000", "payroll", 60000),
+      cell("512000", "payroll", 3),
+      cell("599000", "payroll", 3000),
       cell("988308", "hours", 4000),
       cell("972540", "heads", 2),
     ],
   };
 
-  it("sums payroll over the payroll buckets only", () => {
+  it("sums payroll over the payroll accounts only", () => {
     expect(payrollTotal(dept.totals)).toBe(63003);
   });
 

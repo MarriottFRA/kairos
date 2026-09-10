@@ -23,7 +23,7 @@ import type {
 } from "./columns";
 import type { PackDepartment, PackPage } from "./packs";
 import type { PlanDrift } from "./sources";
-import type { TitleMode } from "./staffingOverview";
+import type { StaffingBasis, TitleMode } from "./staffingOverview";
 import type {
   AtomFilter,
   BuiltinParam,
@@ -63,6 +63,10 @@ export const REPORTS_CHANNELS = {
   staffingOverview: "reports:staffing-overview",
   /** The staffing overview saved as a workbook. */
   staffingOverviewExport: "reports:staffing-overview-export",
+  /** Staffing statistics: heads, FTE and hours by account — hotel, groups, departments, positions. */
+  staffingStatistics: "reports:staffing-statistics",
+  /** The staffing statistics saved as a workbook, everything expanded. */
+  staffingStatisticsExport: "reports:staffing-statistics-export",
   /** The FTE reconciliation: the Positions grid's FTE beside the account-derived FTE, per department. */
   fteReconciliation: "reports:fte-reconciliation",
   /** The FTE reconciliation saved as a workbook. */
@@ -284,6 +288,9 @@ export interface ReportsPositionBridgeRequest {
 export interface ReportsPositionBridgeExportRequest extends ReportsPositionBridgeRequest {
   hotelName?: string;
   fileName?: string;
+  /** The account depth the workbook opens at (a tree level, or ACCOUNT_DEPTH);
+   *  everything deeper is in the file, collapsed under Excel outline groups. */
+  depth?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +304,27 @@ export interface ReportsStaffingOverviewRequest {
   compareScenarioId?: string;
   /** Roll positions up by the job title as typed (default) or the Standard Title. */
   titleMode?: TitleMode;
+  /** Read the accounts (default — what every report carries) or the positions. */
+  basis?: StaffingBasis;
 }
 
 export interface ReportsStaffingOverviewExportRequest extends ReportsStaffingOverviewRequest {
+  hotelName?: string;
+  fileName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Staffing statistics
+// ---------------------------------------------------------------------------
+
+export interface ReportsStaffingStatisticsRequest {
+  ou: string;
+  scenarioId: string;
+}
+
+export interface ReportsStaffingStatisticsExportRequest extends ReportsStaffingStatisticsRequest {
+  /** The period the page shows: 0..11 a month, 12 (the default) the year. */
+  slot?: number;
   hotelName?: string;
   fileName?: string;
 }

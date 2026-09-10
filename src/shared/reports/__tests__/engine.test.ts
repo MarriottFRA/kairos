@@ -14,6 +14,7 @@ import {
 import { EvaluationContext, evaluateReport } from "../engine";
 import { UNAVAILABLE_MAP_INDEX, buildMapIndex, buildValueSource } from "../sources";
 import type { ReportDefinition, ValueSourceRef } from "../types";
+import { MAPS_FREE_STAFFING } from "./fixtures/mapsFreeStaffingDefinition";
 
 const flat = (value: number) => new Array(12).fill(value);
 const jan = (value: number) => [value, ...new Array(11).fill(0)];
@@ -363,7 +364,7 @@ describe("built-in definitions", () => {
 
   it("staffing stats needs no maps at all", () => {
     const report = evaluateReport(
-      findReportDefinition("staffing_stats")!,
+      compileDefinition(MAPS_FREE_STAFFING),
       context({ maps: UNAVAILABLE_MAP_INDEX })
     );
     expect(report.warnings).toEqual([]);

@@ -1,5 +1,6 @@
 /**
- * The budget pack from literals: page order by level_7 group, the excluded
+ * The budget pack from literals: page order by level_10 group (level_7
+ * fallback, level_7 order), the excluded
  * departments gone, the ledger's category CASE and level_12 sub-groups with
  * subtotals that tie, an unmapped account in the residual group, a
  * cache-only department present, and every generated definition valid and
@@ -116,16 +117,16 @@ const evaluate = (definition: ReturnType<typeof buildPackPageDefinition>) => {
 describe("layoutPack", () => {
   const layout = layoutPack(universeOf(SOURCE), LABELS);
 
-  it("orders pages summary, total, then each level_7 group with its departments; excluded ones gone", () => {
+  it("orders pages summary, total, then each level_10 group with its departments; excluded ones gone", () => {
     // D0410 is mapped but carries nothing in any source: no page for it.
-    expect(layout.groups).toEqual(["Rooms and Reservation", "Total Food & Beverage", "Unmapped departments"]);
+    expect(layout.groups).toEqual(["Rooms", "Outlets and Lounge", "Unmapped departments"]);
     expect(layout.pages.map((p) => p.id)).toEqual([
       "summary",
       "summary_reporting",
       "total",
-      "group:Rooms and Reservation",
+      "group:Rooms",
       "dept:0010",
-      "group:Total Food & Beverage",
+      "group:Outlets and Lounge",
       "dept:0210",
       "group:Unmapped departments",
       "dept:0777",
@@ -183,7 +184,7 @@ describe("ledger pages", () => {
   });
 
   it("sums a group's departments and the hotel total across all of them", () => {
-    const group = layout.pages.find((p) => p.id === "group:Total Food & Beverage")!;
+    const group = layout.pages.find((p) => p.id === "group:Outlets and Lounge")!;
     const { byLabel: fb } = evaluate(buildPackPageDefinition(group, layout, universe, LABELS));
     expect(fb.get("Total Revenue")![12]).toBe(480000);
     expect(fb.get("Total Cost of Sales")![12]).toBe(144000);
@@ -221,8 +222,8 @@ describe("summary page", () => {
     expect(validateDefinition(definition)).toEqual([]);
     const { report } = evaluate(definition);
     const blocks = report.rows.filter((r) => r.type === "header").map((r) => r.label);
-    expect(blocks).toEqual(["HOTEL", "ROOMS AND RESERVATION", "TOTAL FOOD & BEVERAGE", "UNMAPPED DEPARTMENTS"]);
-    const rooms = report.rows.slice(report.rows.findIndex((r) => r.label === "ROOMS AND RESERVATION"));
+    expect(blocks).toEqual(["HOTEL", "ROOMS", "OUTLETS AND LOUNGE", "UNMAPPED DEPARTMENTS"]);
+    const rooms = report.rows.slice(report.rows.findIndex((r) => r.label === "ROOMS"));
     const value = (label: string) => rooms.find((r) => r.label === label)!.values![12];
     expect(value("Revenue")).toBe(1200000);
     expect(value("Total payroll")).toBe(132000);
@@ -261,6 +262,8 @@ describe("summary reporting page", () => {
     { dept: "D0210", account: "A914103", months: flat(99) },
     { dept: "D0211", account: "A310100", months: flat(8000) },
     { dept: "D0211", account: "A914011", months: flat(500) },
+    // Admin has no level_10 label: it falls back to its level_7 group.
+    { dept: "D0410", account: "A988308", months: flat(300) },
   ]);
   const DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   const reportingContext: EvaluationContext = {
@@ -280,15 +283,39 @@ describe("summary reporting page", () => {
   const rows = report.rows;
   const value = (label: string, from = 0) => rows.slice(from).find((r) => r.label === label)!.values![12];
 
-  it("is a valid page with the hotel section then one block per group", () => {
+  it("is a valid page with the hotel section then one block per level_10 group, in level_7 order", () => {
     expect(page.kind).toBe("summary_reporting");
     expect(validateDefinition(definition)).toEqual([]);
     expect(report.warnings).toEqual([]);
     expect(rows.filter((r) => r.type === "header").map((r) => r.label)).toEqual([
       "FINANCIAL & STATS SUMMARY",
-      "ROOMS AND RESERVATION",
-      "TOTAL FOOD & BEVERAGE",
+      "ROOMS",
+      "OUTLETS AND LOUNGE", // restaurant and room service together
+      "ADMINISTRATIVE & GENERAL", // no level_10: the level_7 label
       "UNMAPPED DEPARTMENTS",
+    ]);
+    // The same groups as the rest of the pack (Summary page, ledgers).
+    expect(layout.groups).toEqual(["Rooms", "Outlets and Lounge", "Administrative & General", "Unmapped departments"]);
+  });
+
+  it("tells a level_10 label under two level_7 groups apart by its parent", () => {
+    const l7: Record<string, string> = { "1": "Other Operated Departments", "2": "Payroll Cost Allocation", "3": "Rooms and Reservation" };
+    const labels = {
+      ...LABELS,
+      deptLabel: (code: string, level: number) =>
+        level === 7 ? l7[code] ?? null : level === 10 ? (code === "3" ? "Rooms" : "Other Profit Departments") : null,
+    };
+    const universe: PackUniverse = new Map(["1", "2", "3"].map((code) => [code, new Set<string>()]));
+    const split = layoutPack(universe, labels);
+    expect(split.groups).toEqual([
+      "Rooms",
+      "Other Profit Departments (Other Operated Departments)",
+      "Other Profit Departments (Payroll Cost Allocation)",
+    ]);
+    expect(split.departments.map((d) => [d.code, d.group])).toEqual([
+      ["3", "Rooms"],
+      ["1", "Other Profit Departments (Other Operated Departments)"],
+      ["2", "Other Profit Departments (Payroll Cost Allocation)"],
     ]);
   });
 
@@ -314,7 +341,7 @@ describe("summary reporting page", () => {
   });
 
   it("gives each group heads, managers, hours, wages and payroll against the hotel's sales and rooms", () => {
-    const from = rows.findIndex((r) => r.label === "ROOMS AND RESERVATION");
+    const from = rows.findIndex((r) => r.label === "ROOMS");
     const totalSales = (100000 + 40000 + 8000) * 12;
     expect(value("HC", from)).toBe(5);
     expect(value("# Managers", from)).toBe(2);

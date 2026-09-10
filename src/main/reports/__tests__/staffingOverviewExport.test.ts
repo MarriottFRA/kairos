@@ -21,7 +21,10 @@ const RESPONSE: StaffingOverviewResponse = {
   scenarioId: "s1",
   year: 2027,
   run: { computedAt: "2026-09-09T10:00:00.000Z", stale: false },
+  basis: "accounts",
   titleMode: "title",
+  weeklyHours: null,
+  warnings: [],
   groups: [
     {
       label: "Rooms and Reservation",
@@ -54,6 +57,7 @@ describe("buildStaffingOverviewWorkbook", () => {
     await back.xlsx.load(buffer as never);
     expect(back.worksheets.map((s) => s.name)).toEqual(["Staffing overview"]);
     const ws = back.getWorksheet("Staffing overview")!;
+    expect(ws.getCell("A1").value).toBe("Staffing overview — head count and FTE per department group, from the accounts");
     expect(ws.getCell("A2").value).toBe("Test Hotel · Planning 2027 vs Last year 2026");
 
     // Column groups of one Total each, separated: budget HC ×4 (B, D, F, H), budget FTE ×4 (J, L, N, P),
@@ -84,10 +88,11 @@ describe("buildStaffingOverviewWorkbook", () => {
 
   it("writes the budget columns alone without a comparison", async () => {
     const wb = buildStaffingOverviewWorkbook(
-      { ...RESPONSE, compare: null, compareTotals: null, varianceTotals: null },
+      { ...RESPONSE, basis: "positions", compare: null, compareTotals: null, varianceTotals: null },
       { hotelName: "Test Hotel", scenarioLabel: "Planning 2027", generatedAt: new Date("2026-09-09T10:00:00.000Z") }
     );
     const ws = wb.getWorksheet("Staffing overview")!;
+    expect(ws.getCell("A1").value).toBe("Staffing overview — head count and FTE per department group, from the positions");
     expect(ws.getCell(5, 18).value).toBeNull();
     expect(ws.getCell("A2").value).toBe("Test Hotel · Planning 2027");
   });

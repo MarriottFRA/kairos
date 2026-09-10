@@ -2,13 +2,13 @@
  * The payroll bridge — from a department's payroll line back to the
  * positions it is built from.
  *
- * Pure vocabulary and helpers: the account BUCKETS a position's lines are
- * pivoted into (management salaries, hourly wages, overtime, bonus, paid
- * time off, benefits, other payroll, hours, heads, other), classified by the
- * account's map labels with code-prefix fallbacks so an unmapped account
- * still lands somewhere; the row and department shapes the read returns;
- * and the arithmetic the page and the export share (bucket totals, FTE,
- * payroll per FTE, lineage matching against a compared scenario).
+ * Pure vocabulary and helpers: the BUCKET each account falls in (payroll,
+ * hours, heads, other), classified by the account's map labels with
+ * code-prefix fallbacks so an unmapped account still lands somewhere; the
+ * map PATH a payroll account sits on, which the matrix's column tree is
+ * built from (see bridgeMatrix.ts); the row and department shapes the read
+ * returns; and the arithmetic the page and the export share (payroll totals,
+ * FTE, payroll per FTE, lineage matching against a compared scenario).
  *
  * Titles only, never names: the bridge shows what a POST costs, the way the
  * Results inspector does. See main/positions/positionBridge.ts for the read.
@@ -17,54 +17,28 @@
 import type { OutputEncoding, OutputSource } from "../positions/ipc";
 import type { ReportRunInfo } from "./ipc";
 
-export type BridgeBucket =
-  | "management_salaries"
-  | "hourly_wages"
-  | "overtime"
-  | "bonus"
-  | "paid_time_off"
-  | "benefits"
-  | "other_payroll"
-  | "hours"
-  | "heads"
-  | "other";
+/** "payroll" is everything under Total Payroll — the matrix's account tree.
+ *  The other three are fixed columns beside it. */
+export type BridgeBucket = "payroll" | "hours" | "heads" | "other";
 
-export const BRIDGE_BUCKET_ORDER: readonly BridgeBucket[] = [
-  "management_salaries",
-  "hourly_wages",
-  "overtime",
-  "bonus",
-  "paid_time_off",
-  "benefits",
-  "other_payroll",
-  "hours",
-  "heads",
-  "other",
-];
+export const BRIDGE_STAT_BUCKETS: readonly Exclude<BridgeBucket, "payroll">[] = ["hours", "heads", "other"];
 
 export const BRIDGE_BUCKET_LABELS: Record<BridgeBucket, string> = {
-  management_salaries: "Management salaries",
-  hourly_wages: "Hourly wages",
-  overtime: "Overtime",
-  bonus: "Bonus",
-  paid_time_off: "Paid time off",
-  benefits: "Benefits",
-  other_payroll: "Other payroll",
+  payroll: "Total payroll",
   hours: "Hours",
-  heads: "Heads",
+  /** The headcount statistic accounts — "Heads" is the positions' own count. */
+  heads: "Heads posted",
   other: "Other accounts",
 };
 
-/** The buckets that add up to "Total payroll". */
-export const PAYROLL_BUCKETS: ReadonlySet<BridgeBucket> = new Set([
-  "management_salaries",
-  "hourly_wages",
-  "overtime",
-  "bonus",
-  "paid_time_off",
-  "benefits",
-  "other_payroll",
-]);
+/** The account map levels the column tree steps through, top down; the
+ *  account itself (its max-level description) is the leaf under them. */
+export const BRIDGE_TREE_LEVELS: readonly number[] = [12, 14, 18, 21];
+
+/** Payroll accounts the maps do not know. */
+export const UNMAPPED_GROUP = "Unmapped";
+/** Mapped payroll accounts with nothing at any tree level. */
+export const UNGROUPED_GROUP = "Other payroll";
 
 export interface BridgeAccountLabels {
   accountLabel(code: string, level: number): string | null;
@@ -77,23 +51,33 @@ export function classifyBridgeAccount(
   headAccounts: ReadonlySet<string>
 ): BridgeBucket {
   if (headAccounts.has(bareAccount)) return "heads";
-  const l9 = labels.accountLabel(bareAccount, 9);
-  if (l9 === "Total Payroll") {
-    if (labels.accountLabel(bareAccount, 18) === "Hrly Overtime Prem") return "overtime";
-    const l15 = labels.accountLabel(bareAccount, 15);
-    if (l15 === "Total Management Salaries") return "management_salaries";
-    if (l15 === "Total Hourly Wages") return "hourly_wages";
-    if (l15 === "Bonus Payments") return "bonus";
-    if (labels.accountLabel(bareAccount, 14) === "Paid Time Off") return "paid_time_off";
-    if (labels.accountLabel(bareAccount, 12) === "Associate Benefits") return "benefits";
-    return "other_payroll";
-  }
+  if (labels.accountLabel(bareAccount, 9) === "Total Payroll") return "payroll";
   if (labels.accountLabel(bareAccount, 4) === "Total Manhours") return "hours";
   // Unmapped: the code families Kairos itself posts to.
   if (bareAccount.startsWith("988")) return "hours";
   if (bareAccount.startsWith("97254")) return "heads";
-  if (bareAccount.startsWith("5")) return "other_payroll";
+  if (bareAccount.startsWith("5")) return "payroll";
   return "other";
+}
+
+export interface BridgeAccountStep {
+  level: number;
+  label: string;
+}
+
+/** Where a payroll account sits in the column tree: its non-blank labels at
+ *  the tree levels, top down. Blank levels are skipped, not shown empty. */
+export function bridgeAccountPath(
+  bareAccount: string,
+  labels: BridgeAccountLabels & { hasAccount(code: string): boolean }
+): BridgeAccountStep[] {
+  if (!labels.hasAccount(bareAccount)) return [{ level: BRIDGE_TREE_LEVELS[0], label: UNMAPPED_GROUP }];
+  const path: BridgeAccountStep[] = [];
+  for (const level of BRIDGE_TREE_LEVELS) {
+    const label = labels.accountLabel(bareAccount, level);
+    if (label) path.push({ level, label });
+  }
+  return path.length ? path : [{ level: BRIDGE_TREE_LEVELS[0], label: UNGROUPED_GROUP }];
 }
 
 export interface BridgeCell {
@@ -152,13 +136,21 @@ export interface BridgeBstTotals {
   byDept: Record<string, Record<string, number>>;
 }
 
+export interface BridgeAccount {
+  code: string;
+  name: string | null;
+  bucket: BridgeBucket;
+  path: BridgeAccountStep[];
+}
+
 export interface PositionBridgeResponse {
   scenarioId: string;
   year: number;
   run: ReportRunInfo | null;
   departments: BridgeDepartment[];
-  /** Every account the rows touch, with its bucket and name. */
-  accounts: Array<{ code: string; name: string | null; bucket: BridgeBucket }>;
+  /** Every account the rows touch, with its bucket, name and — for payroll
+   *  accounts — its place in the column tree (empty otherwise). */
+  accounts: BridgeAccount[];
   bst: BridgeBstTotals;
   compare: { scenarioId: string; year: number; departments: BridgeDepartment[] } | null;
 }
@@ -174,9 +166,7 @@ export function bucketTotal(cells: readonly BridgeCell[], bucket: BridgeBucket):
 }
 
 export function payrollTotal(cells: readonly BridgeCell[]): number {
-  let sum = 0;
-  for (const cell of cells) if (PAYROLL_BUCKETS.has(cell.bucket)) sum += cell.total;
-  return sum;
+  return bucketTotal(cells, "payroll");
 }
 
 /** The rows of a compared scenario, by lineage — the join key across clones. */

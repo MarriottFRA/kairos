@@ -980,8 +980,9 @@ export default function Positions() {
       fteById: ftes,
       blockResults: liveSim.results ?? EMPTY_BLOCK_RESULTS,
       ruleRatesById: ruleRates,
+      calendar: calendarCtx,
     }),
-    [vacationCosts, manhoursWorked, ftes, liveSim, ruleRates]
+    [vacationCosts, manhoursWorked, ftes, liveSim, ruleRates, calendarCtx]
   );
   const derivedRef = useRef<DerivedRowValues>(derived);
   derivedRef.current = derived;

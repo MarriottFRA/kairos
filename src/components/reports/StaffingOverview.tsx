@@ -7,8 +7,9 @@
  * total in the footer; per classification a head count and an FTE column.
  * Rows roll up by the job title as typed or by the Standard Title (a
  * toggle). A compared scenario adds its columns and the variances, matched
- * by group and title. FTE is the engine's: derived from the contract,
- * × count × cluster share — the same figure the Positions grid shows.
+ * by group and title. The basis is a toggle too: Accounts (default) reads
+ * the calculated lines, so HC and FTE are what every report and actuals
+ * carry; Positions reads the rows as they stand — the Positions grid's FTE.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -37,6 +38,7 @@ import {
   STAFFING_KIND_LABELS,
   StaffingBucket,
   StaffingCells,
+  StaffingBasis,
   StaffingKind,
   StaffingOverviewResponse,
   TitleMode,
@@ -70,6 +72,7 @@ const groupLabelOf = (key: string) => key.slice(key.indexOf("|") + 1);
 export default function StaffingOverview({ ou, scenario, scenarios, hotelName, onError, onNotice }: StaffingOverviewProps) {
   const [compareId, setCompareId] = useState<string>("");
   const [titleMode, setTitleMode] = useState<TitleMode>("title");
+  const [basis, setBasis] = useState<StaffingBasis>("accounts");
   const [data, setData] = useState<StaffingOverviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -77,7 +80,7 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    loadStaffingOverview(ou, scenario.id, { compareScenarioId: compareId || undefined, titleMode })
+    loadStaffingOverview(ou, scenario.id, { compareScenarioId: compareId || undefined, titleMode, basis })
       .then((response) => {
         if (!cancelled) setData(response);
       })
@@ -93,7 +96,7 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
     return () => {
       cancelled = true;
     };
-  }, [ou, scenario.id, compareId, titleMode, onError]);
+  }, [ou, scenario.id, compareId, titleMode, basis, onError]);
 
   const compareScenario = scenarios.find((s) => s.id === compareId) ?? null;
   const hasCompare = !!data?.compare;
@@ -182,6 +185,7 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
         const result = await exportStaffingOverview(ou, scenario.id, {
           compareScenarioId: compareId || undefined,
           titleMode,
+          basis,
           hotelName,
         });
         if (result.outcome === "saved") onNotice(`Saved ${result.path} (${result.sheets} sheets)`);
@@ -191,11 +195,23 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
         setExporting(false);
       }
     })();
-  }, [ou, scenario.id, compareId, titleMode, hotelName, onError, onNotice]);
+  }, [ou, scenario.id, compareId, titleMode, basis, hotelName, onError, onNotice]);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", mb: 1.5, flexWrap: "wrap", rowGap: 1 }}>
+        <Tooltip
+          title={
+            basis === "accounts"
+              ? "From the accounts, as every report and actuals read them: HC is the position count at year end; FTE is manager heads + hours ÷ (effective week × 52). Needs a calculated scenario."
+              : "From the positions as they stand: HC is each row's Count; FTE is the Positions grid's (contract ÷ full-time week × Count × cluster share). Always current."
+          }
+        >
+          <ToggleButtonGroup exclusive size="small" value={basis} onChange={(_event, next: StaffingBasis | null) => next && setBasis(next)}>
+            <ToggleButton value="accounts">Accounts</ToggleButton>
+            <ToggleButton value="positions">Positions</ToggleButton>
+          </ToggleButtonGroup>
+        </Tooltip>
         <FormControl size="small" sx={{ minWidth: 220 }}>
           <InputLabel id="staff-compare">Compare with</InputLabel>
           <Select labelId="staff-compare" label="Compare with" value={compareId} onChange={(e) => setCompareId(String(e.target.value))}>
@@ -231,7 +247,16 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
           Export overview
         </Button>
         <Stack direction="row" spacing={1} sx={{ ml: "auto", alignItems: "center" }}>
-          {data?.run && (
+          {data?.weeklyHours && (
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`Effective week ${data.weeklyHours.value.toFixed(2)} h`}
+              sx={{ height: 28, fontWeight: 600 }}
+            />
+          )}
+          {/* The positions basis is current by construction; the run only matters to the accounts. */}
+          {data?.basis === "accounts" && data.run && (
             <Chip
               size="small"
               variant="outlined"
@@ -242,6 +267,12 @@ export default function StaffingOverview({ ou, scenario, scenarios, hotelName, o
           )}
         </Stack>
       </Stack>
+
+      {data?.warnings.map((warning) => (
+        <Alert key={`${warning.code}|${warning.message}`} severity="warning" sx={{ mb: 2 }}>
+          {warning.message}
+        </Alert>
+      ))}
 
       {data && data.unmappedDepartments.length > 0 && (
         <Alert severity="info" sx={{ mb: 2 }}>

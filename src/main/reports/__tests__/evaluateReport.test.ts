@@ -28,6 +28,8 @@ import {
 import { getFieldCatalog, saveScenario } from "../../positions/structureRepo";
 import { buildFieldMap } from "../../../shared/positions/rowModel";
 import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts";
+import { compileDefinition } from "../../../shared/reports/compile";
+import { MAPS_FREE_STAFFING } from "../../../shared/reports/__tests__/fixtures/mapsFreeStaffingDefinition";
 import { evaluateReportForScenario, listReportDefinitionSummaries } from "../evaluate";
 import { getResultsSource } from "../resultsSource";
 import { getMapIndex } from "../mapsIndex";
@@ -38,6 +40,7 @@ const SCOPE = resolveOuScope("OU12345");
 const YEAR = 2027;
 const CALENDAR = buildDefaultCalendar(SCOPE.ou, YEAR, DEFAULT_WEEKEND_MASK);
 const SALARY_ACCOUNT = "A511000";
+const STAFFING = compileDefinition(MAPS_FREE_STAFFING);
 
 let structureDb: Db;
 let valuesDb: Db;
@@ -148,7 +151,7 @@ function seedBudgetImport() {
 describe("evaluateReportForScenario", () => {
   it("evaluates a maps-free report straight off the results cache", async () => {
     await recalc();
-    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "staffing_stats");
+    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, STAFFING);
 
     expect(report.year).toBe(YEAR);
     expect(report.run).toEqual({ computedAt: "2026-09-08T00:00:00.000Z", stale: false });
@@ -195,15 +198,15 @@ describe("evaluateReportForScenario", () => {
 
   it("reports stale exactly when the Results page would", async () => {
     await recalc();
-    expect(evaluateReportForScenario(dbs(), SCOPE, scenarioId, "staffing_stats").run?.stale).toBe(false);
+    expect(evaluateReportForScenario(dbs(), SCOPE, scenarioId, STAFFING).run?.stale).toBe(false);
     valuesDb
       .prepare(`INSERT INTO buyout_rows (id, ou, scenario_id, updated_at) VALUES ('b1', ?, ?, 'now')`)
       .run(SCOPE.ou, scenarioId);
-    expect(evaluateReportForScenario(dbs(), SCOPE, scenarioId, "staffing_stats").run?.stale).toBe(true);
+    expect(evaluateReportForScenario(dbs(), SCOPE, scenarioId, STAFFING).run?.stale).toBe(true);
   });
 
   it("answers from an empty source, with a warning, for a scenario never calculated", () => {
-    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, "staffing_stats");
+    const report = evaluateReportForScenario(dbs(), SCOPE, scenarioId, STAFFING);
     expect(report.run).toBeNull();
     expect(report.warnings.map((w) => w.code)).toEqual(["NO_RESULTS"]);
     expect(report.rows.find((r) => r.label === "Position count")!.values!.every((v) => v === 0)).toBe(true);
@@ -240,7 +243,7 @@ describe("evaluateReportForScenario", () => {
   it("refuses an unknown report or a scenario the hotel does not have", async () => {
     await recalc();
     expect(() => evaluateReportForScenario(dbs(), SCOPE, scenarioId, "nope")).toThrow(/Unknown report/);
-    expect(() => evaluateReportForScenario(dbs(), SCOPE, "not-a-scenario", "staffing_stats")).toThrow(
+    expect(() => evaluateReportForScenario(dbs(), SCOPE, "not-a-scenario", STAFFING)).toThrow(
       /does not exist/
     );
   });
@@ -252,8 +255,6 @@ describe("evaluateReportForScenario", () => {
         id: "payroll_fte_summary",
         params: expect.arrayContaining([expect.objectContaining({ id: "weekly_hours", builtin: "weekly_hours" })]),
       }),
-      expect.objectContaining({ id: "rooms_kpi" }),
-      expect.objectContaining({ id: "staffing_stats", sources: ["kairos"] }),
     ]);
   });
 });

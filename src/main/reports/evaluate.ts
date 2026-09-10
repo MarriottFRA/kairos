@@ -469,10 +469,10 @@ export function evaluateReportForScenario(
   dbs: ReportDbs,
   scope: OuScope,
   scenarioId: string,
-  definitionId: string,
+  target: string | CompiledReport,
   options: EvaluateOptions = {}
 ): ReportsEvaluateResponse {
-  const compiled = resolveCompiled(definitionId);
+  const compiled = resolveCompiled(target);
   const { localDb, secureDb } = dbs;
   const year = scenarioYear(localDb, scope, scenarioId);
 

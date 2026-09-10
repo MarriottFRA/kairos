@@ -29,6 +29,7 @@
  */
 
 import type { BlockDto } from "../blocks/ipc";
+import type { CalendarContext } from "../engine/types";
 import {
   RateRuleBindContext,
   RateRuleResult,
@@ -57,6 +58,11 @@ export interface DerivedRowValues {
   /** rowId → costDefId → the rate a rules-driven multiplier resolved to (the
    *  read-only cell where the rate column used to be). */
   ruleRatesById: ReadonlyMap<string, ReadonlyMap<string, RateRuleResult>>;
+  /** The hotel-year day basis the row-only computes restate a row against
+   *  (rowModel.ComputeContext — the hourly Full Year / Budget Year previews).
+   *  Not a per-row value, but it changes with the same cadence and is read in
+   *  the same callbacks, so it rides the same ref. Null until loaded. */
+  calendar: Pick<CalendarContext, "realDays"> | null;
 }
 
 /**
@@ -71,6 +77,7 @@ export const EMPTY_DERIVED_ROW_VALUES: DerivedRowValues = {
   fteById: new Map(),
   blockResults: new Map(),
   ruleRatesById: new Map(),
+  calendar: null,
 };
 
 /**
