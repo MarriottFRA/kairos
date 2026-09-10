@@ -25,6 +25,7 @@
  * was, so the two cannot disagree.
  */
 
+import type { ClearRuleSet } from "../../shared/bstPush/ipc";
 import type Database from "better-sqlite3-multiple-ciphers";
 import { collectAtomEntries } from "../../shared/reports/atoms";
 import {
@@ -77,8 +78,8 @@ export interface EvaluateOptions {
 }
 
 export interface EvaluateColumnsOptions extends EvaluateOptions {
-  /** The saved push clear rules — what the plan overlay removes. */
-  clearPrefixes: readonly string[];
+  /** The saved push clear rules and exceptions — what the plan overlay removes. */
+  clearRules: ClearRuleSet;
   /** Request-level param values; win over the built-ins. */
   params?: Record<string, ParamValue>;
   /** Hotel-year setup readers for the built-in params; absent = built-in defaults. */
@@ -264,7 +265,7 @@ export async function planColumns(
 
     if (series.kind === "plan") {
       const year = info.year!;
-      const plan = getPlanSource(dbs, scope, series.scenarioId, year, PLAN_BUCKET, options.clearPrefixes, options.bst);
+      const plan = getPlanSource(dbs, scope, series.scenarioId, year, PLAN_BUCKET, options.clearRules, options.bst);
       warnings.push(...plan.warnings);
       noteBst(plan.bst);
       drift = plan.drift;
@@ -291,7 +292,7 @@ export async function planColumns(
       // The nudge: a scenario-relative bucket for the scenario's own year is
       // exactly what a push would overwrite.
       if (series.relativeTo && series.year === undefined && !(series.yearOffset ?? 0) && !series.bucket?.index) {
-        const plan = getPlanSource(dbs, scope, series.relativeTo, year, PLAN_BUCKET, options.clearPrefixes, options.bst);
+        const plan = getPlanSource(dbs, scope, series.relativeTo, year, PLAN_BUCKET, options.clearRules, options.bst);
         drift = plan.drift;
         const nudge = plan.warnings.find((w) => w.code === "PLAN_NOT_PUSHED");
         if (nudge) warnings.push(nudge);

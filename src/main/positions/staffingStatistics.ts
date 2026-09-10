@@ -12,6 +12,7 @@
  * crosses this boundary.
  */
 
+import type { ClearRuleSet } from "../../shared/bstPush/ipc";
 import type Database from "better-sqlite3-multiple-ciphers";
 import type { OutputSource } from "../../shared/positions/ipc";
 import { FTE_HOURS_MEASURE, FTE_WEEKS_PARAM, WEEKLY_HOURS_PARAM } from "../../shared/reports/catalog/staffing";
@@ -41,8 +42,8 @@ type Db = InstanceType<typeof Database>;
 export interface StaffingStatisticsDeps {
   getCalendar: CalendarGetter;
   getPositionDefaults: PositionDefaultsGetter;
-  /** The saved push clear rules, so the column plan is built as the Reports page builds it. */
-  clearPrefixes: readonly string[];
+  /** The saved push clear rules and exceptions, so the column plan is built as the Reports page builds it. */
+  clearRules: ClearRuleSet;
 }
 
 /** One full-timer's hours per slot, and nothing else. */
@@ -148,7 +149,7 @@ export async function readFteDivisor(
 ): Promise<FteDivisor> {
   const column: SeriesColumnSpec = { id: "kairos", series: { kind: "kairos", scenarioId } };
   const plan = await planColumns(dbs, scope, FTE_DIVISOR, [column], {
-    clearPrefixes: deps.clearPrefixes,
+    clearRules: deps.clearRules,
     deps: { getCalendar: deps.getCalendar, getPositionDefaults: deps.getPositionDefaults },
   });
   const divisor = evaluateReport(FTE_DIVISOR, plan.contextFor(column));

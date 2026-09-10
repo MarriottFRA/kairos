@@ -6,7 +6,9 @@
  *   - The CLEAR RULES. Which accounts the clear pass zeroes used to be a
  *     hardcoded predicate, which meant it was also an unexaminable assumption
  *     about which accounts this tool generates. Nobody knows every hotel's
- *     chart, so it is now a rule set the user can see, extend and correct.
+ *     chart, so it is now a rule set the user can see, extend and correct —
+ *     plus a list of EXCEPTIONS carved back out of it, so "every 5xxxxx but
+ *     510001" is one rule and one exception rather than nine rules.
  *   - The MONTH PLAN. A hotel pushing month after month repeats almost the same
  *     selection each time; making them rebuild it every visit would be the
  *     single most annoying thing about the page.
@@ -33,15 +35,18 @@ import {
 } from "../files/recentFilesStore";
 import {
   BstPushConfig,
+  ClearRuleSet,
   DEFAULT_BST_PUSH_CONFIG,
   GUARD_MODES,
   GuardMode,
+  normalizeClearExcludes,
   normalizeClearPrefixes,
   normalizeGuardMode,
   normalizeMonthPlan,
 } from "../../shared/bstPush/ipc";
 
 const PREFIX_KEY = "bstPushClearPrefixes";
+const EXCLUDE_KEY = "bstPushClearExcludes";
 const MONTHS_KEY = "bstPushMonthPlan";
 const BACKUP_KEY = "bstPushBackup";
 const SKIP_UNUSED_KEY = "bstPushSkipUnusedCombos";
@@ -66,6 +71,8 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
         settings[PREFIX_KEY] === undefined
           ? [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes]
           : normalizeClearPrefixes(settings[PREFIX_KEY] ?? []),
+      // Absent and empty mean the same thing here — nothing is kept back.
+      clearExcludes: normalizeClearExcludes(settings[EXCLUDE_KEY]),
       months: normalizeMonthPlan(settings[MONTHS_KEY]),
       recentFiles,
       // Absent lands on "skip" — a deliberate behavior change for existing
@@ -84,6 +91,7 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
     console.warn("[BST Push] Could not read the saved configuration:", error);
     return {
       clearPrefixes: [...DEFAULT_BST_PUSH_CONFIG.clearPrefixes],
+      clearExcludes: [],
       months: [...DEFAULT_BST_PUSH_CONFIG.months],
       recentFiles,
       allocationRows: DEFAULT_BST_PUSH_CONFIG.allocationRows,
@@ -92,6 +100,16 @@ export async function readBstPushConfig(): Promise<BstPushConfig> {
       skipUnusedCombos: DEFAULT_BST_PUSH_CONFIG.skipUnusedCombos,
     };
   }
+}
+
+/**
+ * The saved clear rules and exceptions as one rule set — what every consumer
+ * of "which accounts does the push own?" should read, so none of them can
+ * apply the rules without the exceptions.
+ */
+export async function readClearRules(): Promise<ClearRuleSet> {
+  const { clearPrefixes, clearExcludes } = await readBstPushConfig();
+  return { prefixes: clearPrefixes, excludes: clearExcludes };
 }
 
 /**
@@ -105,6 +123,9 @@ export async function writeBstPushConfig(raw: unknown): Promise<BstPushConfig> {
 
   if (patch.clearPrefixes !== undefined) {
     updates[PREFIX_KEY] = normalizeClearPrefixes(patch.clearPrefixes ?? []);
+  }
+  if (patch.clearExcludes !== undefined) {
+    updates[EXCLUDE_KEY] = normalizeClearExcludes(patch.clearExcludes ?? []);
   }
   if (patch.months !== undefined) {
     updates[MONTHS_KEY] = normalizeMonthPlan(patch.months);

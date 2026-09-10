@@ -138,6 +138,8 @@ export interface PushSettingsCardProps {
   protectedRowCount: number;
   /** For the skip-unused-combos heads-up, same as before the move here. */
   clearPrefixes: string[];
+  /** The exceptions, so the heads-up does not overstate what the rules reach. */
+  clearExcludes?: string[];
   /** Locks everything but backup — a refresh must not lock the plan options. */
   disabled?: boolean;
   /** Backup keeps its stricter gate: any in-flight work disables it. */
@@ -150,6 +152,7 @@ export default function PushSettingsCard({
   allocationRowCount,
   protectedRowCount,
   clearPrefixes,
+  clearExcludes = [],
   disabled = false,
   backupDisabled = false,
 }: PushSettingsCardProps) {
@@ -283,7 +286,8 @@ export default function PushSettingsCard({
                 variant="caption"
                 sx={{ display: "block", pl: 4.75, color: "warning.main" }}
               >
-                Heads up: the clear rules ({clearPrefixes.join(", ")}) still run
+                Heads up: the clear rules ({clearPrefixes.join(", ")}
+                {clearExcludes.length > 0 ? `, except ${clearExcludes.join(", ")}` : ""}) still run
                 — a skipped row whose account they match is still zeroed in
                 replaced or cleared months, unless the guards above leave it
                 alone.

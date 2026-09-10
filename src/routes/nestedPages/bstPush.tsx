@@ -57,7 +57,9 @@ import HistoryIcon from "@mui/icons-material/History";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 
-import ClearRulesCard from "../../components/bstPush/ClearRulesCard";
+import ClearRulesCard, {
+  ClearRulesPatch,
+} from "../../components/bstPush/ClearRulesCard";
 import MonthPlanBar, {
   MONTH_ACTION_META,
   describeMonthPlan,
@@ -331,6 +333,7 @@ function reportText(report: BstPushReport): string {
     `Budget year: ${report.file.year ?? "—"}`,
     `Months: ${describeMonthPlan(report.options.months)}`,
     `Clear rules: ${report.clearScope.prefixes.join(", ") || "none"}`,
+    `Kept from clearing: ${report.clearScope.excludes.join(", ") || "none"}`,
     `Allocation rows: ${GUARD_MODE_META[report.options.allocationRows].label}`,
     `Protected cells: ${GUARD_MODE_META[report.options.protectedCells].label}`,
     `Rows written: ${report.writeCount}`,
@@ -617,17 +620,17 @@ export default function BstPush() {
   );
 
   /**
-   * Save a changed rule set. The plan's cell counts depend on it, so bumping
-   * `rulesRevision` deliberately falls into the same debounced re-preview an
-   * option change uses — the numbers on screen are never left describing rules
-   * that are no longer in force.
+   * Save a changed rule set — the rules, the exceptions, or both. The plan's
+   * cell counts depend on it, so bumping `rulesRevision` deliberately falls
+   * into the same debounced re-preview an option change uses — the numbers on
+   * screen are never left describing rules that are no longer in force.
    */
   const handleSaveRules = useCallback(
-    async (prefixes: string[]) => {
+    async (patch: ClearRulesPatch) => {
       if (!ou) return;
       setSavingRules(true);
       try {
-        setPushConfig(await saveBstPushConfig(ou, { clearPrefixes: prefixes }));
+        setPushConfig(await saveBstPushConfig(ou, patch));
         setRulesRevision((revision) => revision + 1);
       } catch (err) {
         setError((err as Error).message);
@@ -898,10 +901,15 @@ export default function BstPush() {
               />
               <ClearRulesCard
                 prefixes={pushConfig.clearPrefixes}
+                excludes={pushConfig.clearExcludes}
                 clearScope={plan.clearScope}
+                options={options}
                 saving={savingRules}
                 disabled={busy === "commit"}
-                onSave={(prefixes) => void handleSaveRules(prefixes)}
+                onSave={(patch) => void handleSaveRules(patch)}
+                onSkipUnusedCombos={() =>
+                  updateOptions({ ...options, skipUnusedCombos: true })
+                }
               />
               {/* A refresh must not lock the plan options either — same
                   reason as the month strip above. Backup keeps its stricter
@@ -912,6 +920,7 @@ export default function BstPush() {
                 allocationRowCount={plan.allocationRowCount}
                 protectedRowCount={plan.protectedRowCount}
                 clearPrefixes={pushConfig.clearPrefixes}
+                clearExcludes={pushConfig.clearExcludes}
                 disabled={busy === "commit"}
                 backupDisabled={working}
               />
@@ -1358,7 +1367,13 @@ function SummaryTiles({
         <StatTile
           value={count(source.zeroCellCount)}
           label={past ? "Cells cleared" : "Cells to clear"}
-          hint={`Rows matching the clear rules (${source.clearScope.prefixes.join(", ") || "none"}), zeroed in every cleared month`}
+          hint={
+            `Rows matching the clear rules (${source.clearScope.prefixes.join(", ") || "none"})` +
+            (source.clearScope.excludes.length > 0
+              ? `, except ${source.clearScope.excludes.join(", ")}`
+              : "") +
+            `, zeroed in every cleared month`
+          }
         />
       )}
       {source.skippedCount > 0 && (

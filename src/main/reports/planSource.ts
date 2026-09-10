@@ -4,9 +4,9 @@
  * from it.
  *
  * Both halves are memoised elsewhere (resultsSource.ts, bstSource.ts); this
- * module memoises the merge on their two stamps and on the clear-rule
- * prefixes, because the prefixes decide what the overlay removes. The
- * prefixes come from the saved push configuration (bstPush/config.ts), read
+ * module memoises the merge on their two stamps and on the clear rule set
+ * (prefixes AND exceptions), because those decide what the overlay removes.
+ * The rules come from the saved push configuration (bstPush/config.ts), read
  * by the IPC handler and passed in — never from the renderer's request, so a
  * report can never apply rules the user did not save. See
  * shared/reports/sources.ts for the overlay rules themselves.
@@ -16,7 +16,7 @@
  */
 
 import type Database from "better-sqlite3-multiple-ciphers";
-import { matchesClearRules } from "../../shared/bstPush/ipc";
+import { ClearRuleSet, compileClearRules } from "../../shared/bstPush/ipc";
 import type { ReportBstInfo } from "../../shared/reports/ipc";
 import {
   PlanDrift,
@@ -48,9 +48,14 @@ export interface PlanSourceLoad {
  *  (the push guards those `skip`). */
 export const ownsEntry = (entry: ComboEntry): boolean => entry.valueKind !== "percent";
 
-export function clearsAccountWith(clearPrefixes: readonly string[]) {
-  const prefixes = [...clearPrefixes];
-  return (bareAccount: string): boolean => matchesClearRules(bareAccount, prefixes) !== null;
+/** The push's own verdict, exceptions included: a kept account is not this tool's to overlay. */
+export function clearsAccountWith(clearRules: ClearRuleSet) {
+  return compileClearRules(clearRules).clears;
+}
+
+/** The part of the memo stamp the rule set contributes — order-insensitive. */
+function clearRulesStamp(clearRules: ClearRuleSet): string {
+  return `${[...clearRules.prefixes].sort().join(",")}!${[...clearRules.excludes].sort().join(",")}`;
 }
 
 export function driftWarning(drift: PlanDrift): ReportWarning {
@@ -70,7 +75,7 @@ export function getPlanSource(
   scenarioId: string,
   year: number,
   ref: BstRef,
-  clearPrefixes: readonly string[],
+  clearRules: ClearRuleSet,
   override?: BstOverride
 ): PlanSourceLoad {
   const results = getResultsSource(dbs.secureDb, scope, scenarioId);
@@ -87,14 +92,13 @@ export function getPlanSource(
 
   const info = bst.info;
   const bucket = bst.source;
-  const prefixes = [...clearPrefixes].sort();
-  const stamp = `${resultsSourceStamp(dbs.secureDb, scope, scenarioId)}|${info.importId}|${info.bucketIndex}|${prefixes.join(",")}`;
+  const stamp = `${resultsSourceStamp(dbs.secureDb, scope, scenarioId)}|${info.importId}|${info.bucketIndex}|${clearRulesStamp(clearRules)}`;
   const merged = memo(
     dbs.secureDb,
     `reports:plan:${scope.ou}:${scenarioId}:${info.bucketIndex}`,
     stamp,
     () => {
-      const clears = clearsAccountWith(prefixes);
+      const clears = clearsAccountWith(clearRules);
       return {
         source: overlaySource(`plan:${scenarioId}`, bucket, results.source, ownsEntry, clears),
         drift: comparePlanToBst(results.source, bucket, ownsEntry, clears),
@@ -118,8 +122,8 @@ export function getPlanDrift(
   scenarioId: string,
   year: number,
   ref: BstRef,
-  clearPrefixes: readonly string[],
+  clearRules: ClearRuleSet,
   override?: BstOverride
 ): PlanDrift | null {
-  return getPlanSource(dbs, scope, scenarioId, year, ref, clearPrefixes, override).drift;
+  return getPlanSource(dbs, scope, scenarioId, year, ref, clearRules, override).drift;
 }

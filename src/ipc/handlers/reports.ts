@@ -19,7 +19,7 @@ import { IpcHandler, IpcResult } from "../types";
 import { getCalendarYear, getPositionDefaults, localDbHandle } from "../../local_db";
 import { secureDb } from "../../secure_db";
 import { resolveOuScope } from "../../main/positions/ouScope";
-import { readBstPushConfig } from "../../main/bstPush/config";
+import { readClearRules } from "../../main/bstPush/config";
 import {
   EvaluateColumnsOptions,
   evaluateReportColumns,
@@ -117,10 +117,10 @@ const getDefaultsEitherForm = async (ou: string, year: number) =>
 async function columnOptions(
   request: Pick<ReportsEvaluateColumnsRequest, "bst" | "params">
 ): Promise<EvaluateColumnsOptions> {
-  const { clearPrefixes } = await readBstPushConfig();
+  const clearRules = await readClearRules();
   return {
     bst: request?.bst,
-    clearPrefixes,
+    clearRules,
     params: normalizeParams(request?.params),
     deps: { getCalendar: getCalendarEitherForm, getPositionDefaults: getDefaultsEitherForm },
   };
@@ -345,8 +345,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        const { clearPrefixes } = await readBstPushConfig();
-        return ok(await readStaffingOverview(dbs(), scope, scenarioId, staffingOptions(request), { ...staffingDeps, clearPrefixes }));
+        const clearRules = await readClearRules();
+        return ok(await readStaffingOverview(dbs(), scope, scenarioId, staffingOptions(request), { ...staffingDeps, clearRules }));
       } catch (error) {
         console.error("Failed to read the staffing overview:", error);
         return fail(error, null);
@@ -358,8 +358,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
         const options = staffingOptions(request);
-        const { clearPrefixes } = await readBstPushConfig();
-        const response = await readStaffingOverview(dbs(), scope, scenarioId, options, { ...staffingDeps, clearPrefixes });
+        const clearRules = await readClearRules();
+        const response = await readStaffingOverview(dbs(), scope, scenarioId, options, { ...staffingDeps, clearRules });
         const labelOf = (id: string) => scenarioLabelFor(scope.ou, [{ id: "s", series: { kind: "kairos", scenarioId: id } }]);
         const meta = {
           reportName: "Staffing overview",
@@ -393,8 +393,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        const { clearPrefixes } = await readBstPushConfig();
-        return ok(await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes }));
+        const clearRules = await readClearRules();
+        return ok(await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearRules }));
       } catch (error) {
         console.error("Failed to read the staffing statistics:", error);
         return fail(error, null);
@@ -405,8 +405,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        const { clearPrefixes } = await readBstPushConfig();
-        const response = await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes });
+        const clearRules = await readClearRules();
+        const response = await readStaffingStatistics(dbs(), scope, scenarioId, { ...staffingDeps, clearRules });
         const slot = Number.isInteger(request?.slot) && request.slot! >= 0 && request.slot! <= 12 ? request.slot! : 12;
         const meta = {
           reportName: "Staffing statistics",
@@ -440,8 +440,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        const { clearPrefixes } = await readBstPushConfig();
-        return ok(await readFteReconciliation(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes }));
+        const clearRules = await readClearRules();
+        return ok(await readFteReconciliation(dbs(), scope, scenarioId, { ...staffingDeps, clearRules }));
       } catch (error) {
         console.error("Failed to read the FTE reconciliation:", error);
         return fail(error, null);
@@ -463,8 +463,8 @@ export function createReportsHandlers(): Record<string, IpcHandler> {
       try {
         const scope = resolveOuScope(request?.ou);
         const scenarioId = requireString(request?.scenarioId, "scenarioId");
-        const { clearPrefixes } = await readBstPushConfig();
-        const response = await readFteReconciliation(dbs(), scope, scenarioId, { ...staffingDeps, clearPrefixes });
+        const clearRules = await readClearRules();
+        const response = await readFteReconciliation(dbs(), scope, scenarioId, { ...staffingDeps, clearRules });
         const meta = {
           reportName: "FTE reconciliation",
           hotelName: typeof request?.hotelName === "string" && request.hotelName.trim() ? request.hotelName.trim() : scope.ou,

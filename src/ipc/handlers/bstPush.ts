@@ -207,8 +207,8 @@ async function buildPlanFor(
 
   // Read here rather than carried on the request: the rule set decides what
   // gets destroyed, so it comes from what the user actually saved, never from
-  // the renderer's copy of it.
-  const { clearPrefixes } = await readBstPushConfig();
+  // the renderer's copy of it. The exceptions ride with it for the same reason.
+  const { clearPrefixes, clearExcludes } = await readBstPushConfig();
 
   const db = localDbHandle();
   return buildPushPlan({
@@ -216,7 +216,7 @@ async function buildPlanFor(
     filePath,
     outputs: outputs.rows,
     options,
-    clearPrefixes,
+    clearRules: { prefixes: clearPrefixes, excludes: clearExcludes },
     departmentNameByCode: new Map(
       listDepartments(db).map((dept) => [dept.code, dept.name])
     ),

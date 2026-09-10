@@ -15,6 +15,7 @@
  * says whether the results lag behind them.
  */
 
+import type { ClearRuleSet } from "../../shared/bstPush/ipc";
 import type Database from "better-sqlite3-multiple-ciphers";
 import { bareDept } from "../../shared/positions/comboKey";
 import { compileDefinition } from "../../shared/reports/compile";
@@ -42,9 +43,9 @@ type Db = InstanceType<typeof Database>;
 export interface FteReconciliationDeps {
   getCalendar: CalendarGetter;
   getPositionDefaults: PositionDefaultsGetter;
-  /** The saved push clear rules (a plan overlay's business; passed through so
+  /** The saved push clear rules and exceptions (a plan overlay's business; passed through so
    *  the column plan is built exactly as the Reports page builds it). */
-  clearPrefixes: readonly string[];
+  clearRules: ClearRuleSet;
 }
 
 export async function readFteReconciliation(
@@ -72,7 +73,7 @@ export async function readFteReconciliation(
   const compiled = compileDefinition(buildFteReconciliationDefinition(depts));
   const column: SeriesColumnSpec = { id: "kairos", series: { kind: "kairos", scenarioId } };
   const plan = await planColumns(dbs, scope, compiled, [column], {
-    clearPrefixes: deps.clearPrefixes,
+    clearRules: deps.clearRules,
     deps: { getCalendar: deps.getCalendar, getPositionDefaults: deps.getPositionDefaults },
   });
   const report = evaluateReport(compiled, plan.contextFor(column));

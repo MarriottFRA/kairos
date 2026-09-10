@@ -13,7 +13,7 @@ import Database from "better-sqlite3-multiple-ciphers";
 import { buildDefaultCalendar, DEFAULT_WEEKEND_MASK } from "../../../shared/calendar";
 import { PositionDefaults, buildDefaultPositionDefaults, fullTimeReference, resolvePositionDefaults } from "../../../shared/positionDefaults";
 import { effectiveWeekOf } from "../../../shared/positions/effectiveWeek";
-import { DEFAULT_CLEAR_PREFIXES } from "../../../shared/bstPush/ipc";
+import { DEFAULT_CLEAR_RULES } from "../../../shared/bstPush/ipc";
 import { applyStructureColumns } from "../../blocks/schema";
 import { applyHotelClustersV13 } from "../../hotelClusters/schema";
 import { ALLOCATIONS_SQL } from "../../allocations/schema";
@@ -134,7 +134,7 @@ const dbs = () => ({ localDb: structureDb, secureDb: valuesDb });
 const DEPS = {
   getCalendar: async () => CALENDAR,
   getPositionDefaults: async () => DEFAULTS,
-  clearPrefixes: DEFAULT_CLEAR_PREFIXES,
+  clearRules: DEFAULT_CLEAR_RULES,
 };
 
 const recalc = () =>

@@ -36,12 +36,16 @@ import {
   BUDGET_COL_START,
   DEFAULT_BST_PUSH_OPTIONS,
   DEFAULT_CLEAR_PREFIXES,
+  compileClearRules,
   matchesClearRules,
   normalizeBstPushConfig,
   normalizeBstPushOptions,
+  normalizeClearExcludes,
   normalizeClearPrefix,
   normalizeClearPrefixes,
+  normalizeClearRules,
   normalizeGuardMode,
+  resolveClearRules,
 } from "../../../shared/bstPush/ipc";
 import type { BstPushOptions, MonthAction } from "../../../shared/bstPush/ipc";
 import type { OutputAggRowDto } from "../../../shared/positions/ipc";
@@ -147,6 +151,12 @@ function outRow(
 const NAMES = new Map<string, string>();
 const RULES = [...DEFAULT_CLEAR_PREFIXES];
 
+/** A rule set from bare prefixes — most tests have no exceptions. */
+const ruleSet = (prefixes: string[], excludes: string[] = []) => ({
+  prefixes,
+  excludes,
+});
+
 /** Every month doing the same thing. Guards off — the pre-guard behavior most
  *  of these tests were written against. */
 const every = (action: MonthAction): BstPushOptions => ({
@@ -171,14 +181,15 @@ const only = (action: MonthAction, ...months: number[]): BstPushOptions => ({
 function plan(
   outputs: OutputAggRowDto[],
   options = DEFAULT_BST_PUSH_OPTIONS,
-  clearPrefixes: string[] = RULES
+  clearPrefixes: string[] = RULES,
+  clearExcludes: string[] = []
 ) {
   return buildPushPlan({
     target,
     filePath: "C:/tmp/test.xlsx",
     outputs,
     options,
-    clearPrefixes,
+    clearRules: ruleSet(clearPrefixes, clearExcludes),
     departmentNameByCode: NAMES,
     accountNameByCode: NAMES,
   });
@@ -444,7 +455,9 @@ describe("buildPushPlan", () => {
     expect(row33).toHaveLength(12);
     expect(row33.every((write) => write.value === 0)).toBe(true);
     // The clear counts are therefore exactly what the rules alone dictate.
-    expect(result.zeroCellCount).toBe(toZeroWrites(target, options, RULES).length);
+    expect(result.zeroCellCount).toBe(
+      toZeroWrites(target, options, ruleSet(RULES)).length
+    );
   });
 
   it("truly leaves a skipped combo alone when no clear rule matches it", () => {
@@ -533,7 +546,7 @@ describe("buildPushPlan", () => {
       filePath: "C:/tmp/test.xlsx",
       outputs: [outRow("D0010", "A560320", 1000)],
       options: DEFAULT_BST_PUSH_OPTIONS,
-      clearPrefixes: RULES,
+      clearRules: ruleSet(RULES),
       departmentNameByCode: NAMES,
       accountNameByCode: NAMES,
       unpostedByLabel: { "Meal allowance": 4 },
@@ -545,8 +558,11 @@ describe("buildPushPlan", () => {
 // ── What the clear rules cover ──────────────────────────────────────
 
 describe("buildClearScope", () => {
-  const scope = (prefixes: string[], outputs: OutputAggRowDto[] = []) =>
-    buildClearScope(target, outputs, prefixes, NAMES);
+  const scope = (
+    prefixes: string[],
+    outputs: OutputAggRowDto[] = [],
+    excludes: string[] = []
+  ) => buildClearScope(target, outputs, ruleSet(prefixes, excludes), NAMES);
 
   it("counts the BST rows each rule matches, including rules that match none", () => {
     const result = scope(["5", "988", "97254", "4140"]);
@@ -577,6 +593,155 @@ describe("buildClearScope", () => {
   });
 });
 
+// ── Exceptions: what the rules reach but must leave alone ───────────
+
+describe("clear rule exceptions", () => {
+  it("always win over a clear rule, however specific the rule is", () => {
+    // "Clear every 5xxxxx except 510001" — the whole reason the list exists.
+    const rules = ruleSet(["5"], ["510001"]);
+    expect(resolveClearRules("510001", rules)).toEqual({
+      matchedBy: "5",
+      keptBy: "510001",
+      clears: false,
+    });
+    expect(resolveClearRules("510000", rules).clears).toBe(true);
+    // A more specific clear rule does NOT override an exception: an exception
+    // is a promise, and a promise a later rule can quietly break is not one.
+    expect(resolveClearRules("510001", ruleSet(["5", "510001"], ["5100"])).clears).toBe(false);
+  });
+
+  it("attributes a kept account to the most specific exception", () => {
+    const rules = ruleSet(["5"], ["51", "5100"]);
+    expect(resolveClearRules("510001", rules).keptBy).toBe("5100");
+    expect(resolveClearRules("519999", rules).keptBy).toBe("51");
+  });
+
+  it("reports an exception no rule reaches without pretending it clears", () => {
+    const decision = resolveClearRules("414001", ruleSet(["5"], ["4140"]));
+    expect(decision).toEqual({ matchedBy: null, keptBy: "4140", clears: false });
+  });
+
+  it("compiles to a memoised matcher that agrees with the pure resolver", () => {
+    const rules = ruleSet(["5", "988"], ["510001"]);
+    const matcher = compileClearRules(rules);
+    for (const account of ["510000", "510001", "988112", "414001", "510001"]) {
+      expect(matcher.resolve(account)).toEqual(resolveClearRules(account, rules));
+      expect(matcher.clears(account)).toBe(resolveClearRules(account, rules).clears);
+    }
+    // The compiled copy is detached from the caller's arrays.
+    rules.prefixes.length = 0;
+    expect(matcher.clears("510000")).toBe(true);
+    // No rules at all: nothing clears, whatever the exceptions say.
+    expect(compileClearRules(ruleSet([], ["5"])).clears("510000")).toBe(false);
+  });
+
+  it("normalizes exceptions like prefixes but lands garbage on EMPTY, not a default", () => {
+    expect(normalizeClearExcludes(["A510001", " 5100 ", "oops", null])).toEqual(["5100", "510001"]);
+    expect(normalizeClearExcludes(undefined)).toEqual([]);
+    expect(normalizeClearExcludes("5")).toEqual([]);
+    // …whereas the prefixes DO fall back to the defaults when absent.
+    expect(normalizeClearRules({ excludes: ["510001"] })).toEqual({
+      prefixes: [...DEFAULT_CLEAR_PREFIXES],
+      excludes: ["510001"],
+    });
+    expect(normalizeBstPushConfig({}).clearExcludes).toEqual([]);
+  });
+
+  it("nets the chip counts and tallies what each exception keeps", () => {
+    // Default rules reach 6 rows; keeping 510000 shields its two rows on 0010.
+    const result = buildClearScope(target, [], ruleSet(RULES, ["510000"]), NAMES);
+    expect(result.ruleMatches["5"]).toBe(1); // 560320 only
+    expect(result.ruleMatches["988"]).toBe(2);
+    expect(result.excludeMatches["510000"]).toBe(2);
+    expect(result.rowsKept).toBe(2);
+    expect(result.cellsPerClearedMonth).toBe(4);
+    const kept = result.accounts.find((a) => a.account === "A510000")!;
+    expect(kept).toMatchObject({ matchedBy: "5", keptBy: "510000", bstRows: 2 });
+    // Kept, so not "left at zero".
+    expect(result.clearedNotWritten).not.toContain("A510000");
+    expect(result.clearedNotWritten).toContain("A560320");
+  });
+
+  it("shows an idle exception as keeping nothing, and never nags about a kept written account", () => {
+    const result = buildClearScope(
+      target,
+      [outRow("D0010", "A510000", 900)],
+      ruleSet(RULES, ["510000", "4140"]),
+      NAMES
+    );
+    // 4140 is in the workbook (414001) but no rule reaches it — 0 rows kept
+    // is the cue that the exception is redundant.
+    expect(result.excludeMatches["4140"]).toBe(0);
+    expect(result.accounts.find((a) => a.account === "A414001")).toMatchObject({
+      matchedBy: null,
+      keptBy: "4140",
+    });
+    // Kairos writes 510000 and the user chose to keep it: a decision, not an
+    // oversight, so it stays out of the "no rule covers it" warning.
+    expect(result.uncoveredWritten).toEqual([]);
+    expect(result.accounts.find((a) => a.account === "A510000")).toMatchObject({
+      written: true,
+      hasData: true,
+    });
+  });
+
+  it("tells a written account with values from one Kairos holds only zeroes for", () => {
+    const result = buildClearScope(
+      target,
+      [outRow("D0010", "A510000", 0), outRow("D0010", "A560320", 5)],
+      ruleSet(RULES),
+      NAMES
+    );
+    expect(result.accounts.find((a) => a.account === "A510000")).toMatchObject({
+      written: true,
+      hasData: false,
+    });
+    expect(result.accounts.find((a) => a.account === "A560320")).toMatchObject({
+      written: true,
+      hasData: true,
+    });
+  });
+
+  it("warns that a kept account Kairos zeroes is overwritten anyway — until unused combos are skipped", () => {
+    const zeroRow = [outRow("D0010", "A510000", 0)];
+    const loud = plan(zeroRow, every("replace"), RULES, ["510000"]);
+    expect(loud.warnings.join(" ")).toMatch(/only zeroes for kept account\(s\) A510000/);
+    // The fix the warning names really does silence it.
+    const quiet = plan(zeroRow, { ...every("replace"), skipUnusedCombos: true }, RULES, ["510000"]);
+    expect(quiet.warnings.join(" ")).not.toMatch(/only zeroes for kept/);
+    // And a clear-only push writes no values, so there is nothing to warn about.
+    const clearOnly = plan(zeroRow, every("clear"), RULES, ["510000"]);
+    expect(clearOnly.warnings.join(" ")).not.toMatch(/only zeroes for kept/);
+    // With real values the message is the other one: they land regardless.
+    const valued = plan([outRow("D0010", "A510000", 12_000)], every("replace"), RULES, ["510000"]);
+    expect(valued.warnings.join(" ")).toMatch(/Kairos has values for kept account\(s\) A510000/);
+  });
+
+  it("keeps the excepted rows out of the zero pass, and only those", () => {
+    const writes = toZeroWrites(target, every("replace"), ruleSet(RULES, ["510000"]));
+    const cleared = new Set(writes.map((write) => `${write.sheet}!${write.row}`));
+    expect(cleared.has("0010!21")).toBe(false); // 510000
+    expect(cleared.has("0010!300")).toBe(false); // its duplicate row too
+    expect(cleared.has("0010!33")).toBe(true); // 560320 still goes
+    expect(cleared.has("0410!269")).toBe(true);
+    expect(writes).toHaveLength(4 * 12);
+  });
+
+  it("carries the exceptions from the plan into the commit's writes", () => {
+    // The commit rebuilds writes from plan.clearScope, so the exceptions must
+    // travel on it — or the preview would promise a keep the file never got.
+    const result = plan([outRow("D0010", "A510000", 12_000)], every("replace"), RULES, ["510000"]);
+    expect(result.clearScope.excludes).toEqual(["510000"]);
+    expect(result.zeroCellCount).toBe(4 * 12);
+    expect(result.warnings.join(" ")).toMatch(/kept by an exception \(510000\)/);
+    const writes = toCellWrites(result, target);
+    const row21 = writes.filter((write) => write.sheet === "0010" && write.row === 21);
+    // No zeroes on the kept row — but Kairos's own values still land on it.
+    expect(row21).toHaveLength(12);
+    expect(row21.every((write) => write.value === 12)).toBe(true);
+  });
+});
+
 // ── Turning a plan into cell writes ─────────────────────────────────
 
 describe("cell writes", () => {
@@ -598,7 +763,7 @@ describe("cell writes", () => {
   });
 
   it("zeroes only the rule-matched rows, over the full year", () => {
-    const writes = toZeroWrites(target, every("replace"), RULES);
+    const writes = toZeroWrites(target, every("replace"), ruleSet(RULES));
     const cleared = new Set(
       writes.map((write) => `${write.sheet}!${write.row}`)
     );
@@ -692,20 +857,20 @@ describe("cell writes", () => {
     // countZeroableCells IS the write list's length — the preview's number can
     // never drift from what lands.
     const options = only("clear", 11, 12);
-    expect(countZeroableCells(target, options, RULES)).toBe(
-      toZeroWrites(target, options, RULES).length
+    expect(countZeroableCells(target, options, ruleSet(RULES))).toBe(
+      toZeroWrites(target, options, ruleSet(RULES)).length
     );
-    expect(countZeroableCells(target, options, RULES)).toBe(
-      countZeroableCells(target, every("replace"), RULES) / 6
+    expect(countZeroableCells(target, options, ruleSet(RULES))).toBe(
+      countZeroableCells(target, every("replace"), ruleSet(RULES)) / 6
     );
   });
 
   it("clears nothing when the rule set is empty", () => {
-    expect(toZeroWrites(target, every("clear"), [])).toHaveLength(0);
+    expect(toZeroWrites(target, every("clear"), ruleSet([]))).toHaveLength(0);
   });
 
   it("clears what a custom rule set names, and only that", () => {
-    const writes = toZeroWrites(target, every("clear"), ["4140"]);
+    const writes = toZeroWrites(target, every("clear"), ruleSet(["4140"]));
     expect(new Set(writes.map((write) => `${write.sheet}!${write.row}`))).toEqual(
       new Set(["0010!13"])
     );
@@ -758,7 +923,7 @@ function guardPlan(
     filePath: "C:/tmp/guards.xlsx",
     outputs,
     options,
-    clearPrefixes,
+    clearRules: ruleSet(clearPrefixes),
     departmentNameByCode: NAMES,
     accountNameByCode: NAMES,
   });

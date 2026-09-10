@@ -20,6 +20,7 @@
  * position extra, not PII); a name never crosses this boundary.
  */
 
+import type { ClearRuleSet } from "../../shared/bstPush/ipc";
 import type Database from "better-sqlite3-multiple-ciphers";
 import { bareDept } from "../../shared/positions/comboKey";
 import {
@@ -49,8 +50,8 @@ type Db = InstanceType<typeof Database>;
 export interface StaffingOverviewDeps {
   getCalendar: CalendarGetter;
   getPositionDefaults: PositionDefaultsGetter;
-  /** The saved push clear rules, so the accounts basis plans its column as the Reports page does. */
-  clearPrefixes: readonly string[];
+  /** The saved push clear rules and exceptions, so the accounts basis plans its column as the Reports page does. */
+  clearRules: ClearRuleSet;
 }
 
 export interface StaffingOverviewOptions {

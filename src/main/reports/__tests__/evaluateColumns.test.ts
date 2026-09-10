@@ -39,7 +39,7 @@ import { POSITION_COUNT_ACCOUNT } from "../../../shared/positions/systemAccounts
 import { compileDefinition } from "../../../shared/reports/compile";
 import { MAPS_FREE_STAFFING } from "../../../shared/reports/__tests__/fixtures/mapsFreeStaffingDefinition";
 import type { ReportColumnSpec, SeriesColumnSpec } from "../../../shared/reports/columns";
-import { DEFAULT_CLEAR_PREFIXES } from "../../../shared/bstPush/ipc";
+import { DEFAULT_CLEAR_RULES } from "../../../shared/bstPush/ipc";
 import {
   EvaluateColumnsOptions,
   evaluateReportColumns,
@@ -208,7 +208,7 @@ function cacheAsBstRows(): BstRow[] {
 }
 
 const options = (over: Partial<EvaluateColumnsOptions> = {}): EvaluateColumnsOptions => ({
-  clearPrefixes: DEFAULT_CLEAR_PREFIXES,
+  clearRules: DEFAULT_CLEAR_RULES,
   ...over,
 });
 
@@ -280,7 +280,7 @@ describe("evaluateReportColumns", () => {
     seedBudgetImport("imp-1", [{ dept: "D0300", account: "A512000", bucket: 1, months: new Array(12).fill(5) }]);
     await recalc();
     const payrollOf = async (clearPrefixes: string[]) => {
-      const grid = await evaluateReportColumns(dbs(), SCOPE, "summary_pl", columns(), options({ clearPrefixes }));
+      const grid = await evaluateReportColumns(dbs(), SCOPE, "summary_pl", columns(), options({ clearRules: { prefixes: clearPrefixes, excludes: [] } }));
       const row = rowOf(grid, "Total Payroll");
       return { plan: grid.columns[1].values[row]![12], drift: grid.columns[1].drift! };
     };
@@ -386,8 +386,8 @@ describe("evaluateReportColumns", () => {
     seedBudgetImport("imp-1");
     await recalc("2026-09-08T00:00:00.000Z");
     const ref = { source: "bst" as const, bucket: { type: "BUDGET" } };
-    const first = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_PREFIXES).source;
-    expect(getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_PREFIXES).source).toBe(first);
+    const first = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_RULES).source;
+    expect(getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_RULES).source).toBe(first);
 
     valuesDb
       .prepare(`INSERT INTO buyout_rows (id, ou, scenario_id, updated_at) VALUES ('b1', ?, ?, 'now')`)
@@ -397,12 +397,12 @@ describe("evaluateReportColumns", () => {
     expect(stale.columns[1].run?.stale).toBe(true);
 
     await recalc("2026-09-09T00:00:00.000Z");
-    const second = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_PREFIXES).source;
+    const second = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_RULES).source;
     expect(second).not.toBe(first);
     expect(second.get("D0410", POSITION_COUNT_ACCOUNT)).toBeDefined();
 
     seedBudgetImport("imp-2");
-    const third = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_PREFIXES).source;
+    const third = getPlanSource(dbs(), SCOPE, scenarioId, YEAR, ref, DEFAULT_CLEAR_RULES).source;
     expect(third).not.toBe(second);
   });
 

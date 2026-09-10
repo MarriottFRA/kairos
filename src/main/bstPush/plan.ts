@@ -19,12 +19,15 @@ import {
   BstPushOptions,
   BstPushPlan,
   BUDGET_COL_START,
+  ClearMatcher,
+  ClearRuleSet,
   ClearScope,
   ClearScopeAccount,
   clearsColumn,
   ComboStatus,
+  compileClearRules,
   GuardMode,
-  matchesClearRules,
+  isClearMatcher,
   MonthAction,
   MonthPlanEntry,
   PUSH_MONTHS,
@@ -97,11 +100,11 @@ export interface BuildPlanInput {
   outputs: OutputAggRowDto[];
   options: BstPushOptions;
   /**
-   * Account prefixes the clear pass zeroes — the user's saved rule set, read
-   * from settings by the handler. Passed in rather than read here so this stays
-   * pure and the preview and the commit provably use the same list.
+   * The clear rules and their exceptions — the user's saved rule set, read from
+   * settings by the handler. Passed in rather than read here so this stays pure
+   * and the preview and the commit provably use the same list.
    */
-  clearPrefixes: string[];
+  clearRules: ClearRuleSet;
   /** Kairos department code ("D0410") → display name. */
   departmentNameByCode: Map<string, string>;
   /** Kairos account code ("A988112") → display name. */
@@ -140,6 +143,11 @@ function scaleMonths(
   return { months: out, wroteMask, skippedNonFinite };
 }
 
+/** Accept either a raw rule set or one already compiled for this plan. */
+function matcherFor(rules: ClearRuleSet | ClearMatcher): ClearMatcher {
+  return isClearMatcher(rules) ? rules : compileClearRules(rules);
+}
+
 /**
  * What the configured rules mean for this workbook.
  *
@@ -147,14 +155,17 @@ function scaleMonths(
  * then crosses that with the accounts Kairos produces. The two questions the
  * user has to answer — "what am I about to wipe?" and "what will these rules
  * never clean up?" — are the two halves of the same table, so they are built
- * together and shown together.
+ * together and shown together. The exceptions add a third column to it: what a
+ * rule reached but the user chose to keep.
  */
 export function buildClearScope(
   target: BstTarget,
   outputs: OutputAggRowDto[],
-  prefixes: string[],
+  rules: ClearRuleSet | ClearMatcher,
   accountNameByCode: Map<string, string>
 ): ClearScope {
+  const matcher = matcherFor(rules);
+  const { prefixes, excludes } = matcher.rules;
   const bstRowsByAccount = new Map<string, number>();
   const descriptionByAccount = new Map<string, string>();
 
@@ -171,11 +182,19 @@ export function buildClearScope(
   const writtenAccounts = new Set(
     outputs.map((row) => toBareAccount(row.account))
   );
+  const dataAccounts = new Set(
+    outputs
+      .filter((row) => row.months.some((value) => (Number(value) || 0) !== 0))
+      .map((row) => toBareAccount(row.account))
+  );
 
-  // Every rule gets an entry even when it matches nothing — "0 rows" is the
-  // feedback that tells the user their prefix was a typo.
+  // Every rule and every exception gets an entry even when it matches nothing —
+  // "0 rows" is the feedback that tells the user their prefix was a typo, or
+  // that their exception shields nothing any rule was going to clear.
   const ruleMatches: Record<string, number> = {};
   for (const prefix of prefixes) ruleMatches[prefix] = 0;
+  const excludeMatches: Record<string, number> = {};
+  for (const exclude of excludes) excludeMatches[exclude] = 0;
 
   const candidates = new Set<string>([
     ...bstRowsByAccount.keys(),
@@ -186,19 +205,23 @@ export function buildClearScope(
   const uncoveredWritten: string[] = [];
   const clearedNotWritten: string[] = [];
   let cellsPerClearedMonth = 0;
+  let rowsKept = 0;
 
   for (const bare of [...candidates].sort()) {
-    const matchedBy = matchesClearRules(bare, prefixes);
+    const { matchedBy, keptBy, clears } = matcher.resolve(bare);
     const bstRows = bstRowsByAccount.get(bare) ?? 0;
     const written = writtenAccounts.has(bare);
 
-    if (matchedBy) {
-      ruleMatches[matchedBy] += bstRows;
+    if (clears) {
+      ruleMatches[matchedBy!] += bstRows;
       cellsPerClearedMonth += bstRows;
+    } else if (matchedBy && keptBy) {
+      excludeMatches[keptBy] += bstRows;
+      rowsKept += bstRows;
     }
-    // An account nobody clears and nobody writes is just chart-of-accounts
-    // noise — the table is about the rules, not the workbook.
-    if (!matchedBy && !written) continue;
+    // An account nobody clears, nobody keeps and nobody writes is just
+    // chart-of-accounts noise — the table is about the rules, not the workbook.
+    if (!matchedBy && !keptBy && !written) continue;
 
     const code = `A${bare}`;
     accounts.push({
@@ -206,18 +229,25 @@ export function buildClearScope(
       name: accountNameByCode.get(code) ?? descriptionByAccount.get(bare) ?? "",
       bstRows,
       written,
+      hasData: dataAccounts.has(bare),
       matchedBy,
+      keptBy,
     });
 
-    if (written && !matchedBy) uncoveredWritten.push(code);
-    if (matchedBy && !written) clearedNotWritten.push(code);
+    // A kept account Kairos writes is not "uncovered": the user looked at it
+    // and said leave it, which is the opposite of an oversight.
+    if (written && !matchedBy && !keptBy) uncoveredWritten.push(code);
+    if (clears && !written) clearedNotWritten.push(code);
   }
 
   return {
     prefixes: [...prefixes],
+    excludes: [...excludes],
     accounts,
     ruleMatches,
+    excludeMatches,
     cellsPerClearedMonth,
+    rowsKept,
     uncoveredWritten,
     clearedNotWritten,
   };
@@ -263,10 +293,15 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     target,
     filePath,
     options,
-    clearPrefixes,
     departmentNameByCode,
     accountNameByCode,
   } = input;
+
+  // Compiled once and shared by the scope table and the zero pass below, so
+  // the two walks over the workbook resolve every account exactly once and
+  // can only ever agree with each other.
+  const matcher = compileClearRules(input.clearRules);
+  const clearPrefixes = matcher.rules.prefixes;
 
   const { rows: outputs, collisions } = mergeByCombo(input.outputs);
 
@@ -406,16 +441,11 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
     (a, b) => a.dept.localeCompare(b.dept) || a.account.localeCompare(b.account)
   );
 
-  const clearScope = buildClearScope(
-    target,
-    outputs,
-    clearPrefixes,
-    accountNameByCode
-  );
+  const clearScope = buildClearScope(target, outputs, matcher, accountNameByCode);
 
   // Tallied from the writer's own list rather than recomputed, so the number on
   // every month tile is by construction the number of cells that will change.
-  const zeroWrites = toZeroWrites(target, options, clearPrefixes);
+  const zeroWrites = toZeroWrites(target, options, matcher);
   const clearCellsByMonth = new Array<number>(PUSH_MONTHS).fill(0);
   for (const write of zeroWrites) {
     clearCellsByMonth[write.col - BUDGET_COL_START]++;
@@ -576,6 +606,39 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
         `cleared month.`
     );
   }
+  if (clearScope.rowsKept > 0 && anyClearMonths) {
+    const kept = clearScope.accounts.filter(
+      (account) => account.matchedBy && account.keptBy
+    );
+    const codes = kept.map((account) => account.account);
+    warnings.push(
+      `${clearScope.rowsKept} row(s) on ${codes.length} account(s) ` +
+        `(${codes.slice(0, 6).join(", ")}${codes.length > 6 ? ", …" : ""}) ` +
+        `are reached by a clear rule but kept by an exception ` +
+        `(${clearScope.excludes.join(", ")}), so the clear pass leaves ` +
+        `whatever the BST holds in them.`
+    );
+    // An exception stops the clearing, not the value pass. Say so per case,
+    // because the zero case is the one that quietly undoes the keep.
+    const anyWriteMonths = options.months.some(writesValues);
+    const withValues = kept.filter((a) => a.written && a.hasData).map((a) => a.account);
+    const onlyZeroes = kept.filter((a) => a.written && !a.hasData).map((a) => a.account);
+    if (anyWriteMonths && withValues.length > 0) {
+      warnings.push(
+        `Kairos has values for kept account(s) ${withValues.slice(0, 6).join(", ")}` +
+          `${withValues.length > 6 ? ", …" : ""}: they still land in every ` +
+          `replaced or added month. Keep only stops the clearing.`
+      );
+    }
+    if (anyWriteMonths && onlyZeroes.length > 0 && !options.skipUnusedCombos) {
+      warnings.push(
+        `Kairos holds only zeroes for kept account(s) ${onlyZeroes.slice(0, 6).join(", ")}` +
+          `${onlyZeroes.length > 6 ? ", …" : ""}, so replaced or added months ` +
+          `write those zeroes over them anyway — keeping them changes nothing ` +
+          `until "skip unused combos" is switched on in the push settings.`
+      );
+    }
+  }
   if (target.budgetBucketType && target.budgetBucketType !== "BUDGET") {
     warnings.push(
       `The file labels its first column block "${target.budgetBucketType}" ` +
@@ -628,9 +691,9 @@ export function buildPushPlan(input: BuildPlanInput): BstPushPlan {
 export function countZeroableCells(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[]
+  rules: ClearRuleSet | ClearMatcher
 ): number {
-  return toZeroWrites(target, options, prefixes).length;
+  return toZeroWrites(target, options, rules).length;
 }
 
 /** One cell the writer must change: sheet, row, 0-based column, value. */
@@ -644,8 +707,8 @@ export interface CellWrite {
 }
 
 /**
- * The cell writes for the clear pass: every row the rules match, in every
- * column the user marked `replace` or `clear`.
+ * The cell writes for the clear pass: every row the rules match and no
+ * exception keeps, in every column the user marked `replace` or `clear`.
  *
  * Column-scoped on purpose. Clearing used to be all twelve months whatever else
  * the push did, on the reasoning that a partial clear leaves the BST showing a
@@ -662,7 +725,7 @@ export interface CellWrite {
 export function toZeroWrites(
   target: BstTarget,
   options: BstPushOptions,
-  prefixes: string[]
+  rules: ClearRuleSet | ClearMatcher
 ): CellWrite[] {
   const columns: number[] = [];
   for (let m = 0; m < PUSH_MONTHS; m++) {
@@ -670,12 +733,12 @@ export function toZeroWrites(
   }
   if (columns.length === 0) return [];
 
+  const matcher = matcherFor(rules);
   const writes: CellWrite[] = [];
   for (const locations of target.bySheet.values()) {
     for (const location of locations) {
-      const ruleMatched =
-        prefixes.length > 0 &&
-        matchesClearRules(location.combo.slice(5), prefixes) !== null;
+      // One memoised lookup per row — the account repeats on every sheet.
+      const ruleMatched = matcher.clears(location.combo.slice(5));
       for (const col of columns) {
         const guard = cellGuard(location, col - BUDGET_COL_START, options);
         if (guard === "skip") continue;
@@ -706,11 +769,10 @@ export function toZeroWrites(
  * bug is not ported.
  */
 export function toCellWrites(plan: BstPushPlan, target: BstTarget): CellWrite[] {
-  const writes: CellWrite[] = toZeroWrites(
-    target,
-    plan.options,
-    plan.clearScope.prefixes
-  );
+  const writes: CellWrite[] = toZeroWrites(target, plan.options, {
+    prefixes: plan.clearScope.prefixes,
+    excludes: plan.clearScope.excludes,
+  });
 
   for (const row of plan.rows) {
     // A skipped row gets no VALUE writes — but the clear pass above is not

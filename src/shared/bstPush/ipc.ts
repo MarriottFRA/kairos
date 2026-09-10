@@ -266,6 +266,31 @@ export function isEmptyMonthPlan(months: MonthAction[]): boolean {
 export const DEFAULT_CLEAR_PREFIXES: string[] = ["5", "988", "97254"];
 
 /**
+ * The whole rule set: what to clear, and what to keep out of it.
+ *
+ * `prefixes` say which accounts the clear pass owns; `excludes` carve accounts
+ * back out of that, and ALWAYS win. Without them, "clear every 5xxxxx account
+ * except 510001" needed the user to spell out every other 5xxxxx family as its
+ * own rule; with them it is one rule and one exception. Both lists hold
+ * account-code prefixes, so an exception can be one account (`510001`) or a
+ * whole family (`5100`).
+ *
+ * "Always win" rather than longest-match is deliberate: an exception is a
+ * promise that the account is not this tool's to wipe, and a promise that a
+ * more specific clear rule could quietly override is not one the user can
+ * rely on.
+ */
+export interface ClearRuleSet {
+  prefixes: string[];
+  excludes: string[];
+}
+
+export const DEFAULT_CLEAR_RULES: ClearRuleSet = {
+  prefixes: [...DEFAULT_CLEAR_PREFIXES],
+  excludes: [],
+};
+
+/**
  * Accept a prefix in any form the user might type — "A512400", "512400", "5",
  * with stray spaces — and return the bare digits, or null when it is not a
  * usable prefix.
@@ -288,15 +313,27 @@ export function normalizeClearPrefixes(raw: unknown): string[] {
 }
 
 /**
- * Which rule covers this account, or null when none does. Returns the LONGEST
- * match so the UI can attribute a row to the most specific rule the user wrote
- * rather than to a broad one that happens to also cover it.
- *
- * @param bareAccount 6-digit account code, no "A" prefix.
+ * Clean an exception list. Unlike the clear rules, garbage lands on EMPTY, not
+ * on a default: there is no sensible default exception, and inventing one
+ * would silently stop something from being cleared.
  */
-export function matchesClearRules(
+export function normalizeClearExcludes(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return normalizeClearPrefixes(raw);
+}
+
+export function normalizeClearRules(raw: unknown): ClearRuleSet {
+  const source = (raw ?? {}) as Partial<ClearRuleSet>;
+  return {
+    prefixes: normalizeClearPrefixes(source.prefixes),
+    excludes: normalizeClearExcludes(source.excludes),
+  };
+}
+
+/** The longest prefix in `prefixes` that `bareAccount` starts with, or null. */
+function longestPrefixMatch(
   bareAccount: string,
-  prefixes: string[]
+  prefixes: readonly string[]
 ): string | null {
   let best: string | null = null;
   for (const prefix of prefixes) {
@@ -304,6 +341,92 @@ export function matchesClearRules(
     if (best === null || prefix.length > best.length) best = prefix;
   }
   return best;
+}
+
+/**
+ * Which rule covers this account, or null when none does. Returns the LONGEST
+ * match so the UI can attribute a row to the most specific rule the user wrote
+ * rather than to a broad one that happens to also cover it.
+ *
+ * Exceptions are NOT consulted here — this answers "does a clear rule reach
+ * it?", which the scope table needs on its own. Use `resolveClearRules` (or a
+ * compiled matcher) for the real verdict.
+ *
+ * @param bareAccount 6-digit account code, no "A" prefix.
+ */
+export function matchesClearRules(
+  bareAccount: string,
+  prefixes: readonly string[]
+): string | null {
+  return longestPrefixMatch(bareAccount, prefixes);
+}
+
+/** What the rule set says about one account. */
+export interface ClearDecision {
+  /** The clear rule that reaches the account, or null. */
+  matchedBy: string | null;
+  /** The exception that shields it, or null. Set whether or not a rule reaches it. */
+  keptBy: string | null;
+  /** The verdict: a rule reaches it and no exception shields it. */
+  clears: boolean;
+}
+
+export function resolveClearRules(
+  bareAccount: string,
+  rules: ClearRuleSet
+): ClearDecision {
+  const matchedBy = longestPrefixMatch(bareAccount, rules.prefixes);
+  const keptBy = longestPrefixMatch(bareAccount, rules.excludes);
+  return { matchedBy, keptBy, clears: matchedBy !== null && keptBy === null };
+}
+
+/**
+ * A rule set compiled for one pass over a workbook.
+ *
+ * A BST holds a few thousand addressable rows but only a hundred-odd distinct
+ * accounts, so every verdict is memoised on the bare account code: the prefix
+ * scans run once per account, and the zero pass — the hot loop of the whole
+ * push — pays a Map lookup per row. Build one per plan and hand it to every
+ * pass that needs a verdict, so the scope table and the writer can only ever
+ * agree.
+ */
+export interface ClearMatcher {
+  readonly rules: ClearRuleSet;
+  resolve(bareAccount: string): ClearDecision;
+  clears(bareAccount: string): boolean;
+}
+
+export function compileClearRules(rules: ClearRuleSet): ClearMatcher {
+  const frozen: ClearRuleSet = {
+    prefixes: [...rules.prefixes],
+    excludes: [...rules.excludes],
+  };
+  // No rules at all — the verdict is the same for every account.
+  const inert = frozen.prefixes.length === 0;
+  const memo = new Map<string, ClearDecision>();
+  const resolve = (bareAccount: string): ClearDecision => {
+    if (inert) return { matchedBy: null, keptBy: null, clears: false };
+    let decision = memo.get(bareAccount);
+    if (decision === undefined) {
+      decision = resolveClearRules(bareAccount, frozen);
+      memo.set(bareAccount, decision);
+    }
+    return decision;
+  };
+  return {
+    rules: frozen,
+    resolve,
+    clears: (bareAccount) => resolve(bareAccount).clears,
+  };
+}
+
+export function isClearMatcher(value: unknown): value is ClearMatcher {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as ClearMatcher).resolve === "function" &&
+    typeof (value as ClearMatcher).clears === "function"
+  );
 }
 
 // ── Recently used files ────────────────────────────────────────────────────
@@ -334,6 +457,8 @@ export {
 export interface BstPushConfig {
   /** Account prefixes the clear pass zeroes. */
   clearPrefixes: string[];
+  /** Account prefixes the clear pass must leave alone, whatever `clearPrefixes` say. */
+  clearExcludes: string[];
   /** BSTs this install has pushed into before, newest first. */
   recentFiles: RecentBstFile[];
   /** The month plan the user last used — the same selection tends to repeat. */
@@ -346,6 +471,7 @@ export interface BstPushConfig {
 
 export const DEFAULT_BST_PUSH_CONFIG: BstPushConfig = {
   clearPrefixes: [...DEFAULT_CLEAR_PREFIXES],
+  clearExcludes: [],
   recentFiles: [],
   months: [...DEFAULT_MONTH_PLAN],
   allocationRows: "skip",
@@ -358,6 +484,7 @@ export function normalizeBstPushConfig(raw: unknown): BstPushConfig {
   const source = (raw ?? {}) as Partial<BstPushConfig>;
   return {
     clearPrefixes: normalizeClearPrefixes(source.clearPrefixes),
+    clearExcludes: normalizeClearExcludes(source.clearExcludes),
     recentFiles: normalizeRecentFiles(source.recentFiles),
     months: normalizeMonthPlan(source.months),
     allocationRows: normalizeGuardMode(source.allocationRows),
@@ -484,21 +611,48 @@ export interface ClearScopeAccount {
   name: string;
   /** Rows this account occupies across the target's department sheets. */
   bstRows: number;
-  /** True when Kairos produces a value for it. */
+  /** True when Kairos produces a row for it — a zero row included. */
   written: boolean;
-  /** The rule prefix covering it, or null when no rule does. */
+  /**
+   * True when at least one of those rows holds a non-zero value. Matters for a
+   * kept account: an exception stops the clearing, not the value pass, so a
+   * written account is still overwritten in every Replace/Add month — with
+   * zeroes, when this is false, unless `skipUnusedCombos` is on.
+   */
+  hasData: boolean;
+  /**
+   * The clear rule reaching it, or null when none does. Reaching is not
+   * clearing: the account is zeroed only when `keptBy` is also null.
+   */
   matchedBy: string | null;
+  /** The exception shielding it from the rules, or null. */
+  keptBy: string | null;
 }
 
 /** What the configured clear rules mean for THIS target workbook. */
 export interface ClearScope {
   prefixes: string[];
-  /** Rule-matched-in-the-BST ∪ written-by-Kairos, sorted by account code. */
+  excludes: string[];
+  /**
+   * Reached-by-a-rule ∪ shielded-by-an-exception ∪ written-by-Kairos, sorted
+   * by account code.
+   */
   accounts: ClearScopeAccount[];
-  /** Prefix → BST rows it matches, for the rule chips. */
+  /**
+   * Prefix → BST rows it actually clears, NET of the exceptions, for the rule
+   * chips. Sums to `cellsPerClearedMonth`.
+   */
   ruleMatches: Record<string, number>;
-  /** Rows the rules match — one cell each, per cleared month. */
+  /**
+   * Exception → BST rows it shields — rows a rule reached and this exception
+   * kept. An exception no rule reaches shows 0, which is the cue that it is
+   * either a typo or redundant.
+   */
+  excludeMatches: Record<string, number>;
+  /** Rows the rules clear — one cell each, per cleared month. */
   cellsPerClearedMonth: number;
+  /** Rows a rule reached but an exception kept — per cleared month. */
+  rowsKept: number;
   /**
    * Kairos writes it, no rule covers it. Worth calling out: an overwrite lands
    * fine, but a value left by an EARLIER push into a row Kairos no longer
@@ -609,9 +763,9 @@ export const BST_PUSH_CHANNELS = {
   preview: "bstPush:preview",
   /** Re-read the previewed path, rebuild the plan, apply it. */
   commit: "bstPush:commit",
-  /** Read the persisted clear rules and last-used month plan. */
+  /** Read the persisted clear rules (and exceptions) and last-used month plan. */
   config: "bstPush:config",
-  /** Persist a changed rule set / month plan. */
+  /** Persist a changed rule set / exception list / month plan. */
   setConfig: "bstPush:setConfig",
   /** Show a written file (or its backup) in the OS file manager. */
   reveal: "bstPush:reveal",
