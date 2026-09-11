@@ -4,7 +4,7 @@
  */
 
 import { ipcRegistry } from "./registry";
-import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelCopyHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers, createReportsHandlers } from "./handlers";
+import { createAuthHandlers, createCalendarHandlers, createDataHandlers, createMappingTablesHandlers, createSettingsHandlers, createAppHandlers, createWindowHandlers, createPositionsHandlers, createPositionDefaultsHandlers, createBudgetImportHandlers, createBstPushHandlers, createLegacyImportHandlers, createOracleImportHandlers, createKpiDriversHandlers, createManualInputHandlers, createBlocksHandlers, createHotelCopyHandlers, createHotelClustersHandlers, createSocialSecurityHandlers, createAllocationsHandlers, createMaintenanceHandlers, createKairosSyncHandlers, createReportsHandlers, createSubmissionHandlers } from "./handlers";
 import { createAuthDebugHandlers } from "./handlers/authDebug"; // [AUTH-DEBUG]
 import { KAIROS_SYNC_CHANNELS } from "../shared/kairosSync/ipc";
 import {
@@ -138,6 +138,13 @@ export function initializeIpc(deps: {
   // cache + mapping tables + budget import). OU-gated like the Results page.
   const reportsHandlers = createReportsHandlers();
   Object.entries(reportsHandlers).forEach(([channel, handler]) => {
+    ipcRegistry.register(channel, handler, [ouGate]);
+  });
+
+  // Register budget submission handlers (build the staffing submission from
+  // both stores and send it to head office). OU-gated; needs the API client.
+  const submissionHandlers = createSubmissionHandlers(apiClient);
+  Object.entries(submissionHandlers).forEach(([channel, handler]) => {
     ipcRegistry.register(channel, handler, [ouGate]);
   });
 

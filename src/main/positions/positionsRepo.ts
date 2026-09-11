@@ -745,3 +745,29 @@ export function cloneScenarioValues(
 
   return { positions: copied };
 }
+
+/**
+ * Titles only, keyed by position id — the one PII-sidecar field that describes
+ * the post rather than the person (fieldSeed marks it non-PII for display).
+ * Narrow for the same reason getHiringDates is: the budget submission reads
+ * this and nothing else off position_pii, so a name or number can never ride
+ * along with it. The staffing statistics read does the same join in SQL.
+ */
+export function getTitles(
+  db: Db,
+  scope: OuScope,
+  scenarioId: string
+): Map<string, string> {
+  const rows = prepared(
+    db,
+    `SELECT position_id, title FROM position_pii
+      WHERE ou = ? AND scenario_id = ? AND deleted_at IS NULL`
+  ).all(scope.ou, scenarioId) as Array<{ position_id: string; title: string | null }>;
+
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    const title = (row.title ?? "").trim();
+    if (title) out.set(row.position_id, title);
+  }
+  return out;
+}

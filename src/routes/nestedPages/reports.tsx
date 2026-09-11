@@ -810,7 +810,7 @@ export default function Reports() {
       <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           {isSubmit ? (
-            <SubmitData hotelName={hotelName} />
+            <SubmitData ou={selectedHotelOu ?? ""} hotelName={hotelName} budgetYear={budgetYear} />
           ) : isOwnPath ? (
             selectedHotelOu && scenario ? (
               isBridge ? (

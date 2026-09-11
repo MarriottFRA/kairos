@@ -190,6 +190,10 @@ export type ReportWarningCode =
   | "PLAN_NOT_PUSHED"
   /** Nothing resolved a param; its definition default was used. */
   | "PARAM_DEFAULTED"
+  /** Budget submission: the plan has no active positions to send. */
+  | "NO_POSITIONS"
+  /** Budget submission: the posted effective week is not the derived one — recalculate. */
+  | "EFFECTIVE_WEEK_DRIFT"
   /** A pinned atom needs a scenario the column does not name. */
   | "SCENARIO_MISSING";
 

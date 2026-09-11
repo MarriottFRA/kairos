@@ -25,6 +25,7 @@ const ALLOWED_CHANNEL_PREFIXES = [
   "socialSecurity:",
   "allocations:",
   "reports:",
+  "submission:",
   "kairosSync:",
   "settings-",
   "settings:",
