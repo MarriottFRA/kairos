@@ -150,6 +150,14 @@ export interface PlanSyncCardProps {
    */
   onRedownload?: () => void;
   /**
+   * Publish everything that differs from what the server REALLY holds.
+   *
+   * The mirror image of `onRedownload`: for when the app says everything is
+   * published and the server disagrees. Upload-only — it never deletes anything
+   * on the server — and routes through the same review as Publish.
+   */
+  onResend?: () => void;
+  /**
    * A fresher `/department-ownership` answer than the status call carried.
    *
    * The status call derives `plan.delegation` from whatever was last cached,
@@ -195,6 +203,7 @@ export default function PlanSyncCard({
   onReconcile,
   onRebuildShadow,
   onRedownload,
+  onResend,
   delegationOverride,
   onTransfer,
   onDeleteFromServer,
@@ -659,6 +668,18 @@ export default function PlanSyncCard({
             />
           </MenuItem>
         )}
+        {plan.published &&
+          plan.onThisComputer &&
+          plan.readable &&
+          plan.writeScope !== "NONE" &&
+          onResend && (
+            <MenuItem onClick={runMore(onResend)} disabled={busy}>
+              <ListItemText
+                primary="Publish everything again"
+                secondary="When the server is missing changes this computer has. Never deletes anything on the server; you see what it sends first."
+              />
+            </MenuItem>
+          )}
         {plan.published && onRebuildShadow && (
           <MenuItem onClick={runMore(onRebuildShadow)} disabled={busy}>
             <ListItemText

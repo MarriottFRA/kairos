@@ -141,6 +141,14 @@ export interface ReviewDialogProps {
    * instead of hard-coding one domain's.
    */
   labels?: Record<string, string>;
+  /**
+   * A publish compared against what the server really holds, upload-only.
+   *
+   * Changes two sentences: an empty result means the server already matches
+   * this computer (not merely "nothing new since last time"), and a non-empty
+   * one is told plainly that nothing on the server will be deleted.
+   */
+  resend?: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -170,6 +178,7 @@ export default function ReviewDialog(props: ReviewDialogProps) {
     allowEmpty = false,
     replacesLabel = null,
     labels = TYPE_LABELS,
+    resend = false,
     onConfirm,
     onClose,
   } = props;
@@ -312,11 +321,21 @@ export default function ReviewDialog(props: ReviewDialogProps) {
             <Typography color="text.secondary">
               {direction === "pull"
                 ? "Nothing has changed on the server since your last download."
-                : "Everything here has already been published."}
+                : resend
+                  ? "The server already holds exactly what this computer has, row for row. There is nothing to send again."
+                  : "Everything here has already been published."}
             </Typography>
           )
         ) : (
           <Stack spacing={2}>
+            {resend && (
+              <Alert severity="info">
+                These rows differ from what the server actually holds, so they are
+                sent again. Nothing on the server is deleted: rows only the server
+                has stay as they are, and anything you deleted here goes through an
+                ordinary Publish.
+              </Alert>
+            )}
             <Box>
               <Typography variant="subtitle2" sx={{ mb: 1 }}>
                 {direction === "pull" ? "Will be downloaded" : "Will be sent"}

@@ -38,7 +38,11 @@ import { contentHash } from "../../main/kairosSync/hash";
 import { fetchOwnership, invalidateOwnership } from "../../main/kairosSync/ownership";
 import { pullPlan } from "../../main/kairosSync/pull";
 import { previewPublish, publishPlan } from "../../main/kairosSync/publish";
-import { rebuildShadowFromServer, reconcilePlan } from "../../main/kairosSync/reconcile";
+import {
+  fetchServerShadow,
+  rebuildShadowFromServer,
+  reconcilePlan,
+} from "../../main/kairosSync/reconcile";
 import { pullStructure, pushStructure } from "../../main/kairosSync/structure";
 import * as delegation from "../../main/kairosSync/delegation";
 import * as pii from "../../main/kairosSync/pii";
@@ -858,7 +862,7 @@ export function createKairosSyncHandlers(
 
     [KAIROS_SYNC_CHANNELS.previewPublish]: async (
       _event,
-      request: { ou: string; planId: string }
+      request: { ou: string; planId: string; resend?: boolean }
     ) => {
       return envelope(
         await attempt(async () => {
@@ -880,6 +884,11 @@ export function createKairosSyncHandlers(
             scope: writeScope,
             limits: limitsFrom(probe.heads),
             includePii: await piiAllowed(scope.ou),
+            // Resend previews against the server's real hashes, read fresh and
+            // held in memory — a cancelled review changes nothing stored.
+            serverShadow: request.resend
+              ? await fetchServerShadow(client, request.planId)
+              : undefined,
           });
           return {
             planId: request.planId,
@@ -903,13 +912,19 @@ export function createKairosSyncHandlers(
 
     [KAIROS_SYNC_CHANNELS.publish]: async (
       _event,
-      request: { ou: string; planId: string }
-    ) => envelope(await attempt(() => runPublish(request, false), request.planId)),
+      request: { ou: string; planId: string; resend?: boolean }
+    ) =>
+      envelope(
+        await attempt(
+          () => runPublish(request, request.resend ? "resend" : "normal"),
+          request.planId
+        )
+      ),
 
     [KAIROS_SYNC_CHANNELS.publishOverServer]: async (
       _event,
       request: { ou: string; planId: string }
-    ) => envelope(await attempt(() => runPublish(request, true), request.planId)),
+    ) => envelope(await attempt(() => runPublish(request, "overServer"), request.planId)),
 
     // -------------------------------------------------------- reconcile
 
@@ -1738,10 +1753,16 @@ export function createKairosSyncHandlers(
    * departments. Everything else genuinely is the user's call, which is why this
    * exists as a choice offered next to "download and lose local" rather than as
    * a hidden default.
+   *
+   * `resend` is the gentler sibling, offered from the card's More menu when the
+   * app says everything is published and the server disagrees. It compares
+   * against the server's real hashes too, but in memory, and it is upload-only:
+   * no purge and no tombstone, so nothing the server holds can be deleted by it.
+   * See `PublishOptions.serverShadow`.
    */
   async function runPublish(
     request: { ou: string; planId: string },
-    adoptServerHashes: boolean
+    mode: "normal" | "overServer" | "resend"
   ) {
     const scope = resolveOuScope(request.ou);
     const db = secureDb();
@@ -1754,7 +1775,7 @@ export function createKairosSyncHandlers(
     const writeScope = writeScopeFor(request.planId, head);
     assertCanPublish(request.planId, writeScope, head);
 
-    if (adoptServerHashes) {
+    if (mode === "overServer") {
       await rebuildShadowFromServer(db, client, request.planId);
     }
 
@@ -1765,6 +1786,8 @@ export function createKairosSyncHandlers(
       scope: writeScope,
       limits: limitsFrom(probe.heads),
       includePii: await piiAllowed(scope.ou),
+      serverShadow:
+        mode === "resend" ? await fetchServerShadow(client, request.planId) : undefined,
     });
 
     // A publish that got through means the delegation is working again, so the

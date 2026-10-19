@@ -53,7 +53,7 @@ import {
   ServerOnlyRow,
   CommitEntity,
 } from "../../shared/kairosSync/protocol";
-import { buildManifest, getSyncState, writeShadow } from "./repo";
+import { ShadowRow, buildManifest, getSyncState, shadowKey, writeShadow } from "./repo";
 
 type Db = InstanceType<typeof Database>;
 
@@ -207,22 +207,42 @@ export async function rebuildShadowFromServer(
   client: KairosClient,
   planId: string
 ): Promise<number> {
+  const rows = await fetchServerManifest(client, planId);
+  writeShadow(db, planId, rows, new Date().toISOString());
+  return rows.length;
+}
+
+/**
+ * `GET /manifest` — every row the server holds for this caller, with its hash.
+ *
+ * The PII sidecar is included (see the guide): a manifest without it would
+ * report every employee record as absent and republish all of them.
+ */
+export async function fetchServerManifest(
+  client: KairosClient,
+  planId: string
+): Promise<ShadowRow[]> {
   const response = await client.get<ManifestDiffResponse>(
     `/plans/${encodeURIComponent(planId)}/manifest`
   );
+  return response.serverOnly.map(([entityType, entityId, hash, serverSeq, deleted]) => ({
+    entityType: String(entityType),
+    entityId: String(entityId),
+    hash: String(hash ?? ""),
+    serverSeq: Number(serverSeq ?? 0),
+    deleted: deleted === 1,
+  }));
+}
 
-  writeShadow(
-    db,
-    planId,
-    response.serverOnly.map(([entityType, entityId, hash, serverSeq, deleted]) => ({
-      entityType: String(entityType),
-      entityId: String(entityId),
-      hash: String(hash ?? ""),
-      serverSeq: Number(serverSeq ?? 0),
-      deleted: deleted === 1,
-    })),
-    new Date().toISOString()
-  );
-
-  return response.serverOnly.length;
+/**
+ * The server's manifest keyed like the shadow, for a publish that must compare
+ * against what the server really holds without overwriting what we stored.
+ * See `PublishOptions.serverShadow`.
+ */
+export async function fetchServerShadow(
+  client: KairosClient,
+  planId: string
+): Promise<Map<string, ShadowRow>> {
+  const rows = await fetchServerManifest(client, planId);
+  return new Map(rows.map((row) => [shadowKey(row.entityType, row.entityId), row]));
 }

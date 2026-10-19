@@ -68,6 +68,7 @@ import {
   countShadow,
   getSyncState,
   loadShadowMap,
+  ShadowRow,
   shadowKey,
   updateSyncState,
   writeShadow,
@@ -100,6 +101,59 @@ export interface PublishOptions {
   includePii?: boolean;
   /** Preview only: collect and chunk, send nothing. */
   dryRun?: boolean;
+  /**
+   * Resend mode: diff against what the server ACTUALLY holds, upload-only.
+   *
+   * The server's manifest, keyed like the shadow, fetched fresh for this one
+   * publish. Supplied, it replaces the stored shadow as the thing local rows are
+   * compared against — so a row this computer believes it published, and the
+   * server holds differently, is sent again. That is the repair for "the app
+   * says everything is published and the server disagrees", which the stored
+   * shadow can never detect because it IS the belief that is wrong.
+   *
+   * Held in memory, never written over the stored shadow. A preview that is then
+   * cancelled leaves nothing behind; only the rows the server confirms afterwards
+   * move the shadow, exactly as on an ordinary publish.
+   *
+   * And it never deletes anything server-side. Rows the server has that this
+   * computer does not are not purged — a local copy can be the incomplete one,
+   * and mirroring it would wipe whatever it never received. Local deletions are
+   * left out too; those go through an ordinary publish, whose review lists them.
+   */
+  serverShadow?: Map<string, ShadowRow>;
+}
+
+/**
+ * What a publish would send. The one definition, shared by the preview and the
+ * real thing so the review can never describe a different publish.
+ */
+function plannedCommits(
+  entities: LocalEntity[],
+  publishable: LocalEntity[],
+  shadow: Map<string, ShadowRow>,
+  collected: { scannedTypes: ReadonlySet<string>; unpublishable: UnpublishableRow[] },
+  options: PublishOptions
+): CommitEntity[] {
+  if (options.serverShadow) {
+    // The manifest is the server's own complete list for this caller, so an
+    // absent entry really does mean the server has never held the row.
+    return toCommitEntities(publishable, shadow, { shadowIsComplete: true }).filter(
+      (entity) => !entity.deleted
+    );
+  }
+  return [
+    ...toCommitEntities(publishable, shadow, {
+      shadowIsComplete: shadowIsComplete(shadow.size, options.baseVersion),
+    }),
+    // The FULL collected set, not `publishable` — a row withheld by write scope
+    // is one we hold and may not send, which is the opposite of one we deleted.
+    // See the header on `purgesFor`.
+    ...purgesFor(entities, shadow, {
+      scannedTypes: collected.scannedTypes,
+      unpublishable: collected.unpublishable,
+      canWriteStructure: options.scope.canWriteStructure,
+    }),
+  ];
 }
 
 export interface PublishResult {
@@ -189,20 +243,14 @@ export function previewPublish(
     includePii: options.includePii,
   });
   const { publishable, withheld } = filterToWriteScope(entities, options.scope);
-  const shadow = loadShadowMap(db, options.planId);
-  const commits = [
-    ...toCommitEntities(publishable, shadow, {
-      shadowIsComplete: shadowIsComplete(shadow.size, options.baseVersion),
-    }),
-    // The FULL collected set, not `publishable` — a row withheld by write scope
-    // is one we hold and may not send, which is the opposite of one we deleted.
-    // See the header on `purgesFor`.
-    ...purgesFor(entities, shadow, {
-      scannedTypes,
-      unpublishable,
-      canWriteStructure: options.scope.canWriteStructure,
-    }),
-  ];
+  const shadow = options.serverShadow ?? loadShadowMap(db, options.planId);
+  const commits = plannedCommits(
+    entities,
+    publishable,
+    shadow,
+    { scannedTypes, unpublishable },
+    options
+  );
 
   const byType: Record<string, number> = {};
   for (const entity of commits) {
@@ -264,18 +312,14 @@ export async function publishPlan(
     includePii: options.includePii,
   });
   const { publishable, withheld } = filterToWriteScope(entities, options.scope);
-  const shadow = loadShadowMap(db, planId);
-
-  const updates = toCommitEntities(publishable, shadow, {
-    shadowIsComplete: shadowIsComplete(shadow.size, options.baseVersion),
-  });
-  // The FULL collected set — see the header on `purgesFor`.
-  const purges = purgesFor(entities, shadow, {
-    scannedTypes,
-    unpublishable,
-    canWriteStructure: options.scope.canWriteStructure,
-  });
-  const commits = [...updates, ...purges];
+  const shadow = options.serverShadow ?? loadShadowMap(db, planId);
+  const commits = plannedCommits(
+    entities,
+    publishable,
+    shadow,
+    { scannedTypes, unpublishable },
+    options
+  );
 
   const result: PublishResult = {
     planId,

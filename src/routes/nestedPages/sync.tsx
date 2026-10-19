@@ -177,6 +177,11 @@ interface PublishReview {
   chunks: number;
   withheld: number;
   unclassified: number;
+  /**
+   * Resend: compared against what the server really holds, upload-only.
+   * Previewed and applied with the same flag. See `PublishOptions.serverShadow`.
+   */
+  resend: boolean;
 }
 
 /**
@@ -543,10 +548,11 @@ export default function Sync() {
   // ---------------------------------------------------------- publish
 
   const handlePreviewPublish = useCallback(
-    async (plan: PlanSyncStatus) => {
+    async (plan: PlanSyncStatus, options: { resend?: boolean } = {}) => {
       if (!ou) return;
+      const resend = options.resend === true;
       await run(plan.planId, async () => {
-        const result = await previewPublishCall(ou, plan.planId);
+        const result = await previewPublishCall(ou, plan.planId, { resend });
         if (syncFailed(result)) {
           fail(result.error.message);
           return;
@@ -558,10 +564,23 @@ export default function Sync() {
           chunks: result.data.chunks,
           withheld: result.data.withheld.length,
           unclassified: result.data.unclassified.length,
+          resend,
         });
       });
     },
     [ou, run, fail]
+  );
+
+  /**
+   * "Publish everything again" — for when the app says everything is published
+   * and the server disagrees. Same review as Publish; the difference is what the
+   * rows are compared against. Never deletes anything on the server.
+   */
+  const handleResend = useCallback(
+    (plan: PlanSyncStatus): void => {
+      void handlePreviewPublish(plan, { resend: true });
+    },
+    [handlePreviewPublish]
   );
 
   /**
@@ -597,7 +616,9 @@ export default function Sync() {
   const handleConfirmPublish = useCallback(async () => {
     if (!ou || !publishReview) return;
     await run(publishReview.planId, async () => {
-      const result = await publishCall(ou, publishReview.planId);
+      const result = await publishCall(ou, publishReview.planId, {
+        resend: publishReview.resend,
+      });
       if (syncFailed(result)) {
         // A 423 is a state, not a failure: an administrator is holding the plan.
         setToast({
@@ -1342,6 +1363,7 @@ export default function Sync() {
           onReconcile={() => void handleReconcile(plan)}
           onRebuildShadow={() => void handleRebuildShadow(plan)}
           onRedownload={() => handleRedownload(plan)}
+          onResend={() => handleResend(plan)}
           onOpenDelegation={(delegationId) =>
             // The hint saves the Delegation page a round trip and, more to the
             // point, lets it name the plan before anything renders. Matched on
@@ -1514,7 +1536,8 @@ export default function Sync() {
 
       <ReviewDialog
         open={publishReview !== null}
-        title="Publish changes"
+        title={publishReview?.resend ? "Publish everything again" : "Publish changes"}
+        resend={publishReview?.resend ?? false}
         direction="publish"
         busy={busyPlan !== null}
         byType={publishReview?.byType ?? {}}

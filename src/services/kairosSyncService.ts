@@ -232,13 +232,20 @@ export function pull(
 }
 
 /** What a publish would send, what it withholds, and what has no department. */
+/**
+ * `resend` compares against what the server really holds rather than what this
+ * computer believes it published, and is upload-only. Pass the same flag to
+ * `publish` afterwards.
+ */
 export function previewPublish(
   ou: string,
-  planId: string
+  planId: string,
+  options: { resend?: boolean } = {}
 ): Promise<SyncOutcome<PublishPreviewResponse>> {
   return call<PublishPreviewResponse>(KAIROS_SYNC_CHANNELS.previewPublish, {
     ou,
     planId,
+    resend: options.resend === true,
   });
 }
 
@@ -251,9 +258,14 @@ export function previewPublish(
  */
 export function publish(
   ou: string,
-  planId: string
+  planId: string,
+  options: { resend?: boolean } = {}
 ): Promise<SyncOutcome<PublishResponse>> {
-  return call<PublishResponse>(KAIROS_SYNC_CHANNELS.publish, { ou, planId });
+  return call<PublishResponse>(KAIROS_SYNC_CHANNELS.publish, {
+    ou,
+    planId,
+    resend: options.resend === true,
+  });
 }
 
 /** Reconcile the shadow against the server. Weekly, and after any local rebuild. */
