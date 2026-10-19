@@ -304,7 +304,15 @@ async function runPull(
 
     // THE watermark write. Once, here, after the last page — see the module
     // docstring. Nothing else in this feature advances it.
-    completePull(db, planId, last.toVersion, last.syncEpoch, new Date().toISOString());
+    //
+    // The scope rides with it. It is the ONLY record of what this copy was
+    // pulled under: `scopeKind`/`scopeDepartments` below are also refreshed by
+    // every probe, so comparing against them to detect a widened grant always
+    // compared the server's answer with itself.
+    completePull(db, planId, last.toVersion, last.syncEpoch, new Date().toISOString(), {
+      kind: last.scope.kind,
+      departments: last.scope.departments,
+    });
     updateSyncState(db, planId, {
       structureVersion: last.structureVersion,
       scopeKind: last.scope.kind,

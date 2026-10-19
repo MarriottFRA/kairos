@@ -8,7 +8,37 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { readScopeWidened } from "../scopeWidening";
+import { pulledScope, readScopeWidened } from "../scopeWidening";
+
+describe("pulledScope", () => {
+  it("reads the PULLED columns and ignores the current ones", () => {
+    // The two sets of columns move at different times, and reading the wrong
+    // pair is the bug this helper exists to make impossible: the current scope
+    // is refreshed by the very probe that carries the widening.
+    expect(
+      pulledScope({
+        scopeKind: "FULL",
+        scopeDepartments: null,
+        pulledScopeKind: "PARTIAL",
+        pulledScopeDepartments: ["D0010"],
+      } as never)
+    ).toEqual({ scopeKind: "PARTIAL", scopeDepartments: ["D0010"] });
+  });
+
+  it("passes null and undefined through", () => {
+    expect(pulledScope(null)).toBeNull();
+    expect(pulledScope(undefined)).toBeNull();
+  });
+
+  it("keeps a never-pulled row unprovable", () => {
+    expect(
+      readScopeWidened(
+        pulledScope({ pulledScopeKind: null, pulledScopeDepartments: null }),
+        { scopeKind: "FULL", departments: null }
+      )
+    ).toBe(false);
+  });
+});
 
 describe("readScopeWidened", () => {
   it("fires when a partial scope becomes full", () => {

@@ -55,6 +55,7 @@ import {
   adminDownloads,
   adminHotels,
   adminPlans,
+  releaseLease,
 } from "../../services/kairosSyncService";
 import { syncFailed } from "../../shared/kairosSync/ipc";
 import {
@@ -65,6 +66,7 @@ import {
 } from "../../shared/kairosSync/protocol";
 import { useAdminTools } from "../../hooks/useAdminTools";
 import ScopeTraceDialog from "../../components/sync/ScopeTraceDialog";
+import { ReleaseLeaseDialog } from "../../components/sync/LeaseDialog";
 
 type TabKey = "hotels" | "plans" | "downloads" | "audit";
 
@@ -84,6 +86,19 @@ export default function AdminPage() {
   const [scopeFor, setScopeFor] = useState<{ userId: number; planId: string } | null>(
     null
   );
+  /**
+   * The one write on this page: handing a support lease back.
+   *
+   * Everything else that changes a plan stays on the Sync page beside the plan,
+   * because acting on a plan you are not looking at is how the wrong hotel gets
+   * locked. Releasing is the safe direction of that same act — it unlocks — and
+   * it has to live somewhere that lists EVERY leased plan: the Sync page shows
+   * only the selected hotel, and an administrator who took a lease and then
+   * rebuilt their database used to have no card to release it from at all.
+   */
+  const [releaseFor, setReleaseFor] = useState<AdminPlanRow | null>(null);
+  const [releasing, setReleasing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!admin.visible) return;
@@ -133,6 +148,34 @@ export default function AdminPage() {
     void refresh();
   }, [refresh]);
 
+  const handleReleaseLease = useCallback(
+    async (summary: string) => {
+      if (!releaseFor) return;
+      setReleasing(true);
+      setError(null);
+      try {
+        const result = await releaseLease(releaseFor.ou, releaseFor.id, summary);
+        if (syncFailed(result)) {
+          setError(result.error.message);
+          return;
+        }
+        setReleaseFor(null);
+        setNotice(
+          result.data.entitiesChanged > 0
+            ? `Released ${releaseFor.label} (${releaseFor.ou}). The plan moved ` +
+                `${result.data.versionAtAcquire} → ${result.data.version}; everyone ` +
+                "at the hotel will re-download it."
+            : `Released ${releaseFor.label} (${releaseFor.ou}). Nothing changed while ` +
+                "it was held, so nobody has to re-download."
+        );
+        await refresh();
+      } finally {
+        setReleasing(false);
+      }
+    },
+    [releaseFor, refresh]
+  );
+
   if (!admin.visible) {
     return (
       <Box sx={{ p: 3 }}>
@@ -158,8 +201,9 @@ export default function AdminPage() {
       </Stack>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Read-only. Leases, ownership transfer, archiving and deletion live on the
-        Sync page beside the plan they act on.
+        Read-only, with one exception: a support lease can be released from the
+        Plans tab, whichever hotel it is at. Taking a lease, ownership transfer,
+        archiving and deletion live on the Sync page beside the plan they act on.
       </Typography>
 
       <Tabs value={tab} onChange={(_event, next) => setTab(next as TabKey)} sx={{ mb: 2 }}>
@@ -173,6 +217,11 @@ export default function AdminPage() {
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
+        </Alert>
+      )}
+      {notice && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice(null)}>
+          {notice}
         </Alert>
       )}
 
@@ -251,6 +300,18 @@ export default function AdminPage() {
                         )}
                       </TableCell>
                       <TableCell align="right">
+                        {plan.leaseHeldBy && (
+                          <Tooltip title="Hand the plan back to its owner. Works on a colleague's lease too, and is audited as such.">
+                            <Button
+                              size="small"
+                              color="warning"
+                              onClick={() => setReleaseFor(plan)}
+                              disabled={releasing}
+                            >
+                              Release lease
+                            </Button>
+                          </Tooltip>
+                        )}
                         <Button
                           size="small"
                           onClick={() =>
@@ -374,6 +435,16 @@ export default function AdminPage() {
         userId={scopeFor?.userId ?? null}
         planId={scopeFor?.planId ?? null}
         onClose={() => setScopeFor(null)}
+      />
+
+      <ReleaseLeaseDialog
+        open={releaseFor !== null}
+        busy={releasing}
+        planLabel={
+          releaseFor ? `${releaseFor.label} · ${releaseFor.year} · ${releaseFor.ou}` : ""
+        }
+        onSubmit={(summary) => void handleReleaseLease(summary)}
+        onClose={() => setReleaseFor(null)}
       />
     </Box>
   );

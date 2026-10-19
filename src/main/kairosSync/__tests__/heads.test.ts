@@ -16,8 +16,9 @@ import { describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3-multiple-ciphers";
 import { KAIROS_SYNC_TABLES_SQL } from "../schema";
 import { fetchHeads } from "../heads";
-import { getOuState, getSyncState } from "../repo";
+import { completePull, ensureSyncState, getOuState, getSyncState } from "../repo";
 import { SyncHeads } from "../../../shared/kairosSync/protocol";
+import { pulledScope, readScopeWidened } from "../../../shared/kairosSync/scopeWidening";
 
 type Db = InstanceType<typeof Database>;
 
@@ -268,6 +269,59 @@ describe("fetchHeads", () => {
       await fetchHeads(db, client, OU);
 
       expect(getSyncState(db, LOCKED_PLAN)?.revokedJson).not.toBeNull();
+    });
+  });
+
+  /**
+   * The probe must not overwrite the record of what a copy was pulled under.
+   *
+   * A grant change bumps `authzVersion`, which is in the heads ETag, so the
+   * probe that first carries a wider scope is always a 200 — and it used to
+   * write that scope into the same columns the pull had recorded. Both sides of
+   * the widening comparison then held the server's current answer, and the one
+   * case the detector was built for never fired: the second department's older
+   * rows and PII never came down.
+   */
+  describe("the scope a copy was pulled under", () => {
+    /** The server now offers the whole plan to a caller who pulled one department. */
+    const WIDENED: SyncHeads = {
+      ...HEADS,
+      plans: [{ ...HEADS.plans[0], scopeKind: "FULL", departments: null }],
+    };
+
+    it("survives a 200 that carries a wider scope", async () => {
+      const db = makeDb();
+      ensureSyncState(db, PLAN, OU);
+      completePull(db, PLAN, 10, 0, "2026-10-19T09:00:00.000Z", {
+        kind: "PARTIAL",
+        departments: ["D0010"],
+      });
+      const { client } = stubClient([{ status: 200 }], WIDENED);
+
+      const result = await fetchHeads(db, client, OU);
+
+      const state = getSyncState(db, PLAN);
+      // The probe refreshed the CURRENT scope, as it should...
+      expect(state?.scopeKind).toBe("FULL");
+      // ...and left the PULLED scope alone, which is the whole point.
+      expect(state?.pulledScopeKind).toBe("PARTIAL");
+      expect(state?.pulledScopeDepartments).toEqual(["D0010"]);
+      // So the comparison the status call and `runPull` make still fires.
+      expect(readScopeWidened(pulledScope(state), result.heads?.plans[0])).toBe(true);
+    });
+
+    it("is unprovable, and therefore silent, before the first complete pull", async () => {
+      // A state row made by the probe alone has never been pulled. Firing here
+      // would full-pull every plan on the machine on the first probe after
+      // upgrading, which is the failure the null is there to prevent.
+      const db = makeDb();
+      const { client } = stubClient([{ status: 200 }], WIDENED);
+
+      const result = await fetchHeads(db, client, OU);
+
+      const state = getSyncState(db, PLAN);
+      expect(state?.pulledScopeKind).toBeNull();
+      expect(readScopeWidened(pulledScope(state), result.heads?.plans[0])).toBe(false);
     });
   });
 });

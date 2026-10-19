@@ -16,10 +16,23 @@
  * name the plan or say in which direction. Re-pulling every plan at the hotel
  * on any grant change anywhere is not an answer.
  *
- * The scope itself is the signal, and we already store it: `pull.ts` records
- * `scopeKind`/`scopeDepartments` at the end of every pull, and `heads.ts`
- * refreshes them on every probe. Comparing the two is enough, needs no request,
- * and is exact.
+ * The scope itself is the signal, and the comparison needs two copies of it that
+ * move at DIFFERENT times: what the copy was pulled under, and what the server
+ * offers now. `completePull` records the first in `pulledScopeKind` /
+ * `pulledScopeDepartments` and nothing else writes them; the head carries the
+ * second. Comparing the two is enough, needs no request, and is exact.
+ *
+ * ## Why the pulled scope has its own columns
+ *
+ * It used to be read from `scopeKind`/`scopeDepartments`, which `heads.ts` also
+ * refreshes on every 200. A grant change bumps `authzVersion`, which is folded
+ * into the heads ETag, so the probe that first carried the wider scope was
+ * always a 200 — and it overwrote the stored scope before `runPull` or the
+ * status call got to compare. Both sides then held the server's current answer
+ * and this function said "not widened" in exactly the case it was written for.
+ * Symptom: "I granted a second department and its rows and people never came
+ * down." `pulledScope` below reads the right columns so no caller can repeat
+ * the mistake.
  *
  * ## The case this exists for
  *
@@ -45,10 +58,29 @@
  * one this fixes.
  */
 
-/** The scope we last pulled under, as `getSyncState` returns it. */
+/** The scope we last pulled under. */
 export interface StoredScope {
   scopeKind: string | null;
   scopeDepartments: string[] | null;
+}
+
+/**
+ * The pulled scope off a sync-state row, shaped for `readScopeWidened`.
+ *
+ * Reads `pulledScope*`, never `scope*` — see the module docstring for why the
+ * two must not be confused. Null in, null out.
+ */
+export function pulledScope(
+  state:
+    | { pulledScopeKind: string | null; pulledScopeDepartments: string[] | null }
+    | null
+    | undefined
+): StoredScope | null {
+  if (!state) return null;
+  return {
+    scopeKind: state.pulledScopeKind,
+    scopeDepartments: state.pulledScopeDepartments,
+  };
 }
 
 /** The scope the server is offering now, as it rides on a `PlanHead`. */

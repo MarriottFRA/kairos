@@ -35,8 +35,20 @@ export interface SyncState {
   piiWatermark: number;
   structureVersion: number;
   relation: string | null;
+  /**
+   * The server's CURRENT answer about this caller's read scope — refreshed by
+   * every probe, and (as the WRITE set) by the ownership cache. Display only.
+   */
   scopeKind: string | null;
   scopeDepartments: string[] | null;
+  /**
+   * The read scope the local copy was last pulled under. Written by
+   * `completePull` alone, so it survives every probe in between and can be
+   * compared against the head to detect a widened grant. Null until the first
+   * complete pull on this build.
+   */
+  pulledScopeKind: string | null;
+  pulledScopeDepartments: string[] | null;
   structureEditable: boolean;
   ownershipEtag: string | null;
   ownershipJson: string | null;
@@ -73,6 +85,8 @@ function toState(row: Record<string, unknown>): SyncState {
     relation: (row.relation as string) ?? null,
     scopeKind: (row.scope_kind as string) ?? null,
     scopeDepartments: parseList(row.scope_departments),
+    pulledScopeKind: (row.pulled_scope_kind as string) ?? null,
+    pulledScopeDepartments: parseList(row.pulled_scope_departments),
     structureEditable: row.structure_editable === 1,
     ownershipEtag: (row.ownership_etag as string) ?? null,
     ownershipJson: (row.ownership_json as string) ?? null,
@@ -185,8 +199,32 @@ export function completePull(
   planId: string,
   toVersion: number,
   syncEpoch: number,
-  at: string
+  at: string,
+  /**
+   * The read scope the server applied to this pull, from the last page's
+   * `scope`. Lands in `pulled_scope_*` — the columns nothing else writes — so
+   * the next probe can tell whether the grant has widened since. See
+   * `scopeWidening.ts`.
+   */
+  scope?: { kind: string; departments: string[] | null }
 ): void {
+  if (scope) {
+    prepared(
+      db,
+      `UPDATE kairos_sync_state
+          SET watermark = ?, sync_epoch = ?, last_pulled_at = ?,
+              pulled_scope_kind = ?, pulled_scope_departments = ?
+        WHERE plan_id = ?`
+    ).run(
+      toVersion,
+      syncEpoch,
+      at,
+      scope.kind,
+      scope.departments === null ? null : JSON.stringify(scope.departments),
+      planId
+    );
+    return;
+  }
   prepared(
     db,
     `UPDATE kairos_sync_state

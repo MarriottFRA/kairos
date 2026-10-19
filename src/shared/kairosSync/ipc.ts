@@ -583,6 +583,42 @@ export interface PullRequest extends PlanRequest {
    * status call reported as `twinPlanId`, and only after the rows have landed.
    */
   replaceLocalPlanId?: string | null;
+  /**
+   * Download the whole plan again from `since=0`, both streams, ignoring the
+   * watermarks. The repair for a copy that is incomplete for a reason no
+   * counter records. The server's copy wins on every row it knows about; rows
+   * only this computer holds survive.
+   */
+  full?: boolean;
+}
+
+/**
+ * What the grid consults to decide what is editable, in one answer.
+ *
+ * The ownership body is the authority on departments; the other two fields
+ * carry what it leaves out. See the `departmentOwnership` handler for why each
+ * of them used to be a grid that stayed editable when it should not have.
+ */
+export interface PlanAccessAnswer {
+  /** From `/department-ownership`. Null when the server has never answered. */
+  ownership: DepartmentOwnership | null;
+  /**
+   * The plan's state from the probe — `ACTIVE`, `ARCHIVED`,
+   * `LOCKED_BY_SUPPORT`. Null when the probe failed or does not list the plan.
+   */
+  planState: string | null;
+  /**
+   * An EXCLUSIVE support lease is held on this plan by somebody other than this
+   * caller. The server answers 423 to every commit meanwhile; the grid should
+   * say so before the user types rather than after they publish.
+   */
+  lockedBySupport: boolean;
+  /**
+   * The caller's own delegation flags, for a DELEGATE. Null for anybody else,
+   * and null when the lookup failed — which a DELEGATE's grid reads as
+   * read-only, never as "no opinion".
+   */
+  grant: { canEdit: boolean; canAddRows: boolean } | null;
 }
 
 export interface GrantRequest extends PlanRequest {

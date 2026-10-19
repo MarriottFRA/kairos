@@ -70,6 +70,7 @@ import {
 import {
   KAIROS_SYNC_CHANNELS,
   PendingByDepartment,
+  PlanAccessAnswer,
   PlanSyncStatus,
   SyncError,
   SyncOutcome,
@@ -96,7 +97,7 @@ import {
   RELATION_PLAIN,
   WriteScopeKind,
 } from "../../shared/kairosSync/relations";
-import { readScopeWidened } from "../../shared/kairosSync/scopeWidening";
+import { pulledScope, readScopeWidened } from "../../shared/kairosSync/scopeWidening";
 import {
   NO_DEPARTMENT_WRITE,
   departmentWritePolicy,
@@ -596,9 +597,16 @@ export function createKairosSyncHandlers(
            * and it is called ONLY when there is such a plan, so the steady state
            * where every plan is already local costs nothing extra. ARCHIVED
            * plans are left out: they are not something to start working on.
+           *
+           * Every other state stays in — `LOCKED_BY_SUPPORT` above all. That is
+           * the state an EXCLUSIVE lease puts a plan in, and this filter used to
+           * admit `ACTIVE` alone, so an administrator who took a lease and then
+           * rebuilt their database had the plan vanish from this page. The lease
+           * is fetched per listed plan and released from the card, so there was
+           * then no way to hand it back from here at all.
            */
           const missingHeads = (heads?.plans ?? []).filter(
-            (head) => !localIds.has(head.id) && head.state === "ACTIVE"
+            (head) => !localIds.has(head.id) && head.state !== "ARCHIVED"
           );
           /**
            * Frozen copies: held here, and unreadable.
@@ -700,11 +708,12 @@ export function createKairosSyncHandlers(
                 | "PARTIAL"
                 | null,
               departments: head?.departments ?? state?.scopeDepartments ?? null,
-              // The head, never the cached state: the question is whether what
-              // the server is offering now is wider than what we last pulled
-              // under, and answering it from the same cached row on both sides
-              // can only ever say no.
-              scopeWidened: readScopeWidened(state, head),
+              // The PULLED scope against the head. The question is whether what
+              // the server offers now is wider than what the copy was downloaded
+              // under — and `state.scopeKind`/`scopeDepartments` are refreshed
+              // by the very probe that just ran, so comparing those with the
+              // head compared the server's answer with itself and always said no.
+              scopeWidened: readScopeWidened(pulledScope(state), head),
               writeScope: writeScopeKindFor(relation, ownership),
               structureEditable: state?.structureEditable ?? false,
               handbacksPending: head?.handbacksPending ?? 0,
@@ -832,12 +841,17 @@ export function createKairosSyncHandlers(
 
     [KAIROS_SYNC_CHANNELS.previewPull]: async (
       _event,
-      request: { ou: string; planId: string }
+      request: { ou: string; planId: string; full?: boolean }
     ) => envelope(await attempt(() => runPull(request, false), request.planId)),
 
     [KAIROS_SYNC_CHANNELS.pull]: async (
       _event,
-      request: { ou: string; planId: string; replaceLocalPlanId?: string | null }
+      request: {
+        ou: string;
+        planId: string;
+        replaceLocalPlanId?: string | null;
+        full?: boolean;
+      }
     ) => envelope(await attempt(() => runPull(request, true), request.planId)),
 
     // ------------------------------------------------------------ publish
@@ -911,7 +925,7 @@ export function createKairosSyncHandlers(
           // me". Costs the probe, which is cached and usually a 304.
           const probe = await fetchHeads(db, client, scope.ou);
           const widened = readScopeWidened(
-            getSyncState(db, request.planId),
+            pulledScope(getSyncState(db, request.planId)),
             headFor(probe.heads, request.planId)
           );
           const result = await reconcilePlan(db, client, request.planId, widened);
@@ -975,23 +989,84 @@ export function createKairosSyncHandlers(
 
     // -------------------------------------------------------- delegation
 
+    /**
+     * Everything the grid needs to decide what is editable, in one answer.
+     *
+     * `/department-ownership` is the authority on departments, but it is not
+     * the whole story, and the two things it leaves out were each the cause of
+     * a grid that stayed editable when it should not have been:
+     *
+     * - **A support lease.** An EXCLUSIVE lease sets the plan to
+     *   `LOCKED_BY_SUPPORT` and the server refuses the owner's commits with
+     *   423, but the ownership body still described their departments as
+     *   writable, and the lease itself was only ever fetched on the Sync page.
+     *   The probe carries each plan's `state`, and that state is part of the
+     *   probe's ETag, so reading it here costs a conditional request that is a
+     *   304 in the steady state — and the grid locks the moment the lease is
+     *   taken, instead of at the first failed publish.
+     *
+     * - **A read-only grant.** The server reports a read-only delegate's own
+     *   department as `writable: true` (a look displaces nobody), so the grant's
+     *   `canEdit` is the only thing that says otherwise. The renderer used to
+     *   fetch it in a second request after the first resolved, and treated "not
+     *   yet" and "failed" alike as permissive — so every read-only share was
+     *   editable for a moment, and for good if the second request failed.
+     *   Fetched here, alongside, so the clamp is in the same answer as the
+     *   thing it clamps and there is no window in which the grid is unclamped.
+     *
+     * `unconditional` is the human escape hatch, and it is on no automatic
+     * path: it bypasses `If-None-Match` so somebody staring at a lock nobody
+     * holds can settle in one click whether this computer is serving a stale
+     * body or the server really is saying no. Every other caller stays
+     * conditional — see `fetchOwnership`, which spends the same request by
+     * itself when the cached answer contradicts itself.
+     */
     [KAIROS_SYNC_CHANNELS.departmentOwnership]: async (
       _event,
       request: { ou: string; planId: string; unconditional?: boolean }
     ) => {
       return envelope(
-        await attempt(async () => {
-          resolveOuScope(request.ou);
-          // `unconditional` is the human escape hatch, and it is on no automatic
-          // path: it bypasses `If-None-Match` so somebody staring at a lock
-          // nobody holds can settle in one click whether this computer is
-          // serving a stale body or the server really is saying no. Every other
-          // caller stays conditional — see `fetchOwnership`, which spends the
-          // same request by itself when the cached answer contradicts itself.
-          const result = await fetchOwnership(secureDb(), client, request.planId, {
+        await attempt(async (): Promise<PlanAccessAnswer> => {
+          const scope = resolveOuScope(request.ou);
+          const db = secureDb();
+          const result = await fetchOwnership(db, client, request.planId, {
             unconditional: request.unconditional === true,
           });
-          return result.ownership;
+          const ownership = result.ownership;
+
+          // The probe, for the plan's state. A failure here is not a failure of
+          // the answer: the grid falls back to the ownership body alone, which
+          // is exactly what it had before, and the server still refuses a write
+          // under a lease with 423.
+          let head: PlanHead | null = null;
+          try {
+            head = headFor((await fetchHeads(db, client, scope.ou)).heads, request.planId);
+          } catch {
+            head = null;
+          }
+          const relation = head?.relation ?? ownership?.me.relation ?? null;
+          const planState = head?.state ?? null;
+          // The holder's own client resolves as ADMIN_LEASE and is not locked by
+          // its own lease — that is the whole point of taking one.
+          const lockedBySupport =
+            planState === "LOCKED_BY_SUPPORT" && relation !== "ADMIN_LEASE";
+
+          // The caller's own grant, for a delegate. `GET /delegations` answers a
+          // DELEGATE with their own row and nothing else, so this is one request
+          // and discloses nothing. Null on failure — and the renderer reads null
+          // for a DELEGATE as read-only, not as "no opinion".
+          let grant: PlanAccessAnswer["grant"] = null;
+          if (ownership?.me.relation === "DELEGATE") {
+            try {
+              const mine = (await delegation.listDelegations(client, request.planId))
+                .delegations[0];
+              if (mine) grant = { canEdit: mine.canEdit, canAddRows: mine.canAddRows };
+            } catch {
+              grant = null;
+            }
+          }
+
+          return { ownership, planState, lockedBySupport, grant };
         }, request.planId)
       );
     },
@@ -1826,13 +1901,36 @@ export function createKairosSyncHandlers(
   }
 
   async function runPull(
-    request: { ou: string; planId: string; replaceLocalPlanId?: string | null },
+    request: {
+      ou: string;
+      planId: string;
+      replaceLocalPlanId?: string | null;
+      /**
+       * Download the whole plan again, whatever the watermark says.
+       *
+       * The repair for a copy that is incomplete for a reason no counter
+       * records: a department granted before this build detected widening, a
+       * PII stream that was never pulled, a rebuild that kept the state row.
+       * `since=0` is the full pull — there is no separate bootstrap — and on
+       * apply both watermarks are zeroed FIRST, so a download that fails
+       * part-way leaves the plan asking for everything again rather than
+       * resuming a delta over a hole.
+       *
+       * Rows are upserted and tombstones applied, never wiped first: a full
+       * pull delivers every live row and every permanent tombstone, so the
+       * server's copy wins on everything it knows about, and a row only this
+       * computer holds survives for the next publish to send. The review the
+       * renderer shows beforehand names what the download would land on.
+       */
+      full?: boolean;
+    },
     apply: boolean
   ) {
     const scope = resolveOuScope(request.ou);
     const db = secureDb();
     const probe = await fetchHeads(db, client, scope.ou);
     const state = getSyncState(db, request.planId);
+    const full = request.full === true;
 
     /**
      * A delta is only meaningful against a copy we hold.
@@ -1862,8 +1960,16 @@ export function createKairosSyncHandlers(
      * is correct, only incomplete, and the shadow is what stops `purgesFor`
      * reading the rows we never had as rows we deleted.
      */
-    const widened = readScopeWidened(state, headFor(probe.heads, request.planId));
-    const since = onThisComputer && !widened ? state?.watermark ?? 0 : 0;
+    const widened = readScopeWidened(pulledScope(state), headFor(probe.heads, request.planId));
+    const fromZero = full || !onThisComputer || widened;
+    const since = fromZero ? 0 : state?.watermark ?? 0;
+
+    if (apply && full) {
+      // Before the first page, not after the last: see `full` above. The entity
+      // watermark is re-recorded by `completePull` when the download succeeds,
+      // and the PII one by `pullPii`; a failure in between leaves both at zero.
+      updateSyncState(db, request.planId, { watermark: 0, piiWatermark: 0 });
+    }
 
     const result = await pullPlan(stores(), db, client, {
       planId: request.planId,
@@ -1906,9 +2012,10 @@ export function createKairosSyncHandlers(
           request.planId,
           // A full pull of entities is a full pull of details too, or the two
           // halves of the plan end up describing different moments. That covers
-          // a widened scope as much as a first download: the details of a
-          // department we could not read are exactly as absent as its rows.
-          onThisComputer && !widened ? state?.piiWatermark ?? 0 : 0,
+          // a widened scope and a repair as much as a first download: the
+          // details of a department we could not read are exactly as absent as
+          // its rows.
+          fromZero ? 0 : state?.piiWatermark ?? 0,
           { apply: true }
         );
       } catch {

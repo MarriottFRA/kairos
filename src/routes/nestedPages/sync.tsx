@@ -160,6 +160,14 @@ interface PullReview {
    * either way, and the dialog says so. This only decides what is listed first.
    */
   forDepartments: string[];
+  /**
+   * A whole-plan re-download rather than the delta from the watermark.
+   *
+   * The repair for a copy that is incomplete for a reason no counter shows.
+   * Previewed and applied with the same flag, so the review names what a full
+   * pull would land on and the apply then performs exactly that.
+   */
+  full: boolean;
 }
 
 interface PublishReview {
@@ -382,15 +390,20 @@ export default function Sync() {
   // ------------------------------------------------------------- pull
 
   const handlePreviewPull = useCallback(
-    async (plan: PlanSyncStatus, forDepartments: string[] = []): Promise<void> => {
+    async (
+      plan: PlanSyncStatus,
+      forDepartments: string[] = [],
+      options: { full?: boolean } = {}
+    ): Promise<void> => {
       if (!ou) return;
+      const full = options.full === true;
       await run(plan.planId, async () => {
         // Both at once: the second is a local read and only worth making when
         // there IS unpublished work for the verdict to contrast the download
         // with. `Promise.all` rather than sequential — neither depends on the
         // other and the dialog waits for both.
         const [result, pending] = await Promise.all([
-          previewPullCall(ou, plan.planId),
+          previewPullCall(ou, plan.planId, { full }),
           plan.pendingChanges > 0
             ? pendingByDepartmentCall(ou, plan.planId)
             : Promise.resolve(null),
@@ -421,10 +434,26 @@ export default function Sync() {
           // to choose between a delta and a full pull.
           firstDownload: result.data.firstDownload,
           forDepartments,
+          full,
         });
       });
     },
     [ou, run, fail]
+  );
+
+  /**
+   * Download the whole plan again — the repair.
+   *
+   * The same review-then-apply as Download, with `full` set on both halves. It
+   * is what fixes a copy that is incomplete for a reason no counter records: a
+   * department granted before this build detected a widened scope, employee
+   * details that never came down, a database rebuilt around a kept state row.
+   */
+  const handleRedownload = useCallback(
+    (plan: PlanSyncStatus): void => {
+      void handlePreviewPull(plan, [], { full: true });
+    },
+    [handlePreviewPull]
   );
 
   /**
@@ -445,7 +474,9 @@ export default function Sync() {
   const handleConfirmPull = useCallback(async () => {
     if (!ou || !pullReview) return;
     await run(pullReview.planId, async () => {
-      const result = await pullCall(ou, pullReview.planId, pullReview.replaceLocalPlanId);
+      const result = await pullCall(ou, pullReview.planId, pullReview.replaceLocalPlanId, {
+        full: pullReview.full,
+      });
       if (syncFailed(result)) {
         fail(result.error.message);
         return;
@@ -470,7 +501,10 @@ export default function Sync() {
             : pullReview.firstDownload
               ? `Downloaded ${result.data.total} rows. The plan is now on this computer — ` +
                 "open it from the Positions page."
-              : `Downloaded ${result.data.total} rows.`
+              : pullReview.full
+                ? `Downloaded the whole plan again — ${result.data.total} rows. This ` +
+                  "computer now holds everything the server shares with you."
+                : `Downloaded ${result.data.total} rows.`
         ),
       });
       // Not blanks. A record whose key has been erased is unrecoverable, and
@@ -1307,6 +1341,7 @@ export default function Sync() {
           }
           onReconcile={() => void handleReconcile(plan)}
           onRebuildShadow={() => void handleRebuildShadow(plan)}
+          onRedownload={() => handleRedownload(plan)}
           onOpenDelegation={(delegationId) =>
             // The hint saves the Delegation page a round trip and, more to the
             // point, lets it name the plan before anything renders. Matched on
@@ -1427,7 +1462,13 @@ export default function Sync() {
 
       <ReviewDialog
         open={pullReview !== null}
-        title={pullReview?.firstDownload ? "Download this plan" : "Download changes"}
+        title={
+          pullReview?.firstDownload
+            ? "Download this plan"
+            : pullReview?.full
+              ? "Download the whole plan again"
+              : "Download changes"
+        }
         direction="pull"
         busy={busyPlan !== null}
         byType={pullReview?.byType ?? {}}

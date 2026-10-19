@@ -64,7 +64,7 @@ export function useDelegationOverview(
     void Promise.all(
       ids.map(async (planId) => {
         const result = await departmentOwnership(ou, planId);
-        return [planId, syncFailed(result) ? null : result.data] as const;
+        return [planId, syncFailed(result) ? null : result.data.ownership] as const;
       })
     ).then((entries) => {
       if (cancelled) return;

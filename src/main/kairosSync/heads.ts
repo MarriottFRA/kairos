@@ -153,6 +153,13 @@ export async function fetchHeads(
     // administrator — and the banner is therefore stating something the server
     // has just contradicted. Local data is untouched either way; the banner was
     // never what protected it.
+    //
+    // NOT `pulledScopeKind`/`pulledScopeDepartments`. Those record what the
+    // local copy was downloaded under and are written by `completePull` alone.
+    // Writing the offered scope here as well is what made a widened grant
+    // undetectable: a grant change moves the heads ETag, so the 200 that
+    // carried the wider scope overwrote the stored one before any pull could
+    // compare the two.
     updateSyncState(db, plan.id, {
       relation: plan.relation,
       scopeKind: plan.scopeKind,

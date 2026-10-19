@@ -140,6 +140,16 @@ export interface PlanSyncCardProps {
   /** `GET /manifest` — adopts the server's hashes into the shadow. */
   onRebuildShadow?: () => void;
   /**
+   * Download the whole plan again from the server, ignoring the watermark.
+   *
+   * The repair for a copy that is incomplete for a reason no counter shows:
+   * departments granted before this build detected a widened scope, people
+   * whose details never came down, a database rebuilt around a kept state row.
+   * Routes through the same review as Download, so what it would land on is
+   * named before anything is written.
+   */
+  onRedownload?: () => void;
+  /**
    * A fresher `/department-ownership` answer than the status call carried.
    *
    * The status call derives `plan.delegation` from whatever was last cached,
@@ -184,6 +194,7 @@ export default function PlanSyncCard({
   onDownloadForDelegation,
   onReconcile,
   onRebuildShadow,
+  onRedownload,
   delegationOverride,
   onTransfer,
   onDeleteFromServer,
@@ -640,11 +651,19 @@ export default function PlanSyncCard({
             />
           </MenuItem>
         )}
+        {plan.published && plan.onThisComputer && plan.readable && onRedownload && (
+          <MenuItem onClick={runMore(onRedownload)} disabled={busy}>
+            <ListItemText
+              primary="Download the whole plan again"
+              secondary="When departments or people are missing here. The server's copy wins; you see what it lands on first."
+            />
+          </MenuItem>
+        )}
         {plan.published && onRebuildShadow && (
           <MenuItem onClick={runMore(onRebuildShadow)} disabled={busy}>
             <ListItemText
               primary="Repair sync state"
-              secondary="After rebuilding the database or running an import."
+              secondary="Re-reads what the server holds, downloads nothing. After rebuilding the database or running an import."
             />
           </MenuItem>
         )}

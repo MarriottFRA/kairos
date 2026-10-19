@@ -17,7 +17,7 @@ import {
   applyManualInputKpiStats,
   applyManualInputScenarioScope,
 } from "./main/manualInput/schema";
-import { KAIROS_SYNC_TABLES_SQL } from "./main/kairosSync/schema";
+import { KAIROS_SYNC_TABLES_SQL, ensureKairosSyncColumns } from "./main/kairosSync/schema";
 import { SECURE_DB_PATH, ensureDataDir } from "./main/paths";
 
 // Kairos secure store: the encrypted-at-rest database for feature data.
@@ -299,6 +299,10 @@ function createSchema(handle: SecureDb): void {
   // it lives here rather than in the plaintext store because a content hash over
   // a payload containing an employee name is a guessing oracle.
   handle.exec(KAIROS_SYNC_TABLES_SQL);
+  // Columns added to kairos_sync_state after the baseline: a plain CREATE cannot
+  // add them to an existing table, so this is the one guarded ALTER the sync
+  // tables carry. Additive and idempotent.
+  ensureKairosSyncColumns(handle);
 
   // Stamp the baseline (1) without downgrading; the runner owns anything above.
   handle

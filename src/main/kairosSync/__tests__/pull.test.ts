@@ -115,5 +115,47 @@ describe("pullPlan bookkeeping", () => {
 
     expect(getSyncState(db, PLAN)?.watermark).toBe(0);
     expect(getSyncState(db, PLAN)?.lastPulledAt).toBeNull();
+    // Nor the pulled scope: nothing was pulled.
+    expect(getSyncState(db, PLAN)?.pulledScopeKind).toBeNull();
+  });
+
+  /**
+   * The scope the copy was taken under lands with the watermark, in columns
+   * nothing else writes. This is the input to `readScopeWidened` on every later
+   * probe; the probe refreshes `scopeKind`/`scopeDepartments` and must not be
+   * able to touch these.
+   */
+  it("records the scope the copy was pulled under, separately from the current one", async () => {
+    const db = makeDb();
+
+    await pullPlan(
+      STORES(),
+      db,
+      stubClient({ scope: { kind: "PARTIAL", departments: ["D0010", "D0610"] } }),
+      { planId: PLAN, ou: OU, since: 0, apply: true }
+    );
+
+    const state = getSyncState(db, PLAN);
+    expect(state?.pulledScopeKind).toBe("PARTIAL");
+    expect(state?.pulledScopeDepartments).toEqual(["D0010", "D0610"]);
+    // The current-scope columns are written too, for display; a probe is free
+    // to move those afterwards.
+    expect(state?.scopeKind).toBe("PARTIAL");
+    expect(state?.scopeDepartments).toEqual(["D0010", "D0610"]);
+  });
+
+  it("records a full scope with no department list", async () => {
+    const db = makeDb();
+
+    await pullPlan(STORES(), db, stubClient(), {
+      planId: PLAN,
+      ou: OU,
+      since: 0,
+      apply: true,
+    });
+
+    const state = getSyncState(db, PLAN);
+    expect(state?.pulledScopeKind).toBe("FULL");
+    expect(state?.pulledScopeDepartments).toBeNull();
   });
 });

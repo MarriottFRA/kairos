@@ -241,7 +241,7 @@ export default function DelegationPage() {
         activityCall(ou, planId),
         statusCall(ou),
       ]);
-    if (!syncFailed(ownershipResult)) setOwnership(ownershipResult.data);
+    if (!syncFailed(ownershipResult)) setOwnership(ownershipResult.data.ownership);
     if (!syncFailed(listResult)) setDelegations(listResult.data.delegations);
     if (!syncFailed(departmentsResult)) setDepartments(departmentsResult.data.departments);
     // Presence is advisory. Failing to fetch it is not worth a word on screen.

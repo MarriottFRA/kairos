@@ -23,6 +23,11 @@
  * same shape as every other `src/main/<feature>/schema.ts`.
  */
 
+import type Database from "better-sqlite3-multiple-ciphers";
+
+/** Just enough of a handle to run DDL against. Type-only; nothing is imported. */
+type SchemaDb = Pick<InstanceType<typeof Database>, "prepare" | "exec">;
+
 export const KAIROS_SYNC_TABLES_SQL = `
   -- What the server last confirmed it holds, per entity. Supplies baseHash on a
   -- commit and the client side of POST /manifest/diff.
@@ -70,6 +75,17 @@ export const KAIROS_SYNC_TABLES_SQL = `
       relation           TEXT,
       scope_kind         TEXT,
       scope_departments  TEXT,
+      -- The READ scope the local copy was last PULLED under. Written by
+      -- completePull and nothing else.
+      --
+      -- Separate from scope_kind/scope_departments above on purpose: those are
+      -- refreshed by every probe and by the ownership cache, so by the time a
+      -- pull compared "what I hold" with "what the server offers" both sides
+      -- held the server's current answer and a widened grant was never
+      -- detected. The newly visible department's older rows and PII then never
+      -- arrived, because a delta from the watermark predates them.
+      pulled_scope_kind        TEXT,
+      pulled_scope_departments TEXT,
       structure_editable INTEGER NOT NULL DEFAULT 0,
       -- Superseded by kairos_ou_state.heads_etag: the heads answer is about a
       -- whole property, not about a plan. Retained so an older build downgrading
@@ -113,3 +129,47 @@ export const KAIROS_SYNC_TABLES_SQL = `
       fetched_at  TEXT
   );
 `;
+
+/**
+ * Columns added to `kairos_sync_state` after the baseline shipped.
+ *
+ * `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
+ * exists, and `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so each one is
+ * guarded on `PRAGMA table_info` — the same shape as `blocks/schema.ts` and
+ * `calendar/schema.ts`. Additive only, no DEFAULT needed on a nullable TEXT, so
+ * SQLite rewrites nothing.
+ *
+ * Any `db` works, including the in-memory one the tests use; `secure_db.ts`
+ * runs it right after the table DDL on every unlock.
+ */
+export function ensureKairosSyncColumns(db: SchemaDb): void {
+  const present = new Set(
+    (db.prepare("PRAGMA table_info(kairos_sync_state)").all() as Array<{ name: string }>).map(
+      (column) => column.name
+    )
+  );
+
+  const added: string[] = [];
+  for (const column of ["pulled_scope_kind", "pulled_scope_departments"]) {
+    if (present.has(column)) continue;
+    db.exec(`ALTER TABLE kairos_sync_state ADD COLUMN ${column} TEXT`);
+    added.push(column);
+  }
+
+  // Seed the new columns from the only record an existing install has of what
+  // it pulled under. That record may already have been overwritten by a probe
+  // — which is the bug the columns exist to end — so it can only ever be as
+  // wide as the truth, never narrower. The one failure mode left is a copy
+  // that is narrower than its recorded scope, and the remedy for that is the
+  // same "Download the whole plan again" the user has anyway. Plans never
+  // pulled (watermark 0) stay null: unprovable, and `readScopeWidened` reads
+  // null as "do nothing".
+  if (added.includes("pulled_scope_kind")) {
+    db.exec(
+      `UPDATE kairos_sync_state
+          SET pulled_scope_kind = scope_kind,
+              pulled_scope_departments = scope_departments
+        WHERE pulled_scope_kind IS NULL AND watermark > 0`
+    );
+  }
+}

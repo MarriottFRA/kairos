@@ -22,6 +22,7 @@ import {
   MyDelegationList,
   PendingByDepartment,
   PiiPullResponse,
+  PlanAccessAnswer,
   PlanSyncStatus,
   ProbeResponse,
   PublishPreviewResponse,
@@ -48,7 +49,6 @@ import {
   Delegation,
   DelegatableDepartments,
   DelegationCandidates,
-  DepartmentOwnership,
   HandbackResult,
   KpiSeriesRequest,
   KpiSeriesResponse,
@@ -159,16 +159,26 @@ export function registerPlan(
   return call<PlanSummary>(KAIROS_SYNC_CHANNELS.registerPlan, { ou, planId });
 }
 
-/** Download and summarise, writing nothing. Show this before calling `pull`. */
+/**
+ * Download and summarise, writing nothing. Show this before calling `pull`.
+ *
+ * `full` previews a whole-plan re-download (`since=0`) rather than the delta
+ * from the watermark — the same flag goes to `pull` afterwards.
+ */
 export function previewPull(
   ou: string,
-  planId: string
+  planId: string,
+  options: { full?: boolean } = {}
 ): Promise<
   SyncOutcome<
     PullPreview & { applied: boolean; reset: boolean; firstDownload: boolean }
   >
 > {
-  return call(KAIROS_SYNC_CHANNELS.previewPull, { ou, planId });
+  return call(KAIROS_SYNC_CHANNELS.previewPull, {
+    ou,
+    planId,
+    full: options.full === true,
+  });
 }
 
 /**
@@ -181,11 +191,15 @@ export function previewPull(
  * `createdLocalPlan` says the plan is now listed on this computer because this
  * download put it there — which can happen with `total: 0`, when the server
  * holds the plan but has no rows in it this caller had not already received.
+ *
+ * `full` re-downloads the whole plan from `since=0`, both streams — the repair
+ * for a copy that is missing departments or people. See `PullRequest.full`.
  */
 export function pull(
   ou: string,
   planId: string,
-  replaceLocalPlanId?: string | null
+  replaceLocalPlanId?: string | null,
+  options: { full?: boolean } = {}
 ): Promise<
   SyncOutcome<
     PullPreview & {
@@ -209,7 +223,12 @@ export function pull(
     }
   >
 > {
-  return call(KAIROS_SYNC_CHANNELS.pull, { ou, planId, replaceLocalPlanId });
+  return call(KAIROS_SYNC_CHANNELS.pull, {
+    ou,
+    planId,
+    replaceLocalPlanId,
+    full: options.full === true,
+  });
 }
 
 /** What a publish would send, what it withholds, and what has no department. */
@@ -293,8 +312,8 @@ export function departmentOwnership(
   ou: string,
   planId: string,
   options: { unconditional?: boolean } = {}
-): Promise<SyncOutcome<DepartmentOwnership | null>> {
-  return call<DepartmentOwnership | null>(KAIROS_SYNC_CHANNELS.departmentOwnership, {
+): Promise<SyncOutcome<PlanAccessAnswer>> {
+  return call<PlanAccessAnswer>(KAIROS_SYNC_CHANNELS.departmentOwnership, {
     ou,
     planId,
     unconditional: options.unconditional === true,
@@ -515,7 +534,7 @@ export async function delegationView(
     planId,
     delegations: delegations.ok ? delegations.data.delegations : [],
     departments: departments.ok ? departments.data.departments : [],
-    ownership: ownership.ok ? ownership.data : null,
+    ownership: ownership.ok ? ownership.data.ownership : null,
   };
 }
 

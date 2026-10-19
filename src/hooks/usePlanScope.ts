@@ -58,8 +58,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { departmentOwnership, listDelegations } from "../services/kairosSyncService";
-import { syncFailed } from "../shared/kairosSync/ipc";
+import { departmentOwnership } from "../services/kairosSyncService";
+import { PlanAccessAnswer, syncFailed } from "../shared/kairosSync/ipc";
 import { DepartmentOwnership, Relation } from "../shared/kairosSync/protocol";
 import {
   DepartmentWritePolicy,
@@ -102,14 +102,16 @@ export interface PlanScope {
    * May this user create new positions?
    *
    * `canAddRows` is one of the four flags the owner set when they granted, and
-   * the server enforces it — but it is not on `/department-ownership`, so it
-   * takes a second call to `GET /plans/{id}/delegations` to learn. That call is
-   * granted to DELEGATE and returns only their own row, so it costs one request
-   * and discloses nothing.
+   * the server enforces it — but it is not on `/department-ownership`, so the
+   * main process reads it off `GET /plans/{id}/delegations` in the same answer.
+   * That call is granted to DELEGATE and returns only their own row, so it costs
+   * one request and discloses nothing.
    *
-   * `undefined` means "not asked, or the ask failed", and every consumer reads
-   * that as PERMISSIVE. The server is the enforcement point; an offline delegate
-   * must not silently lose the ability to add rows they legitimately hold.
+   * `undefined` for anybody who is not a delegate: the flag cannot apply, and
+   * every consumer reads that as unrestricted. For a DELEGATE whose grant could
+   * not be read it is `false`, not `undefined` — the grant is the only thing
+   * that says what a delegate may do, and offering a button whose only outcome
+   * is a 403 is the failure this hook exists to prevent.
    */
   canAddRows: boolean | undefined;
   /**
@@ -117,11 +119,20 @@ export interface PlanScope {
    *
    * True for `GLOBAL_ADMIN` — an administrator without a support lease reads
    * everything and writes nothing, deliberately, so that looking at a hotel's
-   * plan is not the same act as changing it. A lease held by SOMEBODY ELSE is
-   * not visible here; it surfaces as `423 kairos_plan_locked_by_support` at save
-   * time, which the Sync page explains with the ticket reference.
+   * plan is not the same act as changing it. Also true while SOMEBODY ELSE
+   * holds an EXCLUSIVE support lease: the server refuses every commit with
+   * `423 kairos_plan_locked_by_support` meanwhile, and the grid should say so
+   * before the user types rather than after they publish. See `lockedBySupport`.
    */
   planLocked: boolean;
+  /**
+   * An EXCLUSIVE support lease is held on this plan by somebody other than this
+   * user. Read off the probe's `state` for the plan, which is part of the
+   * probe's ETag, so it arrives on the same focus revalidation as everything
+   * else here and costs a 304 in the steady state. The lease holder's own client
+   * is never locked by their own lease.
+   */
+  lockedBySupport: boolean;
   /** True while the plan has never been published — the local file is the copy. */
   unpublished: boolean;
   /**
@@ -226,8 +237,13 @@ export function usePlanScope(
   const [notShared, setNotShared] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [canAddRows, setCanAddRows] = useState<boolean | undefined>(undefined);
-  const [grantCanEdit, setGrantCanEdit] = useState<boolean | undefined>(undefined);
+  const [lockedBySupport, setLockedBySupport] = useState(false);
+  /**
+   * The caller's own grant, for a delegate. Arrives in the SAME answer as the
+   * ownership body — see the `departmentOwnership` handler — so there is no
+   * render in which the departments are known and the clamp on them is not.
+   */
+  const [grant, setGrant] = useState<PlanAccessAnswer["grant"]>(null);
   /**
    * The re-ask trigger, carrying whether that particular ask ignores the cache.
    *
@@ -258,6 +274,8 @@ export function usePlanScope(
   useEffect(() => {
     if (!ou || !planId) {
       setOwnership(null);
+      setLockedBySupport(false);
+      setGrant(null);
       setUnpublished(true);
       setNotShared(false);
       setError(null);
@@ -275,6 +293,8 @@ export function usePlanScope(
           // Offline, signed out, or simply not published: the app is standalone
           // first, so none of these is a failure the user needs to see.
           setOwnership(null);
+          setLockedBySupport(false);
+          setGrant(null);
           // NOT `unpublished` for a locked plan. That flag is the permissive
           // default and would hand the grid an unrestricted copy of exactly the
           // data the server has stopped serving.
@@ -289,11 +309,13 @@ export function usePlanScope(
           );
           return;
         }
-        setOwnership(result.data);
+        setOwnership(result.data.ownership);
+        setLockedBySupport(result.data.lockedBySupport);
+        setGrant(result.data.grant);
         // A null body with a successful call means the plan exists but this
         // client has no cached copy and the server answered 304 — rare, and
         // treated as "ask again" rather than "unrestricted".
-        setUnpublished(result.data === null);
+        setUnpublished(result.data.ownership === null);
         setNotShared(false);
         setError(null);
       })
@@ -306,50 +328,24 @@ export function usePlanScope(
     };
   }, [ou, planId, nonce]);
 
-  /**
-   * The delegation's own permission flags, for the two flags the grid needs.
-   *
-   * Only ever fetched for somebody who actually holds a delegation — an owner's
-   * page must not pay a request to learn something that cannot apply to them.
-   * A failure leaves both `undefined`, which is permissive: see `canAddRows`.
-   *
-   * `canEdit` is the read-only switch itself, and it is read here as well as
-   * trusted to shape the ownership answer: `writable` describes who HOLDS each
-   * department, and a read-only delegate displaces nobody — so this flag is the
-   * one place the grant's own read-only-ness is stated outright.
-   */
-  useEffect(() => {
-    const relation = ownership?.me.relation;
-    if (!ou || !planId || relation !== "DELEGATE") {
-      setCanAddRows(undefined);
-      setGrantCanEdit(undefined);
-      return;
-    }
-
-    let cancelled = false;
-    listDelegations(ou, planId)
-      .then((result) => {
-        if (cancelled || syncFailed(result)) return;
-        // The server returns only this caller's own grant on this route, so a
-        // single row is the expected shape. More than one would mean an owner is
-        // reading it, and `relation` has already ruled that out.
-        const mine = result.data.delegations[0];
-        if (mine) {
-          setCanAddRows(mine.canAddRows);
-          setGrantCanEdit(mine.canEdit);
-        }
-      })
-      .catch(() => {
-        // Permissive on failure, deliberately.
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [ou, planId, ownership?.me.relation, nonce]);
-
   return useMemo<PlanScope>(() => {
     const departments = ownership?.departments ?? [];
+    const relation = ownership?.me.relation ?? null;
+    /**
+     * The grant's own flags, for a delegate — and FAIL CLOSED when unknown.
+     *
+     * `canEdit` is the read-only switch itself: `writable` describes who HOLDS
+     * each department, and a read-only delegate displaces nobody, so the server
+     * reports their own department as writable and this flag is the one place
+     * the grant's read-only-ness is stated. It used to arrive in a second
+     * request after the ownership answer, and "not yet" and "failed" were both
+     * read as permissive — so every read-only share was editable for a render
+     * or two, and stayed editable if that second request failed. It now rides
+     * in the same answer, and a DELEGATE with no readable grant is read-only
+     * until one arrives. For anybody else the flags cannot apply.
+     */
+    const grantCanEdit = relation === "DELEGATE" ? grant?.canEdit ?? false : undefined;
+    const canAddRows = relation === "DELEGATE" ? grant?.canAddRows ?? false : undefined;
     // A plan the server refuses to discuss has no writable departments and no
     // readable ones. An EMPTY set, never `undefined` — the two mean opposite
     // things here, and `undefined` is the one that unlocks the grid.
@@ -380,7 +376,7 @@ export function usePlanScope(
         : ownership === null
           ? undefined
           : new Set(departments.filter((row) => row.readable).map((row) => row.code)),
-      relation: ownership?.me.relation ?? null,
+      relation,
       scopeKind: ownership?.me.scopeKind ?? null,
       // Unpublished plans keep the full editor — the demotion only applies to a
       // plan the server has an opinion about. A locked one is not unpublished.
@@ -388,12 +384,13 @@ export function usePlanScope(
       // `canEdit: false` strips every write capability, adding rows included,
       // whatever the separate `canAddRows` flag was set to.
       canAddRows: notShared || grantCanEdit === false ? false : canAddRows,
-      planLocked: notShared || ownership?.me.relation === "GLOBAL_ADMIN",
+      planLocked: notShared || relation === "GLOBAL_ADMIN" || lockedBySupport,
+      lockedBySupport,
       unpublished,
       notShared,
       loading,
       error,
       refresh,
     };
-  }, [ownership, unpublished, notShared, canAddRows, grantCanEdit, loading, error, refresh]);
+  }, [ownership, unpublished, notShared, grant, lockedBySupport, loading, error, refresh]);
 }
