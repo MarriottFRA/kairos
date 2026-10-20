@@ -525,6 +525,26 @@ export default function Sync() {
             "erased on the server. The positions themselves are unaffected.",
         });
       }
+      if (people && people.orphaned > 0) {
+        setToast({
+          severity: "warning",
+          message:
+            `${people.orphaned} employee ${
+              people.orphaned === 1 ? "record was" : "records were"
+            } skipped because the server has no position for them. Everything ` +
+            "else downloaded normally.",
+        });
+      }
+      // The rows landed; the people did not. Said out loud, because a download
+      // that reports success with the names missing is the bug this replaces.
+      if (people?.error) {
+        setToast({
+          severity: "error",
+          message:
+            "The plan downloaded, but its employee details did not finish: " +
+            `${people.error}. Download again to retry.`,
+        });
+      }
       // Only meaningful on a first download, and only when the server had no
       // plan record of its own to send. Said out loud because it is the answer
       // to "why is this plan empty?" — the rows exist, nobody published them.

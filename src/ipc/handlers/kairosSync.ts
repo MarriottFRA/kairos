@@ -2025,6 +2025,7 @@ export function createKairosSyncHandlers(
      * an audit row server-side.
      */
     let piiResult: Awaited<ReturnType<typeof pii.pullPii>> | null = null;
+    let piiError: string | null = null;
     if (apply) {
       try {
         const state = getSyncState(db, request.planId);
@@ -2041,10 +2042,16 @@ export function createKairosSyncHandlers(
           fromZero ? 0 : state?.piiWatermark ?? 0,
           { apply: true }
         );
-      } catch {
+      } catch (error) {
         // Not fatal, and deliberately not a failed download: the rows that did
         // arrive are written and the watermark is already recorded. The next
         // download picks the details up from the same watermark.
+        //
+        // But never silent. Swallowing this is how one bad row left every
+        // machine holding a handful of employee details while the download
+        // reported success.
+        piiError = error instanceof Error ? error.message : String(error);
+        console.error(`[kairosSync] PII download failed for plan ${request.planId}:`, error);
       }
     }
 
@@ -2107,9 +2114,13 @@ export function createKairosSyncHandlers(
             applied: piiResult.applied,
             deleted: piiResult.deleted,
             unreadable: piiResult.unreadable,
+            orphaned: piiResult.orphaned,
             disabled: piiResult.disabled,
+            error: null,
           }
-        : null,
+        : piiError
+          ? { applied: 0, deleted: 0, unreadable: 0, orphaned: 0, disabled: false, error: piiError }
+          : null,
     };
   }
 

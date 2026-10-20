@@ -217,8 +217,12 @@ export function pull(
         deleted: number;
         /** Records whose key has been erased. Not blanks — say so. */
         unreadable: number;
+        /** Records for a position this computer does not hold, skipped. */
+        orphaned: number;
         /** The property has personal-data storage switched off. */
         disabled: boolean;
+        /** Why the details did not finish downloading; the rows still did. */
+        error: string | null;
       } | null;
     }
   >

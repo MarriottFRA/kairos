@@ -57,6 +57,12 @@ export interface PiiPullResult {
   deleted: number;
   /** Rows whose key is gone. Not blanks — say so in the UI. */
   unreadable: number;
+  /**
+   * Rows for a position this computer does not hold, skipped rather than
+   * written. See `pullPii` for why one of these must not end the download.
+   */
+  orphaned: number;
+  orphanedPositionIds: string[];
   pages: number;
   /** The property has personal-data storage switched off. */
   disabled: boolean;
@@ -87,6 +93,8 @@ export async function pullPii(
     applied: 0,
     deleted: 0,
     unreadable: 0,
+    orphaned: 0,
+    orphanedPositionIds: [],
     pages: 0,
     disabled: false,
   };
@@ -103,6 +111,7 @@ export async function pullPii(
       result.rows += page.rows.length;
       result.unreadable += page.unreadable;
 
+      const orphans = new Set<string>();
       for (const row of page.rows) {
         if (row.payload === null) {
           // Tombstone, or a record whose key no longer exists. Either way there
@@ -113,15 +122,47 @@ export async function pullPii(
           }
           continue;
         }
+        /**
+         * A record for a position we do not hold.
+         *
+         * `position_pii.position_id` is a foreign key, so the insert throws, and
+         * one such row used to end the whole stream: every row before it landed,
+         * nothing after it did, no watermark was recorded, and every later
+         * download stopped at the same row. The server can hold one — a record
+         * whose position was never stored, with a NULL department, which the
+         * server treats as plan-wide and sends to every reader. Skipped, counted,
+         * and kept out of the shadow, so a publish neither re-sends nor purges
+         * a row this computer never had.
+         */
+        if (apply && !positionExists(secureDb, row.positionId)) {
+          orphans.add(row.positionId);
+          result.orphaned += 1;
+          result.orphanedPositionIds.push(row.positionId);
+          console.warn(
+            `[kairosSync] PII for unknown position ${row.positionId} skipped ` +
+              `(plan ${planId}, page ${result.pages}, department ${row.department ?? "none"})`
+          );
+          continue;
+        }
         result.applied += 1;
-        if (apply) upsertPii(secureDb, piiFromPayload(row.payload));
+        if (apply) {
+          try {
+            upsertPii(secureDb, piiFromPayload(row.payload));
+          } catch (error) {
+            throw new Error(
+              `PII download stopped on page ${result.pages} at position ${row.positionId} ` +
+                `after ${result.applied - 1} rows: ${(error as Error).message}`,
+              { cause: error }
+            );
+          }
+        }
       }
 
       if (apply) {
         writeShadow(
           db,
           planId,
-          page.rows.map((row) => ({
+          page.rows.filter((row) => !orphans.has(row.positionId)).map((row) => ({
             entityType: "position_pii",
             entityId: row.positionId,
             hash: row.hash,
@@ -165,6 +206,10 @@ function upsertPii(db: Db, row: Record<string, unknown>): void {
      VALUES (${columns.map(() => "?").join(", ")})
      ON CONFLICT(position_id) DO UPDATE SET ${assignments}`
   ).run(...(columns.map((column) => row[column]) as never[]));
+}
+
+function positionExists(db: Db, positionId: string): boolean {
+  return prepared(db, `SELECT 1 FROM positions WHERE id = ?`).get(positionId) !== undefined;
 }
 
 function markPiiDeleted(db: Db, positionId: string): void {
